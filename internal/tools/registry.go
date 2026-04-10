@@ -1,0 +1,97 @@
+// Package tools
+// File: registry.go
+// Description: 도구 등록, 조회, LLM용 JSON Schema 변환을 담당하는 레지스트리
+// Responsibility: 도구 생명주기 관리 및 LLM 도구 정의 변환
+
+package tools
+
+import (
+	"fmt"
+	"sort"
+
+	"github.com/yourorg/infractl/internal/llm"
+)
+
+// Registry는 등록된 도구들을 관리하는 레지스트리이다.
+type Registry struct {
+	tools map[string]Tool
+}
+
+// NewRegistry는 빈 도구 레지스트리를 생성한다.
+func NewRegistry() *Registry {
+	return &Registry{
+		tools: make(map[string]Tool),
+	}
+}
+
+// Register는 도구를 레지스트리에 등록한다.
+// 같은 이름의 도구가 이미 등록되어 있으면 error를 반환한다.
+func (r *Registry) Register(tool Tool) error {
+	name := tool.Name()
+	if _, exists := r.tools[name]; exists {
+		return fmt.Errorf("tool already registered: %s", name)
+	}
+	r.tools[name] = tool
+	return nil
+}
+
+// Unregister는 이름으로 도구를 레지스트리에서 제거한다.
+// 커넥터 비활성화 시 해당 도구 세트를 제거하는 데 사용한다.
+func (r *Registry) Unregister(name string) {
+	delete(r.tools, name)
+}
+
+// Has는 이름으로 도구가 등록되어 있는지 확인한다.
+func (r *Registry) Has(name string) bool {
+	_, ok := r.tools[name]
+	return ok
+}
+
+// Get은 이름으로 도구를 조회한다.
+func (r *Registry) Get(name string) (Tool, bool) {
+	tool, ok := r.tools[name]
+	return tool, ok
+}
+
+// List는 등록된 모든 도구를 이름순으로 정렬하여 반환한다.
+func (r *Registry) List() []Tool {
+	result := make([]Tool, 0, len(r.tools))
+	for _, t := range r.tools {
+		result = append(result, t)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name() < result[j].Name()
+	})
+	return result
+}
+
+// GetEnabled는 IsEnabled()=true인 도구만 반환한다.
+// LLM에 전달할 도구 목록을 구성할 때 사용한다.
+func (r *Registry) GetEnabled() []Tool {
+	all := r.List()
+	result := make([]Tool, 0, len(all))
+	for _, t := range all {
+		if t.IsEnabled() {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+// ToToolDefs는 활성화된 도구를 OpenAI function calling 형식으로 변환한다.
+// LLM API 요청 시 tools 필드에 사용된다.
+func (r *Registry) ToToolDefs() []llm.ToolDef {
+	tools := r.GetEnabled()
+	defs := make([]llm.ToolDef, len(tools))
+	for i, t := range tools {
+		defs[i] = llm.ToolDef{
+			Type: "function",
+			Function: llm.FunctionDef{
+				Name:        t.Name(),
+				Description: t.Description(),
+				Parameters:  t.Parameters(),
+			},
+		}
+	}
+	return defs
+}
