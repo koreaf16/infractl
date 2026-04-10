@@ -1,8 +1,3 @@
-// Package tui
-// File: app.go
-// Description: bubbletea 메인 앱 모델 — TUI의 루트 컴포넌트
-// Responsibility: 전체 레이아웃 관리, 이벤트 라우팅, 에이전트 goroutine 실행
-
 package tui
 
 import (
@@ -21,7 +16,7 @@ import (
 	"github.com/yourorg/infractl/internal/store"
 )
 
-// AppModel은 bubbletea 메인 앱 모델이다.
+// AppModel is the main Bubble Tea application model.
 type AppModel struct {
 	chat       chatView
 	input      inputBar
@@ -37,49 +32,43 @@ type AppModel struct {
 	busy       bool
 	ctrlCCount int
 
-	// Claude CLI 스타일 shimmer 애니메이션
 	shimmer  shimmerState
-	progress *progressTree // 도구 실행 진행 트리
+	progress *progressTree
+	sp       spinner.Model
 
-	// context line (입력바 위 상태 표시)
-	sp          spinner.Model
-	activeTools activeToolMap // 병렬 실행 중인 도구 상태 맵 (toolID 기반)
+	activeTools activeToolMap
+	queue       inputQueue
+	selection   selectionState
 
-	// 메시지 큐 (busy 중 추가 입력을 순서대로 보관)
-	queue inputQueue
-	// 인터랙티브 셀렉션 컴포넌트
-	selection selectionState
+	selectHandler    *TUISelectHandler
+	activeServer     *store.Server
+	connectorMgr     *connector.Manager
+	mcpClients       []*mcp.Client
+	sessionStore     store.SessionStore
+	execLogStore     store.ExecLogStore
+	currentSessionID int64
+	confirmHandler   *TUIConfirmHandler
+	yoloMode         bool
+	idle             idleState
+	privilege        privilegePromptState
 
-	selectHandler    *TUISelectHandler  // /server 슬래시 명령 선택 UI용
-	activeServer     *store.Server      // 현재 접속된 타겟 서버
-	connectorMgr     *connector.Manager // Phase 5: /connectors 표시용
-	mcpClients       []*mcp.Client      // Phase 5: /mcp 런타임 상태용
-	sessionStore     store.SessionStore // Phase 5: 세션 영속화
-	execLogStore     store.ExecLogStore // Phase 5: 실행 이력 조회
-	currentSessionID int64              // Phase 5: 현재 세션 ID
-	confirm          confirmState        // Phase 5: 확인 오버레이 상태
-	confirmHandler   *TUIConfirmHandler  // YOLO 모드 활성화를 위한 핸들러 참조
-	yoloMode         bool                // true이면 확인 요청을 자동 승인
-	idle             idleState           // 쉘 명령 유휴 입력 오버레이 상태
+	thinkingLabel string
+	stats         turnStats
+	turnCount     int // 지금까지 시작된 턴 수 (구분선 출력 시점 판단용)
 
-	// 턴 통계
-	stats turnStats
+	history      toolHistory
+	histOverlay  toolOverlayState
 
-	// 도구 이력 (Ctrl+O 오버레이)
-	history    toolHistory
-	histOverlay toolOverlayState
-
-	// 인라인 모드 출력
-	box          *ProgramBox       // Program.Println()으로 채팅 스크롤백 출력
-	parker       *CursorParkWriter // 커서 파킹 (nil이면 비활성)
-	mdRend       *mdRenderer       // 스크롤백/스트리밍 마크다운 렌더링
-	streamTokens string      // 스트리밍 중 누적 토큰
-	streamLines  []string   // View()에 표시할 스트리밍 미리보기 줄
-	streamCache  stableCache // 스트리밍 마크다운 안정적 캐시
-	lastStreamAt time.Time   // 스트리밍 미리보기 마지막 렌더 시각
+	box          *ProgramBox
+	parker       *CursorParkWriter
+	mdRend       *mdRenderer
+	streamTokens string
+	streamLines  []string
+	streamCache  stableCache
+	lastStreamAt time.Time
 }
 
-// AppOptions는 NewApp에 전달되는 선택적 의존성이다.
+// AppOptions configures optional integrations for the app.
 type AppOptions struct {
 	InitialSessionID int64
 	HistoryStore     store.HistoryStore
@@ -87,34 +76,27 @@ type AppOptions struct {
 	MCPClients       []*mcp.Client
 	SessionStore     store.SessionStore
 	ExecLogStore     store.ExecLogStore
-	CursorParker     *CursorParkWriter  // 인라인 모드 커서 파킹 (nil이면 비활성)
-	ProgramBox       *ProgramBox        // 인라인 모드 Println 출력 (nil이면 비활성)
-	SelectHandler    *TUISelectHandler  // /server 슬래시 명령 선택 UI용 (nil이면 비활성)
-	ConfirmHandler   *TUIConfirmHandler // YOLO 모드 공유를 위한 확인 핸들러 (nil이면 비활성)
+	CursorParker     *CursorParkWriter
+	ProgramBox       *ProgramBox
+	SelectHandler    *TUISelectHandler
+	ConfirmHandler   *TUIConfirmHandler
 }
 
-// NewApp은 새 AppModel을 생성한다.
-func NewApp(
-	ag *agent.Agent,
-	cfg *config.Config,
-	st store.ServerStore,
-	mgr *executor.Manager,
-) AppModel {
+// NewApp constructs the base TUI app.
+func NewApp(ag *agent.Agent, cfg *config.Config, st store.ServerStore, mgr *executor.Manager) AppModel {
 	servers, _ := st.List(context.Background())
 	ctx, cancel := context.WithCancel(context.Background())
-
-	chat := newChatView(80, 20)
 
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = StyleSpinner
 
 	return AppModel{
-		chat:      chat,
+		chat:      newChatView(80, 20),
 		input:     newInputBar(80),
 		statusBar: newStatusBar(cfg.LLM.Model, len(servers)),
-		shimmer:   newShimmer(),
-		progress:  newProgressTree(),
+		shimmer:      newShimmer(),
+		progress:     newProgressTree(),
 		sp:        sp,
 		ag:        ag,
 		store:     st,
@@ -122,11 +104,11 @@ func NewApp(
 		cfg:       cfg,
 		ctx:       ctx,
 		cancel:    cancel,
-		mdRend:    newMdRenderer(74), // 초기 폭 (WindowSizeMsg 수신 시 갱신)
+		mdRend:    newMdRenderer(74),
 	}
 }
 
-// NewAppWithOptions는 Phase 5 의존성을 포함하여 AppModel을 생성한다.
+// NewAppWithOptions constructs the app with optional integrations enabled.
 func NewAppWithOptions(
 	ag *agent.Agent,
 	cfg *config.Config,
@@ -156,7 +138,7 @@ func NewAppWithOptions(
 func (m AppModel) Init() tea.Cmd {
 	return tea.Batch(
 		tea.EnableBracketedPaste,
-		tea.ShowCursor, // 인라인 모드: BubbleTea가 기본으로 숨기는 커서를 다시 표시
+		tea.ShowCursor,
 		initialWindowSizeCmd(m.parker),
 		m.input.Init(),
 	)
@@ -176,8 +158,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ShimmerTickMsg:
 		if m.busy {
-			cmd := m.shimmer.Tick()
-			if cmd != nil {
+			if cmd := m.shimmer.Tick(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
 		}
@@ -198,14 +179,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamLines = renderStreamingPreview(m.streamTokens, m.mdRend, &m.streamCache, 0)
 		}
 		m = m.resize()
-		// 첫 resize 시 배너를 스크롤백에 출력
-		if firstResize {
+		if firstResize && m.box != nil {
 			servers, _ := m.store.List(context.Background())
 			m.box.Println(welcomeBanner(m.cfg.LLM.Model, len(servers)))
 		}
+		return m, nil
 
 	case tea.MouseMsg:
-		// 인라인 모드에서는 터미널 네이티브 스크롤 사용
 		return m, nil
 
 	case tea.KeyMsg:
@@ -218,15 +198,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleSlashCommand(displayInput)
 		}
 		if m.busy {
-			// 실행 중: 큐에 적재
 			m.queue.Enqueue(displayInput, expandedInput)
 			if m.box != nil {
 				m.box.Println(renderSystemLine(
-					fmt.Sprintf("⏳ 대기열 추가 [%d]: %s", m.queue.Len(), truncateForQueue(displayInput, 60))))
+					fmt.Sprintf("queued [%d]: %s", m.queue.Len(), truncateForQueue(displayInput, 60))))
 			}
 			return m, nil
 		}
-		// idle: 즉시 실행
 		if m.sessionStore != nil && m.currentSessionID == 0 {
 			cmds = append(cmds, m.createSessionCmd(displayInput))
 		} else {
@@ -236,15 +214,25 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.activeTools.Clear()
 		m.progress.Reset()
 		m.stats.Start()
-		m.box.Println(renderUserInputLine(displayInput))
-		shimmerCmd := m.shimmer.Start("thinking...")
-		cmds = append(cmds, m.runAgent(expandedInput), m.sp.Tick, shimmerCmd)
+		if m.box != nil {
+			if m.turnCount > 0 {
+				m.box.Println(renderTurnSeparator(m.width))
+			}
+			m.box.Println(renderUserInputLine(displayInput, m.width))
+		}
+		m.turnCount++
+		label := m.thinkingLabel
+		if label == "" {
+			label = "thinking..."
+		}
+		cmds = append(cmds, m.runAgent(expandedInput), m.sp.Tick, m.shimmer.Start(label))
 		return m, tea.Batch(cmds...)
 
 	case SystemMsg:
 		if m.box != nil {
 			m.box.Println(renderSystemLine(string(msg)))
 		}
+		return m, nil
 
 	case TokenMsg:
 		m.shimmer.RecordActivity()
@@ -253,29 +241,35 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamLines = renderStreamingPreview(m.streamTokens, m.mdRend, &m.streamCache, 0)
 			m.lastStreamAt = time.Now()
 		}
+		return m, nil
 
-	case ThinkingTokenMsg:
-		m.shimmer.RecordActivity()
-		// AppModel(인라인 모드)은 추론 토큰을 직접 출력하지 않고
-		// shimmer 활동만 기록하여 지연 감지 방지
-
+	case ThinkingStartMsg:
+		m.thinkingLabel = ThinkingLabel(msg.Tier, msg.Model)
+		m.shimmer.SetText(m.thinkingLabel)
+		return m, nil
 	}
 
-	// 도구 이벤트 위임 (ToolStart/ShellOutput/ToolEnd/ResponseDone/Error/AgentDone/SubagentEvent)
-	if m2, cmd, handled := m.handleToolMsg(msg); handled {
-		return m2, cmd
+	if next, cmd, handled := m.handleSystemMsg(msg); handled {
+		return next, cmd
+	}
+	if next, cmd, handled := m.handleToolMsg(msg); handled {
+		return next, cmd
 	}
 
-	// 시스템 이벤트 위임 (Confirm/IdleInput/Select/ActiveServer)
-	if m2, cmd, handled := m.handleSystemMsg(msg); handled {
-		return m2, cmd
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
 	}
-
-	// 채팅창 업데이트 (스피너 애니메이션 등)
-	chatCmd := m.chat.Update(msg)
-	if chatCmd != nil {
-		cmds = append(cmds, chatCmd)
-	}
-
+	m = m.resize()
 	return m, tea.Batch(cmds...)
+}
+
+func (m AppModel) resize() AppModel {
+	m.input.setWidth(m.width)
+	maxInputH := max(1, min(m.height-5, max(3, m.height/3)))
+	m.input.setMaxHeight(maxInputH)
+	m.statusBar.setWidth(m.width)
+	m.shimmer.width = m.width
+	return m
 }

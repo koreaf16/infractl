@@ -18,12 +18,22 @@ func (m AppModel) handleToolMsg(msg tea.Msg) (AppModel, tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case ToolStartMsg:
 		m.activeTools.Add(msg.ToolID, msg.Name, msg.Target)
-		m.progress.AddTool(msg.ToolID, msg.Name, msg.Target)
-		m.shimmer.SetText(msg.Name)
+		desc, _ := msg.Args["description"].(string)
+		if phaseID, phaseName, ok := parsePhaseFromDescription(desc); ok {
+			m.progress.AddToolWithPhase(msg.ToolID, msg.Name, msg.Target, phaseID, phaseName, msg.Args)
+		} else {
+			m.progress.AddTool(msg.ToolID, msg.Name, msg.Target, msg.Args)
+		}
+		m.shimmer.SetText(toolShimmerLabel(msg.Name, msg.Args))
 		m.shimmer.bgCount = max(0, m.activeTools.RunningCount()-1)
-		m.streamLines = nil
-		if m.box != nil {
-			m.box.Println(renderToolHeaderLine(msg.Name, msg.Target, msg.Args))
+		// 스트리밍 미리보기를 영구 출력 후 초기화 (도구 실행 전 LLM 텍스트 유지)
+		if m.streamTokens != "" && m.box != nil {
+			m.box.Println(renderResponseText(m.streamTokens, m.mdRend))
+			m.streamTokens = ""
+			m.streamLines = nil
+			m.streamCache.Reset()
+		} else {
+			m.streamLines = nil
 		}
 		return m, nil, true
 
@@ -32,18 +42,22 @@ func (m AppModel) handleToolMsg(msg tea.Msg) (AppModel, tea.Cmd, bool) {
 		trimmed := strings.TrimRight(msg.Line, "\r\n")
 		if trimmed != "" {
 			m.progress.SetOutput(msg.ToolID, trimmed)
-			m.activeTools.AppendOutput(msg.ToolID, trimmed)
+			if !m.activeTools.IsBackgrounded(msg.ToolID) {
+				m.activeTools.AppendOutput(msg.ToolID, trimmed)
+			}
 		}
 		return m, nil, true
 
 	case ToolEndMsg:
+		isBackground := m.activeTools.IsBackgrounded(msg.ToolID)
+		isLastTool := m.activeTools.RunningCount() == 1 // Remove 전에 체크
 		var capturedLines []string
 		if prev := m.activeTools.MostRecent(); prev != nil && prev.toolID == msg.ToolID {
 			capturedLines = prev.shellLines
 		}
 		m.activeTools.Remove(msg.ToolID)
 		m.progress.CompleteTool(msg.ToolID, msg.Duration, msg.Success)
-		m.shimmer.bgCount = max(0, m.activeTools.RunningCount()-1)
+		m.shimmer.bgCount = m.activeTools.BackgroundCount()
 		m.stats.AddToolUse()
 		m.history.Add(toolHistoryEntry{
 			toolID:     msg.ToolID,
@@ -54,11 +68,36 @@ func (m AppModel) handleToolMsg(msg tea.Msg) (AppModel, tea.Cmd, bool) {
 			shellLines: capturedLines,
 		})
 		if m.activeTools.RunningCount() == 0 {
-			m.shimmer.SetText("thinking...")
+			label := m.thinkingLabel
+			if label == "" {
+				label = "thinking..."
+			}
+			m.shimmer.SetText(label)
 			m.streamLines = nil
 		}
 		if m.box != nil {
-			m.box.Println(toolSummary(msg.Name, nil, msg.Result, msg.Duration, msg.Success))
+			if isBackground {
+				m.box.Println(renderBackgroundDone(msg.Name, msg.Duration, msg.Success))
+			} else {
+				var args map[string]any
+				var target string
+				for _, item := range m.progress.items {
+					if item.toolID == msg.ToolID {
+						args = item.args
+						target = item.target
+						break
+					}
+				}
+				m.box.Println(renderToolHeaderLine(msg.Name, target, args))
+				m.box.Println(renderToolSummaryLine(msg.Name, args, msg.Result, msg.Duration, msg.Success))
+
+				// 마지막 툴 완료 직후 Done 표시 (LLM 응답 앞에 위치)
+				if isLastTool {
+					if summary := m.stats.Summary(); summary != "" {
+						m.box.Println(summary)
+					}
+				}
+			}
 		}
 		return m, nil, true
 
@@ -85,17 +124,22 @@ func (m AppModel) handleToolMsg(msg tea.Msg) (AppModel, tea.Cmd, bool) {
 		m.activeTools.Clear()
 		m.shimmer.Stop()
 		m.progress.Reset()
-		if summary := m.stats.Summary(); summary != "" && m.box != nil {
-			m.box.Println(summary)
-		}
 		m.streamTokens = ""
 		m.streamLines = nil
 		m.streamCache.Reset()
 		if entry, ok := m.queue.Dequeue(); ok {
 			m.progress.Reset()
 			m.stats.Start()
-			m.box.Println(renderUserInputLine(entry.displayInput))
-			shimmerCmd := m.shimmer.Start("thinking...")
+			if m.box != nil {
+				m.box.Println(renderTurnSeparator(m.width))
+			}
+			m.box.Println(renderUserInputLine(entry.displayInput, m.width))
+			m.turnCount++
+			label := m.thinkingLabel
+			if label == "" {
+				label = "thinking..."
+			}
+			shimmerCmd := m.shimmer.Start(label)
 			return m, tea.Batch(m.runAgent(entry.expandedInput), m.sp.Tick, shimmerCmd), true
 		}
 		m.busy = false
