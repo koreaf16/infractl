@@ -18,7 +18,9 @@ import (
 // Phase 7: Web UI 핸들러가 구현
 type EventHandler interface {
 	// OnThinking은 LLM이 응답 생성을 시작했을 때 호출된다.
-	OnThinking()
+	// tier는 사용 중인 LLM 티어 ("reasoning", "general", "fast"),
+	// model은 모델명 (예: "qwen-35b")이다.
+	OnThinking(tier string, model string)
 
 	// OnThinkingToken은 LLM의 내부 추론(thinking) 토큰을 받았을 때 호출된다.
 	// </think> 이전까지의 스트리밍 토큰이 전달된다.
@@ -50,34 +52,12 @@ type EventHandler interface {
 
 	// OnJobComplete는 백그라운드 작업이 완료되었을 때 호출된다.
 	OnJobComplete(jobID int, description string, success bool)
+
+	// OnRAGContext는 내부 지식(knowledge/learned_system)이 시스템 프롬프트에 주입될 때 호출된다.
+	// count는 주입된 항목 수이다.
+	OnRAGContext(count int)
 }
 
-// ConfirmRequest는 사용자 확인 요청 정보이다.
-type ConfirmRequest struct {
-	RiskLevel   tools.RiskLevel
-	ToolName    string
-	Target      string
-	Description string // 작업 설명
-	Step        int    // 현재 확인 단계 (1, 2, 3)
-	TotalSteps  int    // 전체 확인 단계 수
-	NeedInput   bool   // true이면 대상 이름을 직접 입력해야 함
-	TargetName  string // NeedInput=true일 때 일치해야 하는 대상 이름
-}
-
-// ConfirmResponse는 사용자 확인 응답이다.
-type ConfirmResponse struct {
-	Confirmed bool
-	UserInput string // NeedInput=true일 때 사용자가 입력한 텍스트
-	AllowAll  bool   // true이면 이후 모든 확인을 자동 승인 (YOLO 모드 활성화)
-}
-
-// ConfirmationHandler는 위험 작업 실행 전 사용자 확인을 처리하는 인터페이스이다.
-// TUIHandler와 REPLHandler가 구현한다.
-type ConfirmationHandler interface {
-	// RequestConfirm은 사용자에게 확인을 요청하고 응답을 반환한다.
-	// ctx가 취소되면 Confirmed=false인 ConfirmResponse를 반환한다.
-	RequestConfirm(ctx context.Context, req ConfirmRequest) (ConfirmResponse, error)
-}
 
 // IdleInputRequest는 명령 실행 중 유휴 상태가 감지되었을 때의 요청 정보이다.
 type IdleInputRequest struct {
@@ -93,10 +73,18 @@ type IdleInputResponse struct {
 	Abort bool   // true이면 프로세스를 종료한다.
 }
 
+
 // IdleInputHandler는 명령 실행 중 유휴(인터랙티브 프롬프트 대기) 상태를 처리한다.
 // SmartIdleInputHandler(LLM 판단 + TUI 폴백)가 기본 구현이다.
 type IdleInputHandler interface {
 	// RequestIdleInput은 유휴 상태에 대한 응답을 결정하고 반환한다.
 	// ctx가 취소되면 Abort=true인 IdleInputResponse를 반환한다.
 	RequestIdleInput(ctx context.Context, req IdleInputRequest) (IdleInputResponse, error)
+}
+
+// QuestionHandler는 다중 선택형 질의응답을 처리하는 인터페이스이다.
+// TUIHandler가 구현하며, Agent가 이를 통해 도구 호출 시 UI와 통신한다.
+type QuestionHandler interface {
+	// RequestQuestion은 사용자에게 질문을 던지고 답변을 대기한다.
+	RequestQuestion(ctx context.Context, req tools.QuestionRequest) (tools.QuestionResponse, error)
 }

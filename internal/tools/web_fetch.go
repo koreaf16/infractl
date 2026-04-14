@@ -30,12 +30,21 @@ type WebFetchTool struct {
 	LLMClient   llm.Client    // 기본 general-tier 클라이언트 (폴백용)
 	LLMRegistry *llm.Registry // fast-tier 자동 요약에 사용 (nil이면 LLMClient 폴백)
 	Reranker    rag.Reranker  // nil 허용 — 향후 다중 URL 결과 리랭킹에 사용
+	OutputCb    func(string)  // 단계별 진행 상황을 실시간으로 전달하는 콜백 (nil 허용)
+}
+
+// emit은 OutputCb가 설정된 경우 진행 상황 메시지를 전달한다.
+func (t *WebFetchTool) emit(msg string) {
+	if t.OutputCb != nil {
+		t.OutputCb(msg)
+	}
 }
 
 func (t *WebFetchTool) Name() string        { return "web_fetch" }
 func (t *WebFetchTool) RiskLevel() RiskLevel { return RiskNone }
 func (t *WebFetchTool) IsReadOnly() bool     { return true }
-func (t *WebFetchTool) IsEnabled() bool      { return IsInternetAvailable() }
+// IsEnabled는 항상 true를 반환한다. 인터넷 가용성은 Execute() 시점에서 판단한다.
+func (t *WebFetchTool) IsEnabled() bool { return true }
 
 func (t *WebFetchTool) Description() string {
 	return "Fetch the content of a URL and convert it to Markdown. Optionally provide a prompt to extract specific information from the page using LLM. Large pages (>15KB) are automatically summarized. Use after web_search to read the full content of a result."
@@ -120,7 +129,7 @@ func (t *WebFetchTool) applyPrompt(ctx context.Context, client llm.Client, rawUR
 		Content: fmt.Sprintf("URL: %s\n\nPage content:\n%s\n\n---\nQuestion: %s",
 			rawURL, markdown, prompt),
 	}
-	resp, err := client.Chat(ctx, []llm.Message{userMsg}, nil)
+	resp, err := client.Chat(ctx, []llm.Message{userMsg}, nil, nil)
 	if err != nil {
 		return "", fmt.Errorf("llm apply prompt: %w", err)
 	}
@@ -137,7 +146,7 @@ func (t *WebFetchTool) autoSummarize(ctx context.Context, client llm.Client, raw
 				"Preserve important technical details, numbers, and structured data.",
 			rawURL, markdown),
 	}
-	resp, err := client.Chat(ctx, []llm.Message{userMsg}, nil)
+	resp, err := client.Chat(ctx, []llm.Message{userMsg}, nil, nil)
 	if err != nil {
 		return "", fmt.Errorf("llm auto-summarize: %w", err)
 	}

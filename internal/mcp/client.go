@@ -45,7 +45,7 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	params := initializeParams{
 		ProtocolVersion: "2024-11-05",
-		ClientInfo:      mcpClientInfo{Name: "infractl", Version: "0.4.0"},
+		ClientInfo:      mcpClientInfo{Name: "infractl", Version: "1.0.0"},
 		Capabilities:    mcpCapabilities{},
 	}
 

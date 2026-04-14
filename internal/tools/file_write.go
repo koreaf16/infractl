@@ -1,3 +1,8 @@
+// Package tools
+// File: file_write.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package tools
 
 import (
@@ -102,6 +107,19 @@ func (t *FileWriteTool) Execute(ctx context.Context, args map[string]interface{}
 	}
 
 	if result.ExitCode != 0 {
+		if isPermissionFailure(result, nil) {
+			if retryResult, ok := executePlainViaAcquiredRoot(ctx, exec, cmd); ok && retryResult.ExitCode == 0 {
+				action := "written"
+				if appendMode {
+					action = "appended"
+				}
+				msg := fmt.Sprintf("File %s %s successfully via acquired root session", path, action)
+				if backupMsg != "" {
+					msg = backupMsg + "\n" + msg
+				}
+				return msg, nil
+			}
+		}
 		return fmt.Sprintf("Error writing file (exit %d):\n%s", result.ExitCode, result.Stderr), nil
 	}
 

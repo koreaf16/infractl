@@ -6,6 +6,7 @@
 package executor
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -108,6 +109,23 @@ func (m *Manager) ListRemotes() []ServerInfo {
 		list = append(list, ServerInfo{Name: name, Target: exec.Target()})
 	}
 	return list
+}
+
+// ListPersistentSessions returns all active persistent shell sessions grouped by server name.
+// Only executors that implement PersistentSessionExecutor are queried.
+func (m *Manager) ListPersistentSessions() map[string][]SessionInfo {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make(map[string][]SessionInfo)
+	for name, exec := range m.remotes {
+		if pse, ok := exec.(PersistentSessionExecutor); ok {
+			if sessions, err := pse.SessionList(context.Background()); err == nil && len(sessions) > 0 {
+				result[name] = sessions
+			}
+		}
+	}
+	return result
 }
 
 // Close는 모든 원격 executor를 종료한다.

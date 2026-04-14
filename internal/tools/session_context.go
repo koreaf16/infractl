@@ -1,3 +1,8 @@
+// Package tools
+// File: session_context.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package tools
 
 import (
@@ -5,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/yourorg/infractl/internal/executor"
@@ -14,6 +20,7 @@ import (
 // SessionContextTool exposes the current local/remote execution context.
 type SessionContextTool struct {
 	Store        store.ServerStore
+	Manager      *executor.Manager
 	ActiveServer func() *store.Server
 }
 
@@ -22,7 +29,7 @@ func (t *SessionContextTool) Name() string { return "session_context" }
 func (t *SessionContextTool) Description() string {
 	return "Show the current execution context for this infractl session.\n" +
 		"Use this before claiming a request is local-only, remote-only, or inaccessible.\n" +
-		"It reports the local controller OS, shell, working directory, active server, and default execution rule."
+		"It reports the local controller OS, shell, working directory, active server, acquired OS sessions, and default execution rule."
 }
 
 func (t *SessionContextTool) IsReadOnly() bool { return true }
@@ -72,7 +79,7 @@ func (t *SessionContextTool) Execute(ctx context.Context, _ map[string]interface
 	}
 
 	return fmt.Sprintf(
-		"Mode: %s\nLocal Target: localhost\nLocal OS: %s/%s\nLocal Shell: %s\nHostname: %s\nWorking Directory: %s\nActive Server: %s\nRegistered Servers:\n%s\nDefault Execution Rule: %s",
+		"Mode: %s\nLocal Target: localhost\nLocal OS: %s/%s\nLocal Shell: %s\nHostname: %s\nWorking Directory: %s\nActive Server: %s\nRegistered Servers:\n%s\nAcquired OS Sessions:\n%s\nDefault Execution Rule: %s",
 		mode,
 		runtime.GOOS,
 		runtime.GOARCH,
@@ -81,6 +88,7 @@ func (t *SessionContextTool) Execute(ctx context.Context, _ map[string]interface
 		cwd,
 		activeLine,
 		registered,
+		t.formatAcquiredSessions(),
 		defaultRule,
 	), nil
 }
@@ -106,4 +114,87 @@ func formatServerLine(srv store.Server) string {
 		parts = append(parts, "Env="+srv.EnvProfile)
 	}
 	return strings.Join(parts, ", ")
+}
+
+func (t *SessionContextTool) formatAcquiredSessions() string {
+	active := t.snapshotActiveServer()
+
+	if t.Manager == nil {
+		if active != nil {
+			return fmt.Sprintf("- %s session=%s user=%s cwd=(unknown)  (login user, no persistent shell yet)",
+				active.Name, active.User, active.User)
+		}
+		return "(none)"
+	}
+
+	sessionsByServer := t.Manager.ListPersistentSessions()
+
+	// Collect server names from acquired sessions, plus the active server if not already present.
+	serverSet := make(map[string]bool, len(sessionsByServer)+1)
+	for name := range sessionsByServer {
+		serverSet[name] = true
+	}
+	if active != nil {
+		serverSet[active.Name] = true
+	}
+	if len(serverSet) == 0 {
+		return "(none)"
+	}
+
+	serverNames := make([]string, 0, len(serverSet))
+	for name := range serverSet {
+		serverNames = append(serverNames, name)
+	}
+	sort.Strings(serverNames)
+
+	var lines []string
+	for _, serverName := range serverNames {
+		infos := sessionsByServer[serverName]
+		sort.Slice(infos, func(i, j int) bool {
+			if infos[i].SessionID != infos[j].SessionID {
+				return infos[i].SessionID < infos[j].SessionID
+			}
+			return infos[i].CurrentUser < infos[j].CurrentUser
+		})
+
+		// Show login user entry if this is the active server.
+		// It appears first (before elevated sessions) so the LLM can see all three tiers.
+		loginUser := ""
+		if active != nil && active.Name == serverName {
+			loginUser = active.User
+		}
+		loginSessionShown := false
+
+		for _, si := range infos {
+			if !si.Alive {
+				continue
+			}
+			user := strings.TrimSpace(si.CurrentUser)
+			if user == "" {
+				user = "(unknown)"
+			}
+			dir := strings.TrimSpace(si.CurrentDir)
+			if dir == "" {
+				dir = "(unknown)"
+			}
+			label := ""
+			if loginUser != "" && strings.EqualFold(user, loginUser) && si.SessionID == loginUser {
+				label = "  (login)"
+				loginSessionShown = true
+			}
+			lines = append(lines, fmt.Sprintf("- %s session=%s user=%s cwd=%s%s",
+				serverName, si.SessionID, user, dir, label))
+		}
+
+		// If no persistent shell exists yet for the login user, synthesise an entry
+		// so the LLM knows the session is available via session_id:"<loginUser>".
+		if loginUser != "" && !loginSessionShown {
+			lines = append(lines, fmt.Sprintf("- %s session=%s user=%s cwd=(unknown)  (login user, persistent if used)",
+				serverName, loginUser, loginUser))
+		}
+	}
+	if len(lines) == 0 {
+		return "(none)"
+	}
+	return strings.Join(lines, "\n")
 }

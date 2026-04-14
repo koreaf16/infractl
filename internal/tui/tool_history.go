@@ -48,3 +48,13 @@ func (h *toolHistory) Get(i int) (toolHistoryEntry, bool) {
 	}
 	return h.entries[i], true
 }
+
+// LatestShell는 가장 최근 shell_exec 출력이 남아 있는 이력을 반환한다.
+func (h *toolHistory) LatestShell() (toolHistoryEntry, bool) {
+	for i := len(h.entries) - 1; i >= 0; i-- {
+		if len(h.entries[i].shellLines) > 0 {
+			return h.entries[i], true
+		}
+	}
+	return toolHistoryEntry{}, false
+}

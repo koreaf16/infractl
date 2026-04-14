@@ -1,3 +1,8 @@
+// Package tui
+// File: app_init_test.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package tui
 
 import (
@@ -17,3 +22,4 @@ func TestInitialWindowSizeCmdFallsBackToDefault(t *testing.T) {
 			defaultAppWidth, defaultAppHeight, sizeMsg.Width, sizeMsg.Height)
 	}
 }
+

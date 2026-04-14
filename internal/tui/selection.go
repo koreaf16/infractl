@@ -16,11 +16,12 @@ import (
 
 // selectionState는 인터랙티브 선택 컴포넌트의 상태이다.
 type selectionState struct {
-	active   bool
-	question string
-	options  []SelectOption
-	cursor   int
-	replyCh  chan SelectResult
+	active      bool
+	question    string
+	options     []SelectOption
+	cursor      int
+	replyCh     chan SelectResult
+	headerLabel string // Gemini 박스 타이틀 (빈 문자열이면 "Answer Questions")
 }
 
 // Activate는 선택 UI를 활성화한다.
@@ -30,6 +31,13 @@ func (s *selectionState) Activate(question string, options []SelectOption, reply
 	s.options = options
 	s.cursor = 0
 	s.replyCh = replyCh
+	s.headerLabel = ""
+}
+
+// ActivateWithHeader는 카테고리 헤더를 지정하여 선택 UI를 활성화한다.
+func (s *selectionState) ActivateWithHeader(question string, options []SelectOption, replyCh chan SelectResult, header string) {
+	s.Activate(question, options, replyCh)
+	s.headerLabel = header
 }
 
 // Deactivate는 선택 UI를 비활성화하고 상태를 초기화한다.
@@ -39,6 +47,7 @@ func (s *selectionState) Deactivate() {
 	s.options = nil
 	s.cursor = 0
 	s.replyCh = nil
+	s.headerLabel = ""
 }
 
 // hasHideOther는 옵션 중 하나라도 HideOther가 true이면 Other를 숨긴다.
@@ -124,125 +133,136 @@ func (s *selectionState) View(width int) string {
 	return s.viewSimple(width)
 }
 
-// viewSimple은 기존 단순 목록 형태의 렌더링이다.
+// viewSimple은 Gemini CLI 박스 스타일의 단순 목록 렌더링이다.
 func (s *selectionState) viewSimple(width int) string {
-	var sb strings.Builder
-	sep := strings.Repeat("─", max(width-4, 10))
-
-	sb.WriteString("  " + StyleSeparator.Render(sep) + "\n")
-	sb.WriteString("  " + StyleClaude().Render("?") + " " +
-		StyleSelectionQuestion.Render(s.question) + "\n")
-
-	showOther := !s.hasHideOther()
-	for i, opt := range s.options {
-		s.writeOption(&sb, i, opt, false)
-	}
-
-	if showOther {
-		otherIdx := len(s.options)
-		if s.cursor == otherIdx {
-			sb.WriteString(StyleSelectionCursor.Render("  ❯ ") +
-				StyleSelectionSelected.Render("Other") +
-				StyleInfoBarDim.Render(" — 직접 입력") + "\n")
-		} else {
-			sb.WriteString(StyleSelectionOption.Render("    Other") +
-				StyleInfoBarDim.Render(" — 직접 입력") + "\n")
-		}
-	}
-
-	sb.WriteString("  " + StyleSelectionHint.Render("↑↓ 이동 · Enter 선택 · Esc 취소"))
-	return strings.TrimRight(sb.String(), "\n")
+	return s.renderGeminiBox(width, false)
 }
 
-// viewRich는 오른쪽 미리보기 패널을 포함한 2단 레이아웃 렌더링이다.
-//
-//	? 자동 처리 방식
-//	❯ 1. 패턴 매칭 자동응답  [Recommended]   ┌─────────────────────┐
-//	     패턴 기반 즉시 응답                  │ 감지 패턴 예시:      │
-//	  2. LLM 판단 위임                        │ [Y/n] → y 전송       │
-//	  3. 항상 TUI 다이얼로그                  └─────────────────────┘
-//	↑↓ 이동 · Enter 선택 · Esc 취소
+// viewRich는 Gemini CLI 박스 스타일로 미리보기 패널을 포함한 렌더링이다.
+// 미리보기가 없으면 단순 박스로 표시한다.
 func (s *selectionState) viewRich(width int) string {
-	// 패널 폭 분배: 좌 55%, 우 나머지
-	leftWidth := width * 55 / 100
-	if leftWidth < 30 {
-		leftWidth = 30
-	}
-	rightWidth := width - leftWidth - 2
-	if rightWidth < 20 {
-		rightWidth = 20
+	return s.renderGeminiBox(width, true)
+}
+
+// renderGeminiBox는 Gemini CLI 스타일 박스형 선택 UI를 렌더링한다.
+func (s *selectionState) renderGeminiBox(width int, richMode bool) string {
+	hdr := s.headerLabel
+	if hdr == "" {
+		hdr = "Answer Questions"
 	}
 
-	sep := strings.Repeat("─", max(width-4, 10))
-	header := "  " + StyleSeparator.Render(sep) + "\n" +
-		"  " + StyleClaude().Render("?") + " " +
-		StyleSelectionQuestion.Render(s.question)
-
-	// ── 왼쪽: 옵션 목록
-	var leftSB strings.Builder
 	showOther := !s.hasHideOther()
-	for i, opt := range s.options {
-		s.writeOption(&leftSB, i, opt, true)
+	innerW := width - 6
+	if innerW < 30 {
+		innerW = 30
 	}
+
+	// ── 왼쪽 콘텐츠 빌드 ──
+	var leftSB strings.Builder
+	leftSB.WriteString("\n")
+	leftSB.WriteString(StyleSelectionQuestion.Render("  "+s.question) + "\n")
+	leftSB.WriteString("\n")
+
+	for i, opt := range s.options {
+		s.writeGeminiOption(&leftSB, i, opt, richMode)
+	}
+
 	if showOther {
 		otherIdx := len(s.options)
 		if s.cursor == otherIdx {
-			leftSB.WriteString(StyleSelectionCursor.Render("  ❯ ") +
-				StyleSelectionSelected.Render("Other") +
-				StyleInfoBarDim.Render(" — 직접 입력") + "\n")
+			bullet := StyleGeminiBullet.Render("●")
+			label := StyleGeminiSelected.Render(fmt.Sprintf("%d. Enter a custom value", otherIdx+1))
+			leftSB.WriteString(fmt.Sprintf("  %s %s\n", bullet, label))
 		} else {
-			leftSB.WriteString(StyleSelectionOption.Render("    Other") +
-				StyleInfoBarDim.Render(" — 직접 입력") + "\n")
+			leftSB.WriteString(StyleGeminiOption.Render(fmt.Sprintf("    %d. Enter a custom value", otherIdx+1)) + "\n")
 		}
 	}
-	leftSB.WriteString("  " + StyleSelectionHint.Render("↑↓ 이동 · Enter 선택 · Esc 취소"))
 
-	// ── 오른쪽: 포커스 옵션의 미리보기
+	// 미리보기 패널 (richMode + preview 있을 때)
 	preview := ""
-	if s.cursor < len(s.options) {
+	if richMode && s.cursor < len(s.options) {
 		preview = s.options[s.cursor].Preview
 	}
 
-	if preview == "" {
-		return header + "\n" + strings.TrimRight(leftSB.String(), "\n")
+	hint := StyleGeminiHint.Render("  Enter to select · ↑/↓ to navigate · Esc to cancel")
+
+	var bodyContent string
+	if preview != "" {
+		leftWidth := innerW * 55 / 100
+		rightWidth := innerW - leftWidth - 2
+		if rightWidth < 20 {
+			rightWidth = 20
+		}
+		innerPreview := rightWidth - 4
+		if innerPreview < 10 {
+			innerPreview = 10
+		}
+		previewContent := wrapPreviewLines(preview, innerPreview)
+		rightCol := StylePreviewBox.Width(rightWidth).Render(previewContent)
+		body := lipgloss.JoinHorizontal(lipgloss.Top,
+			lipgloss.NewStyle().Width(leftWidth).Render(leftSB.String()),
+			rightCol,
+		)
+		bodyContent = body + "\n" + hint + "\n"
+	} else {
+		leftSB.WriteString("\n")
+		leftSB.WriteString(hint + "\n")
+		bodyContent = leftSB.String()
 	}
 
-	innerWidth := rightWidth - 4 // 테두리+패딩 제외
-	if innerWidth < 10 {
-		innerWidth = 10
-	}
-	previewContent := wrapPreviewLines(preview, innerWidth)
-	rightCol := StylePreviewBox.Width(rightWidth).Render(previewContent)
+	// 박스 렌더링
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorGeminiBox).
+		PaddingLeft(1).
+		PaddingRight(1).
+		Width(innerW + 2)
 
-	joined := lipgloss.JoinHorizontal(lipgloss.Top,
-		lipgloss.NewStyle().Width(leftWidth).Render(leftSB.String()),
-		rightCol,
-	)
-	return header + "\n" + strings.TrimRight(joined, "\n")
+	renderedBox := boxStyle.Render(bodyContent)
+
+	// 박스 첫째 줄을 헤더 타이틀로 교체
+	lines := strings.SplitN(renderedBox, "\n", 2)
+	if len(lines) >= 2 {
+		titleLine := " " + StyleGeminiHeader.Render(hdr) + " "
+		firstLineW := lipgloss.Width(lines[0])
+		headerLine := buildBoxHeader(titleLine, firstLineW)
+		return headerLine + "\n" + lines[1]
+	}
+	return renderedBox
 }
 
-// writeOption은 옵션 한 줄을 렌더링하여 sb에 쓴다.
-// richMode=true이면 Tag 배지와 Description 서브라인을 추가한다.
-func (s *selectionState) writeOption(sb *strings.Builder, i int, opt SelectOption, richMode bool) {
+// writeGeminiOption은 Gemini CLI 스타일로 옵션 한 줄을 렌더링하여 sb에 쓴다.
+func (s *selectionState) writeGeminiOption(sb *strings.Builder, i int, opt SelectOption, richMode bool) {
 	selected := i == s.cursor
-	num := fmt.Sprintf("%d. ", i+1)
+	num := fmt.Sprintf("%d.", i+1)
 
 	if selected {
-		line := StyleSelectionCursor.Render("  ❯ ") + StyleSelectionSelected.Render(num+opt.Label)
+		bullet := StyleGeminiBullet.Render("●")
+		label := StyleGeminiSelected.Render(num + " " + opt.Label)
+		line := fmt.Sprintf("  %s %s", bullet, label)
 		if richMode && opt.Tag != "" {
-			line += " " + StyleSelectionTag.Render(opt.Tag)
+			line += "  " + StyleSelectionTag.Render(opt.Tag)
 		}
 		sb.WriteString(line + "\n")
-		if richMode && opt.Description != "" {
-			sb.WriteString(StyleSelectionSub.Render("       "+opt.Description) + "\n")
+		if opt.Description != "" {
+			sb.WriteString(StyleGeminiSubDesc.Render("       "+opt.Description) + "\n")
 		}
 	} else {
-		line := StyleSelectionOption.Render("    " + num + opt.Label)
+		line := StyleGeminiOption.Render("    " + num + " " + opt.Label)
 		if richMode && opt.Tag != "" {
-			line += " " + StyleInfoBarDim.Render("["+opt.Tag+"]")
+			line += "  " + StyleInfoBarDim.Render("["+opt.Tag+"]")
 		}
 		sb.WriteString(line + "\n")
+		if opt.Description != "" {
+			sb.WriteString(StyleGeminiSubDesc.Render("       "+opt.Description) + "\n")
+		}
 	}
+}
+
+// writeOption은 하위 호환을 위해 유지하는 구버전 렌더링 메서드이다.
+// 새 코드에서는 writeGeminiOption을 사용한다.
+func (s *selectionState) writeOption(sb *strings.Builder, i int, opt SelectOption, richMode bool) {
+	s.writeGeminiOption(sb, i, opt, richMode)
 }
 
 // wrapPreviewLines는 미리보기 텍스트를 maxWidth에 맞게 줄 바꿈한다.

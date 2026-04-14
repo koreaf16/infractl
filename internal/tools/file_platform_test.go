@@ -1,3 +1,8 @@
+// Package tools
+// File: file_platform_test.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package tools
 
 import (

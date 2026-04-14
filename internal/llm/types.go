@@ -39,6 +39,7 @@ type FunctionCall struct {
 // Response는 LLM API 호출의 최종 응답 결과를 나타낸다.
 type Response struct {
 	Content      string
+	Thinking     string     // vLLM --reasoning-parser의 reasoning 필드 내용
 	ToolCalls    []ToolCall
 	InputTokens  int
 	OutputTokens int

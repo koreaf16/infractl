@@ -1,3 +1,8 @@
+// Package tui
+// File: cmdbox.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package tui
 
 import (
@@ -254,6 +259,51 @@ func toolDisplayArg(toolName string, args map[string]any) string {
 	return ""
 }
 
+// toolShimmerLabel은 도구 실행 중 shimmer에 표시할 레이블을 생성한다.
+// 도구명(DisplayName) + 주요 인자를 포함한 의미있는 레이블을 반환한다.
+func toolShimmerLabel(name string, args map[string]any) string {
+	displayName := toolDisplayName(name)
+	switch name {
+	case "web_fetch":
+		if u, ok := args["url"].(string); ok && u != "" {
+			if domain := extractURLDomain(u); domain != "" {
+				return displayName + " " + domain
+			}
+		}
+	case "web_search":
+		if q, ok := args["query"].(string); ok && q != "" {
+			return displayName + ` "` + truncateStr(q, 30) + `"`
+		}
+	case "shell_exec":
+		if desc, ok := args["description"].(string); ok && desc != "" {
+			return displayName + " " + truncateStr(desc, 40)
+		}
+		if cmd, ok := args["command"].(string); ok && cmd != "" {
+			return displayName + " " + truncateStr(cmd, 40)
+		}
+	case "file_read", "file_write":
+		if p, ok := args["path"].(string); ok && p != "" {
+			return displayName + " " + truncateStr(p, 40)
+		}
+	}
+	return displayName + "..."
+}
+
+// extractURLDomain은 URL에서 호스트명(www. 제거)을 추출한다.
+func extractURLDomain(rawURL string) string {
+	s := rawURL
+	if idx := strings.Index(s, "://"); idx >= 0 {
+		s = s[idx+3:]
+	}
+	if idx := strings.IndexByte(s, '/'); idx >= 0 {
+		s = s[:idx]
+	}
+	if idx := strings.IndexByte(s, '?'); idx >= 0 {
+		s = s[:idx]
+	}
+	return strings.TrimPrefix(s, "www.")
+}
+
 func previewCmd(toolName string, args map[string]interface{}) string {
 	switch toolName {
 	case "shell_exec":
@@ -271,3 +321,4 @@ func previewCmd(toolName string, args map[string]interface{}) string {
 	}
 	return "running..."
 }
+

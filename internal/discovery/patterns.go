@@ -38,6 +38,30 @@ var BuiltinPatterns = []ServicePattern{
 		DefaultPorts: []int{7001, 7002},
 		ConfigFiles:  []string{},
 	},
+	{
+		Type:         ServiceEtcd,
+		ProcessRegex: `etcd\b`,
+		DefaultPorts: []int{2379, 2380, 4001},
+		ConfigFiles:  []string{"/etc/etcd/etcd.conf", "/etc/kubernetes/manifests/etcd.yaml"},
+	},
+	{
+		Type:         ServiceKubeAPI,
+		ProcessRegex: `kube-apiserver`,
+		DefaultPorts: []int{6443},
+		ConfigFiles:  []string{"/etc/kubernetes/manifests/kube-apiserver.yaml"},
+	},
+	{
+		Type:         ServiceKubelet,
+		ProcessRegex: `kubelet\b`,
+		DefaultPorts: []int{10250, 10248},
+		ConfigFiles:  []string{"/var/lib/kubelet/config.yaml", "/etc/kubernetes/kubelet.conf"},
+	},
+	{
+		Type:         ServicePrometheus,
+		ProcessRegex: `prometheus\b`,
+		DefaultPorts: []int{9090, 9099},
+		ConfigFiles:  []string{"/etc/prometheus/prometheus.yml"},
+	},
 }
 
 // ConfidenceWeights는 각 증거 유형의 확신도 가중치이다.

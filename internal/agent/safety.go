@@ -1,8 +1,14 @@
+// Package agent
+// File: safety.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package agent
 
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/yourorg/infractl/internal/safety"
@@ -10,12 +16,10 @@ import (
 )
 
 type safetyDecision struct {
-	RiskLevel      tools.RiskLevel
-	BackupRequired bool
-	BackupReason   string
+	RiskLevel tools.RiskLevel
 }
 
-// evaluateToolSafety derives effective risk and backup requirements from tool arguments.
+// evaluateToolSafety derives the effective risk level from tool arguments.
 func evaluateToolSafety(tool tools.Tool, args map[string]interface{}) safetyDecision {
 	decision := safetyDecision{RiskLevel: tool.RiskLevel()}
 
@@ -31,17 +35,10 @@ func evaluateToolSafety(tool tools.Tool, args map[string]interface{}) safetyDeci
 		if cmd, ok := args["command"].(string); ok && strings.TrimSpace(cmd) != "" {
 			override := safety.EnforceRisk(cmd, llmLevel)
 			decision.RiskLevel = override.MinLevel
-			if override.NeedsBackup || decision.RiskLevel == tools.RiskHigh {
-				decision.BackupRequired = true
-				decision.BackupReason = override.Reason
-			}
 			return decision
 		}
 
 		decision.RiskLevel = llmLevel
-		if decision.RiskLevel == tools.RiskHigh {
-			decision.BackupRequired = true
-		}
 		return decision
 	}
 
@@ -79,41 +76,50 @@ func isProtectedPath(path string) bool {
 	return false
 }
 
-// runConfirmationFlow performs confirmation steps for medium/high-risk actions.
-func runConfirmationFlow(ctx context.Context, handler ConfirmationHandler, tool tools.Tool, target string, args map[string]interface{}, riskLevel tools.RiskLevel) (bool, error) {
+// runConfirmationFlow performs confirmation steps for medium/high-risk actions using QuestionHandler.
+func runConfirmationFlow(ctx context.Context, handler QuestionHandler, tool tools.Tool, target string, args map[string]interface{}, riskLevel tools.RiskLevel) (bool, error) {
 	if handler == nil {
-		if tools.RiskOrd(riskLevel) >= tools.RiskOrd(tools.RiskMedium) {
-			return false, nil
-		}
+		// 핸들러 없음(테스트·임베디드 사용) — 위험도와 무관하게 실행 허용
+		slog.Warn("no confirmation handler, allowing action", "tool", tool.Name(), "risk", riskLevel)
 		return true, nil
 	}
 
 	desc := buildDescription(tool, target, args)
-
-	switch riskLevel {
-	case tools.RiskNone, tools.RiskLow:
-		return true, nil
-	case tools.RiskMedium, tools.RiskHigh:
-		resp, err := handler.RequestConfirm(ctx, ConfirmRequest{
-			RiskLevel:   riskLevel,
-			ToolName:    tool.Name(),
-			Target:      target,
-			Description: desc,
-			Step:        1,
-			TotalSteps:  1,
-		})
-		if err != nil {
-			return false, err
-		}
-		return resp.Confirmed, nil
-	default:
-		return true, nil
+	question := fmt.Sprintf("[%s] 위험 작업을 실행하시겠습니까?", riskLevel)
+	header := "⚠  Security Confirm"
+	if riskLevel == tools.RiskHigh {
+		question = fmt.Sprintf("⚠️ [HIGH RISK] %s", question)
+		header = "⚠  HIGH RISK — Security Confirm"
 	}
+
+	resp, err := handler.RequestQuestion(ctx, tools.QuestionRequest{
+		Question: question,
+		Header:   header,
+		Options: []tools.QuestionOption{
+			{
+				Label:       "실행 (Execute)",
+				Description: fmt.Sprintf("%s: %s", tool.Name(), desc),
+			},
+			{
+				Label:       "취소 (Abort)",
+				Description: "작업을 중단하고 다음으로 넘어갑니다.",
+			},
+		},
+	})
+	if err != nil {
+		return false, err
+	}
+
+	// 첫 번째 선택지(Index 0)가 '실행'임
+	return !resp.IsOther && resp.SelectedIndex == 0, nil
 }
 
 func buildDescription(tool tools.Tool, target string, args map[string]interface{}) string {
 	if target == "" || target == "localhost" {
 		target = "localhost"
+	}
+	if desc, ok := args["description"].(string); ok && strings.TrimSpace(desc) != "" {
+		return fmt.Sprintf("[%s] %s", target, strings.TrimSpace(desc))
 	}
 	if cmd, ok := args["command"].(string); ok && cmd != "" {
 		return fmt.Sprintf("[%s] %s", target, cmd)

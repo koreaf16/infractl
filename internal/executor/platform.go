@@ -1,3 +1,8 @@
+// Package executor
+// File: platform.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package executor
 
 import (
@@ -97,3 +102,4 @@ func IsLocalTarget(target string) bool {
 	target = strings.TrimSpace(target)
 	return target == "" || strings.EqualFold(target, "localhost") || strings.EqualFold(target, "local")
 }
+

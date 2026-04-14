@@ -1,7 +1,7 @@
 // Package tools
 // File: web_search.go
-// Description: DuckDuckGo Lite 웹 검색 도구
-// Responsibility: 인터넷 연결 시 웹 검색, 폐쇄망 자동 감지 후 비활성화
+// Description: SearXNG 웹 검색 도구
+// Responsibility: SearXNG 인스턴스 가용 시 웹 검색, 미가용 시 비활성화
 
 package tools
 
@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	internetCheckHost    = "lite.duckduckgo.com"
+	internetCheckHost    = "192.168.0.3:30080"
 	internetCheckTTL     = 60 * time.Second
 	internetCheckTimeout = 5 * time.Second
 )
@@ -29,7 +29,7 @@ var (
 	internetLastCheckRes bool
 )
 
-// IsInternetAvailable는 인터넷 연결 여부를 캐시하여 반환한다.
+// IsInternetAvailable는 SearXNG 인스턴스 가용 여부를 캐시하여 반환한다.
 func IsInternetAvailable() bool {
 	internetCheckMu.Lock()
 	defer internetCheckMu.Unlock()
@@ -38,8 +38,8 @@ func IsInternetAvailable() bool {
 		return internetLastCheckRes
 	}
 
-	// DNS 확인으로 인터넷 연결 체크
-	conn, err := net.DialTimeout("tcp", internetCheckHost+":443", internetCheckTimeout)
+	// SearXNG 가용 여부 체크 (TCP 연결)
+	conn, err := net.DialTimeout("tcp", internetCheckHost, internetCheckTimeout)
 	if err == nil {
 		conn.Close()
 		internetLastCheckRes = true
@@ -50,15 +50,15 @@ func IsInternetAvailable() bool {
 	return internetLastCheckRes
 }
 
-// WebSearchTool은 DuckDuckGo Lite를 통해 웹 검색을 수행하는 도구이다.
+// WebSearchTool은 SearXNG를 통해 웹 검색을 수행하는 도구이다.
 type WebSearchTool struct{}
 
-func (t *WebSearchTool) Name() string        { return "web_search" }
+func (t *WebSearchTool) Name() string         { return "web_search" }
 func (t *WebSearchTool) RiskLevel() RiskLevel { return RiskNone }
 func (t *WebSearchTool) IsReadOnly() bool     { return true }
 
 func (t *WebSearchTool) Description() string {
-	return "Search the web using DuckDuckGo. Returns URLs and snippets for the query. Use this to find solutions for unknown errors, documentation for unfamiliar systems, or any information not available locally."
+	return "Search the web using SearXNG. Returns URLs and snippets for the query. Use this to find solutions for unknown errors, documentation for unfamiliar systems, or any information not available locally."
 }
 
 func (t *WebSearchTool) Parameters() map[string]interface{} {
@@ -79,10 +79,11 @@ func (t *WebSearchTool) Parameters() map[string]interface{} {
 	}
 }
 
-// IsEnabled는 인터넷 연결 여부를 캐시하여 반환한다. 폐쇄망이면 false.
-func (t *WebSearchTool) IsEnabled() bool {
-	return IsInternetAvailable()
-}
+// IsEnabled는 항상 true를 반환한다.
+// 인터넷 가용성 체크는 Execute() 시점에서 수행되므로, toolDefs에는 항상 포함된다.
+// 이전 설계에서 IsEnabled()에서 체크했을 때 toolDefs에서 도구가 사라지면
+// LLM이 web_search를 호출하지 못하고 텍스트 응답만 생성하여 루프가 종료되는 문제가 있었다.
+func (t *WebSearchTool) IsEnabled() bool { return true }
 
 func (t *WebSearchTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
 	query, err := argString(args, "query", true)
@@ -94,7 +95,7 @@ func (t *WebSearchTool) Execute(ctx context.Context, args map[string]interface{}
 		limit = 10
 	}
 
-	results, err := web.SearchDDG(ctx, query, limit)
+	results, err := web.Search(ctx, query, limit)
 	if err != nil {
 		return "", fmt.Errorf("web search %q: %w", query, err)
 	}

@@ -1,3 +1,8 @@
+// Package rag
+// File: memory_service_test.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package rag
 
 import (
@@ -74,3 +79,4 @@ func TestMemoryServiceSearchWithOptionsPassesScopedFilters(t *testing.T) {
 		t.Fatalf("expected vector filter server_name db-prod, got %q", memStore.lastEmbeddingFilter.ServerName)
 	}
 }
+

@@ -72,3 +72,28 @@ type Tool interface {
 	// 실행 실패도 Go error가 아닌 결과 문자열로 반환하여 LLM이 분석할 수 있게 한다.
 	Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error)
 }
+
+// QuestionOption은 질문의 선택지 정보이다.
+type QuestionOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description"`
+}
+
+// QuestionRequest는 사용자에게 질문을 던질 때의 요청 정보이다.
+type QuestionRequest struct {
+	Question string           `json:"question"`
+	Options  []QuestionOption `json:"options"`
+	// Header는 선택 박스 상단에 표시되는 카테고리 라벨이다.
+	// 빈 문자열이면 "Answer Questions" 가 기본으로 사용된다.
+	// 보안 확인: "⚠  Security Confirm"
+	// AI 질문:   "Answer Questions"
+	Header string `json:"header,omitempty"`
+}
+
+// QuestionResponse는 사용자의 질문 답변 응답이다.
+type QuestionResponse struct {
+	SelectedIndex int    `json:"selected_index"` // 선택한 인덱스 (0~), -1이면 선택 안 함
+	SelectedLabel string `json:"selected_label"` // 선택한 라벨
+	UserInput     string `json:"user_input"`     // 직접 입력한 경우의 텍스트
+	IsOther       bool   `json:"is_other"`       // 직접 입력 여부
+}

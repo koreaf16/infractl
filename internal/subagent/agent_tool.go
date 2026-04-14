@@ -102,7 +102,7 @@ func (r *Runner) executeDelegate(ctx context.Context, cfg SubagentConfig) Subage
 
 	client := r.resolveClient()
 	for i := 0; i < maxSubagentIter; i++ {
-		resp, err := client.Chat(ctx, messages, toolDefs)
+		resp, err := client.Chat(ctx, messages, toolDefs, nil)
 		if err != nil {
 			result.Err = fmt.Errorf("delegate llm call: %w", err)
 			return result
@@ -122,6 +122,7 @@ func (r *Runner) executeDelegate(ctx context.Context, cfg SubagentConfig) Subage
 		for _, tc := range resp.ToolCalls {
 			r.fire(Event{Type: EventToolCall, AgentType: cfg.Type, Server: cfg.Server, ToolName: tc.Function.Name})
 			toolResult := r.executeTool(ctx, tc, cfg.Server, allTools)
+			llm.LogToolResult(tc.Function.Name, toolResult.Content)
 			result.ToolUses++
 			messages = append(messages, toolResult)
 		}

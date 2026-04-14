@@ -1,3 +1,8 @@
+// Package executor
+// File: quote.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package executor
 
 import "strings"
@@ -11,3 +16,4 @@ func QuotePOSIX(value string) string {
 func QuotePowerShell(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
+

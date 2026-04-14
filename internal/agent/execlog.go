@@ -20,17 +20,17 @@ const maxOutputLen = 10000
 
 // execContext는 단일 도구 실행에 필요한 컨텍스트 정보를 담는다.
 type execContext struct {
-	sessionID    int64
-	toolName     string
-	target       string
-	args         map[string]interface{}
-	output       string
-	errMsg       string
-	exitCode     int
-	duration     time.Duration
-	riskLevel    tools.RiskLevel
-	success      bool
-	userPrompt   string
+	sessionID  int64
+	toolName   string
+	target     string
+	args       map[string]interface{}
+	output     string
+	errMsg     string
+	exitCode   int
+	duration   time.Duration
+	riskLevel  tools.RiskLevel
+	success    bool
+	userPrompt string
 }
 
 // recordExecLog는 도구 실행 결과를 execution_logs에 저장한다.

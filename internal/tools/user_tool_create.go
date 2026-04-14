@@ -18,7 +18,7 @@ type UserToolCreateTool struct {
 	Manager *UserToolManager
 }
 
-func (t *UserToolCreateTool) Name() string        { return "user_tool_create" }
+func (t *UserToolCreateTool) Name() string         { return "user_tool_create" }
 func (t *UserToolCreateTool) RiskLevel() RiskLevel { return RiskLow }
 func (t *UserToolCreateTool) IsReadOnly() bool     { return false }
 func (t *UserToolCreateTool) IsEnabled() bool      { return t.Manager != nil }

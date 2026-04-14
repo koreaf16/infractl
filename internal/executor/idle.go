@@ -1,7 +1,8 @@
 // Package executor
 // File: idle.go
 // Description: 명령 출력 유휴 상태 감지 타이머
-// Responsibility: 스트리밍 실행 중 일정 시간 출력이 없으면 Triggered 채널을 닫아 알림
+// Responsibility: 스트리밍 실행 중 일정 시간 출력이 없으면 Triggered 채널에 신호를 보내 알림.
+//                 한 번 트리거 후에도 계속 감시하여 반복 프롬프트(예: 비밀번호 재입력)를 감지한다.
 
 package executor
 
@@ -10,11 +11,11 @@ import (
 	"time"
 )
 
-const defaultIdleThreshold = 10 * time.Second
+const defaultIdleThreshold = 3 * time.Second
 
 // IdleWatcher는 마지막 Ping 이후 threshold 시간 동안 추가 Ping이 없으면
-// Triggered() 채널을 닫아 호출자에게 유휴 상태를 알린다.
-// 명령이 stdin을 기다리며 멈춘 상황을 감지하는 데 사용한다.
+// Triggered() 채널에 신호를 보내 호출자에게 유휴 상태를 알린다.
+// 트리거 후에도 계속 동작하여 다음 유휴 상태를 반복 감지한다.
 type IdleWatcher struct {
 	threshold time.Duration
 	resetCh   chan struct{}
@@ -30,8 +31,8 @@ func NewIdleWatcher(threshold time.Duration) *IdleWatcher {
 	}
 	return &IdleWatcher{
 		threshold: threshold,
-		resetCh:   make(chan struct{}, 16), // 버퍼: 빠른 라인 스트림에서 블로킹 방지
-		triggerCh: make(chan struct{}),
+		resetCh:   make(chan struct{}, 16),
+		triggerCh: make(chan struct{}, 4), // buffered: 반복 트리거 수신 가능
 		stopCh:    make(chan struct{}),
 	}
 }
@@ -61,8 +62,8 @@ func (w *IdleWatcher) Ping() {
 	}
 }
 
-// Triggered는 유휴 threshold 초과 시 닫히는 채널을 반환한다.
-// 한 번만 닫힌다. 이후 Ping은 무시된다.
+// Triggered는 유휴 threshold 초과 시 신호가 오는 채널을 반환한다.
+// 트리거마다 값이 전송되므로 for-select 루프로 반복 수신 가능하다.
 func (w *IdleWatcher) Triggered() <-chan struct{} {
 	return w.triggerCh
 }
@@ -78,7 +79,6 @@ func (w *IdleWatcher) run(ctx context.Context) {
 		case <-w.stopCh:
 			return
 		case <-w.resetCh:
-			// 보류 중인 reset을 모두 소비한 뒤 타이머 재시작
 			drainResets(w.resetCh)
 			if !timer.Stop() {
 				select {
@@ -88,14 +88,13 @@ func (w *IdleWatcher) run(ctx context.Context) {
 			}
 			timer.Reset(w.threshold)
 		case <-timer.C:
-			// threshold 초과 → 한 번만 닫음
+			// 유휴 감지 — 채널에 신호 전송 후 타이머 재시작
 			select {
-			case <-w.triggerCh:
-				// 이미 닫혀 있음 (중복 방지)
+			case w.triggerCh <- struct{}{}:
 			default:
-				close(w.triggerCh)
+				// 수신자가 아직 처리 중이면 신호를 드롭하고 계속 진행
 			}
-			return
+			timer.Reset(w.threshold)
 		}
 	}
 }

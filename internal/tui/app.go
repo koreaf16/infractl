@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -13,7 +12,9 @@ import (
 	"github.com/yourorg/infractl/internal/connector"
 	"github.com/yourorg/infractl/internal/executor"
 	"github.com/yourorg/infractl/internal/mcp"
+	"github.com/yourorg/infractl/internal/privilege"
 	"github.com/yourorg/infractl/internal/store"
+	"github.com/yourorg/infractl/internal/tools"
 )
 
 // AppModel is the main Bubble Tea application model.
@@ -47,12 +48,20 @@ type AppModel struct {
 	sessionStore     store.SessionStore
 	execLogStore     store.ExecLogStore
 	currentSessionID int64
-	confirmHandler   *TUIConfirmHandler
 	yoloMode         bool
-	idle             idleState
+	planMode         bool
 	privilege        privilegePromptState
 
+	knowledgeStore store.KnowledgeStore
+	ragSourceStore store.RAGSourceStore
+	costTracker    CostTracker
+	checkpointMgr  CheckpointManager
+	hooksMgr       HooksManager
+	scheduleMgr    ScheduleManager
+	privCache      *privilege.Cache
+
 	thinkingLabel string
+	thinkBuf      string // thinking 스트리밍 누적 버퍼 (shimmer hint 업데이트용)
 	stats         turnStats
 	turnCount     int // 지금까지 시작된 턴 수 (구분선 출력 시점 판단용)
 
@@ -79,7 +88,14 @@ type AppOptions struct {
 	CursorParker     *CursorParkWriter
 	ProgramBox       *ProgramBox
 	SelectHandler    *TUISelectHandler
-	ConfirmHandler   *TUIConfirmHandler
+
+	KnowledgeStore store.KnowledgeStore
+	RAGSourceStore store.RAGSourceStore
+	CostTracker    CostTracker
+	CheckpointMgr  CheckpointManager
+	HooksMgr       HooksManager
+	ScheduleMgr    ScheduleManager
+	PrivCache      *privilege.Cache
 }
 
 // NewApp constructs the base TUI app.
@@ -131,7 +147,17 @@ func NewAppWithOptions(
 	m.parker = opts.CursorParker
 	m.box = opts.ProgramBox
 	m.selectHandler = opts.SelectHandler
-	m.confirmHandler = opts.ConfirmHandler
+	m.knowledgeStore = opts.KnowledgeStore
+	m.ragSourceStore = opts.RAGSourceStore
+	m.costTracker = opts.CostTracker
+	m.checkpointMgr = opts.CheckpointMgr
+	m.hooksMgr = opts.HooksMgr
+	m.scheduleMgr = opts.ScheduleMgr
+	m.privCache = opts.PrivCache
+
+	// Agent에 자신(QuestionHandler 구현체)을 등록합니다.
+	m.ag.SetQuestionHandler(m)
+
 	return m
 }
 
@@ -194,7 +220,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case SubmitMsg:
 		displayInput := msg.DisplayInput
 		expandedInput := msg.ExpandedInput
-		if strings.HasPrefix(displayInput, "/") {
+		if IsSlashCommand(displayInput) {
 			return m.handleSlashCommand(displayInput)
 		}
 		if m.busy {
@@ -243,9 +269,18 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case ThinkingTokenMsg:
+		m.shimmer.RecordActivity()
+		m.thinkBuf += string(msg)
+		m.shimmer.SetHint(thinkHint(m.thinkBuf, 60))
+		return m, nil
+
 	case ThinkingStartMsg:
 		m.thinkingLabel = ThinkingLabel(msg.Tier, msg.Model)
 		m.shimmer.SetText(m.thinkingLabel)
+		// 새 LLM 호출 시 이전 thinking 버퍼/힌트 초기화
+		m.thinkBuf = ""
+		m.shimmer.SetHint("")
 		return m, nil
 	}
 
@@ -263,6 +298,33 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	m = m.resize()
 	return m, tea.Batch(cmds...)
+}
+
+// RequestQuestion은 QuestionHandler 인터페이스를 구현합니다.
+func (m AppModel) RequestQuestion(ctx context.Context, req tools.QuestionRequest) (tools.QuestionResponse, error) {
+	if m.selectHandler == nil {
+		return tools.QuestionResponse{SelectedIndex: -1}, fmt.Errorf("selection handler unavailable")
+	}
+
+	opts := make([]SelectOption, len(req.Options))
+	for i, opt := range req.Options {
+		opts[i] = SelectOption{
+			Label:       opt.Label,
+			Description: opt.Description,
+			HideOther:   false, // [Other] 입력을 기본적으로 허용합니다.
+		}
+	}
+
+	res, err := m.selectHandler.RequestSelectCtx(ctx, req.Question, opts)
+	if err != nil {
+		return tools.QuestionResponse{SelectedIndex: -1}, err
+	}
+
+	return tools.QuestionResponse{
+		SelectedIndex: res.Index,
+		SelectedLabel: res.Label,
+		IsOther:       res.IsOther,
+	}, nil
 }
 
 func (m AppModel) resize() AppModel {

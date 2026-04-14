@@ -12,6 +12,7 @@ import (
 
 	conn "github.com/yourorg/infractl/internal/connector"
 	"github.com/yourorg/infractl/internal/executor"
+	"github.com/yourorg/infractl/internal/pipeline"
 	"github.com/yourorg/infractl/internal/safety"
 	"github.com/yourorg/infractl/internal/tools"
 )
@@ -222,8 +223,10 @@ func targetParam() map[string]interface{} {
 	}
 }
 
+// formatOutput은 명령 실행 결과를 포맷한다.
+// psql 배너·프롬프트를 제거하고 실제 쿼리 결과만 반환한다.
 func formatOutput(stdout, stderr string, exitCode int) string {
-	out := strings.TrimSpace(stdout)
+	out := pipeline.CleanPSQLOutput(stdout)
 	if exitCode != 0 && stderr != "" {
 		return fmt.Sprintf("[ExitCode: %d]\n%s\n[Stderr]\n%s", exitCode, out, strings.TrimSpace(stderr))
 	}

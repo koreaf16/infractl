@@ -56,15 +56,14 @@ func flattenRounds(rounds []apiRound) []llm.Message {
 // filterHistory는 오래된 대화 라운드에서 단순 도구 호출 내역을 제거하여 토큰 낭비를 줄인다.
 func (a *Agent) filterHistory(history []llm.Message) []llm.Message {
 	rounds := groupByApiRound(history)
-	// 최근 3라운드는 보존 (compaction.go의 preserveRecentRounds와 동일한 개념이나 상수로 지정)
-	const preserveRounds = 3
-	if len(rounds) <= preserveRounds {
+	// preserveRecentRounds는 compaction.go에서 패키지 레벨 상수로 정의한다.
+	if len(rounds) <= preserveRecentRounds {
 		return history
 	}
 
 	var filtered []llm.Message
 	for i, r := range rounds {
-		if i >= len(rounds)-preserveRounds {
+		if i >= len(rounds)-preserveRecentRounds {
 			filtered = append(filtered, r.messages...)
 			continue
 		}

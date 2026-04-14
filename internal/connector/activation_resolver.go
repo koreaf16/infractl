@@ -230,7 +230,7 @@ func (r *ActivationResolver) collectEvidence(ctx context.Context, req Activation
 	}
 
 	if query != "" {
-		webResults, _ := web.SearchDDG(ctx, query+" official documentation command line trace tkprof", 5)
+		webResults, _ := web.Search(ctx, query+" official documentation command line trace tkprof", 5)
 		for _, res := range webResults {
 			evidence = append(evidence, ActivationEvidence{
 				Source:     "web",

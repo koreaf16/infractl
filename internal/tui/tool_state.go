@@ -9,11 +9,13 @@ import "time"
 
 // activeToolState는 실행 중인 단일 도구의 상태를 보관한다.
 type activeToolState struct {
-	toolID     string
-	toolName   string
-	target     string
-	startTime  time.Time
-	shellLines []string // 도구별 슬라이딩 stdout 버퍼 (최대 shellBoxMaxLines)
+	toolID       string
+	toolName     string
+	target       string
+	args         map[string]any
+	startTime    time.Time
+	shellLines   []string // 도구별 슬라이딩 stdout 버퍼 (최대 shellBoxMaxLines)
+	backgrounded bool     // Ctrl+B로 백그라운드로 이동된 경우 true
 }
 
 // activeToolMap은 병렬 실행 중인 도구들을 삽입 순서대로 추적한다.
@@ -24,7 +26,7 @@ type activeToolMap struct {
 }
 
 // Add는 새 도구 실행을 맵에 등록한다.
-func (m *activeToolMap) Add(toolID, toolName, target string) {
+func (m *activeToolMap) Add(toolID, toolName, target string, args map[string]any) {
 	if m.states == nil {
 		m.states = make(map[string]*activeToolState)
 	}
@@ -33,6 +35,7 @@ func (m *activeToolMap) Add(toolID, toolName, target string) {
 		toolID:    toolID,
 		toolName:  toolName,
 		target:    target,
+		args:      args,
 		startTime: time.Now(),
 	}
 }
@@ -66,6 +69,48 @@ func (m *activeToolMap) MostRecent() *activeToolState {
 		return nil
 	}
 	return m.states[m.ids[len(m.ids)-1]]
+}
+
+// MostRecentForeground는 백그라운드가 아닌 가장 최근 도구 상태를 반환한다. 없으면 nil.
+func (m *activeToolMap) MostRecentForeground() *activeToolState {
+	for i := len(m.ids) - 1; i >= 0; i-- {
+		s := m.states[m.ids[i]]
+		if !s.backgrounded {
+			return s
+		}
+	}
+	return nil
+}
+
+// IsBackgrounded는 toolID 도구가 백그라운드 상태인지 반환한다.
+func (m *activeToolMap) IsBackgrounded(toolID string) bool {
+	if s, ok := m.states[toolID]; ok {
+		return s.backgrounded
+	}
+	return false
+}
+
+// BackgroundAll은 실행 중인 모든 도구를 백그라운드로 전환하고 개수를 반환한다.
+func (m *activeToolMap) BackgroundAll() int {
+	count := 0
+	for _, s := range m.states {
+		if !s.backgrounded {
+			s.backgrounded = true
+			count++
+		}
+	}
+	return count
+}
+
+// BackgroundCount는 현재 백그라운드 중인 도구 수를 반환한다.
+func (m *activeToolMap) BackgroundCount() int {
+	count := 0
+	for _, s := range m.states {
+		if s.backgrounded {
+			count++
+		}
+	}
+	return count
 }
 
 // Clear는 맵을 초기화한다.

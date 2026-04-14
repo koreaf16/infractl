@@ -1,3 +1,8 @@
+// Package connector
+// File: spec.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package connector
 
 // GeneratedCommandSpec describes a synthesized tool command template.
@@ -10,3 +15,4 @@ type GeneratedCommandSpec struct {
 	Parameters    map[string]any `json:"parameters,omitempty"`
 	Required      []string       `json:"required,omitempty"`
 }
+

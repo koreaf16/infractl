@@ -85,7 +85,7 @@ func (t *ManageTool) handleList() (string, error) {
 		icon := "⏳"
 		switch j.Status {
 		case StatusCompleted:
-			icon = "✓"
+			icon = " "
 		case StatusFailed:
 			icon = "✗"
 		case StatusCancelled:

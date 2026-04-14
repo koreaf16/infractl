@@ -15,6 +15,7 @@ const (
 	SourceSubagent Source = "subagent"
 	SourceSchedule Source = "schedule"
 	SourceAutoMode Source = "auto_mode"
+	SourceClassify Source = "classify"
 )
 
 // ModelPricing은 모델별 100만 토큰 단가(USD)이다.

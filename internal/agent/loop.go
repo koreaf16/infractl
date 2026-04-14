@@ -7,6 +7,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -26,7 +27,7 @@ import (
 
 const (
 	defaultMaxHistory  = 50
-	defaultMaxToolLoop = 20
+	defaultMaxToolLoop = 50
 )
 
 // rememberPattern은 "기억해줘" 등 수동 지식 등록 요청을 감지하는 정규식이다.
@@ -36,12 +37,10 @@ var rememberPattern = regexp.MustCompile(`(?i)기억해줘|기억해|remember th
 type Agent struct {
 	llmClient           llm.Client
 	llmRegistry         *llm.Registry // 멀티 LLM 티어 레지스트리 (nil이면 단일 모델)
-	llmRouter           *llm.Router   // 티어 라우터 (nil이면 라우팅 비활성)
 	registry            *tools.Registry
 	manager             *executor.Manager
 	store               store.ServerStore
 	handler             EventHandler
-	confirmHandler      ConfirmationHandler
 	sessionStore        store.SessionStore
 	execLogStore        store.ExecLogStore
 	history             []llm.Message
@@ -66,7 +65,9 @@ type Agent struct {
 	lastSystemPromptLen int              // 마지막 시스템 프롬프트 문자 수 — 토큰 추정에 사용
 	compactFailures     int              // circuit breaker: 연속 compaction 실패 횟수
 	yoroMode            bool             // YORO 모드: 확인 대화 없이 바로 실행 (백업/체크포인트는 유지)
+	planMode            bool             // Plan 모드: reasoning tier 강제 + 계획 작성 프롬프트 주입
 	idleHandler         IdleInputHandler // 명령 실행 중 인터랙티브 프롬프트 감지 처리
+	questionHandler     QuestionHandler  // Phase 8: 다중 선택형 질의응답 처리
 }
 
 // New는 에이전트를 생성한다.
@@ -89,9 +90,9 @@ func (a *Agent) SetConnectorManager(mgr *connector.Manager) {
 	a.connectorMgr = mgr
 }
 
-// SetConfirmationHandler는 위험 작업 확인 핸들러를 주입한다.
-func (a *Agent) SetConfirmationHandler(h ConfirmationHandler) {
-	a.confirmHandler = h
+// SetHandler는 이벤트 핸들러를 주입한다.
+func (a *Agent) SetHandler(h EventHandler) {
+	a.handler = h
 }
 
 // SetIdleInputHandler는 명령 실행 중 인터랙티브 프롬프트 감지 핸들러를 주입한다.
@@ -99,10 +100,17 @@ func (a *Agent) SetIdleInputHandler(h IdleInputHandler) {
 	a.idleHandler = h
 }
 
+// SetQuestionHandler는 다중 선택 질의응답 핸들러를 주입한다.
+func (a *Agent) SetQuestionHandler(h QuestionHandler) {
+	a.questionHandler = h
+}
+
 // NewSmartIdleInputHandler는 에이전트의 LLM 클라이언트를 사용하는 SmartIdleInputHandler를 생성한다.
-// 에이전트 내부 llmClient를 외부에 노출하지 않고 핸들러를 생성할 수 있다.
-func (a *Agent) NewSmartIdleInputHandler(tuiHandler IdleInputHandler) *SmartIdleInputHandler {
-	return NewSmartIdleInputHandler(a.llmClient, tuiHandler)
+// LLM이 모든 인터랙티브 프롬프트를 자율 판단하며 사용자 입력 폴백은 없다.
+func (a *Agent) NewSmartIdleInputHandler() *SmartIdleInputHandler {
+	h := NewSmartIdleInputHandler(a.llmClient)
+	h.SetServerStore(a.store)
+	return h
 }
 
 // SetSessionStore는 세션 저장소를 주입한다.
@@ -140,6 +148,17 @@ func (a *Agent) SetRAGManager(rm *rag.Manager) {
 	a.ragManager = rm
 }
 
+// SetYoroMode는 YORO 모드 활성화 여부를 설정한다.
+func (a *Agent) SetYoroMode(enabled bool) {
+	a.yoroMode = enabled
+}
+
+// ToggleYoroMode는 YORO 모드를 토글하고 변경된 상태를 반환한다.
+func (a *Agent) ToggleYoroMode() bool {
+	a.yoroMode = !a.yoroMode
+	return a.yoroMode
+}
+
 // Run은 사용자 입력을 받아 에이전트 루프를 실행한다.
 func (a *Agent) Run(ctx context.Context, userInput string) error {
 	a.lastUserPrompt = userInput
@@ -172,6 +191,13 @@ func (a *Agent) Run(ctx context.Context, userInput string) error {
 		Content: userInput,
 	}
 	a.history = append(a.history, userMsg)
+
+	// 0단계: 지식 프리페치를 classification과 병렬로 즉시 시작한다.
+	activeServerName := ""
+	if a.activeServer != nil {
+		activeServerName = a.activeServer.Name
+	}
+	knowledgeCh := prefetchKnowledgeAsync(ctx, a.ragManager, userInput, activeServerName)
 
 	var savedUserMsg *store.SessionMessage
 	if a.sessionStore != nil && a.currentSessionID > 0 {
@@ -206,15 +232,80 @@ func (a *Agent) Run(ctx context.Context, userInput string) error {
 
 	var learnedSystems []store.LearnedSystem
 	if a.adaptiveLearner != nil {
-		learnedSystems = a.adaptiveLearner.ListSystems(ctx)
+		all := a.adaptiveLearner.ListSystems(ctx)
+		for _, sys := range all {
+			if a.activeServer == nil || strings.EqualFold(sys.ServerName, a.activeServer.Name) {
+				learnedSystems = append(learnedSystems, sys)
+			}
+		}
 	}
 	var ragSources []store.RAGSource
 	var knowledgeStats *rag.KnowledgeStats
 	if a.ragManager != nil {
-		ragSources, _ = a.ragManager.ListSources(ctx)
+		allSources, _ := a.ragManager.ListSources(ctx)
+		for _, src := range allSources {
+			if a.activeServer == nil || src.ServerName == "" || strings.EqualFold(src.ServerName, a.activeServer.Name) {
+				ragSources = append(ragSources, src)
+			}
+		}
 		knowledgeStats, _ = a.ragManager.Stats(ctx)
 	}
-	systemPrompt := BuildContextual(a.registry.GetEnabled(), infractlMD, servers, a.activeServer, connStates, learnedSystems, ragSources, knowledgeStats)
+
+	// 1단계: Qwen(General LLM)이 스스로 필요한 도구, 정보, 실행 모델을 결정한다.
+	classification, err := a.runSelfClassification(ctx, userInput)
+	if err != nil {
+		slog.Warn("Self-classification failed, using defaults", "err", err)
+		classification = ClassifyResult{
+			NeedsTools:     true,
+			ToolGroups:     []string{"shell", "system_info", "server_mgmt", "file_ops"},
+			PromptSections: []string{"safety", "tool_priority", "tool_selection"},
+			Tier:           "general",
+		}
+	}
+
+	// Plan 모드: 최고 추론 티어 강제 적용
+	if a.planMode {
+		classification.Tier = "reasoning"
+	}
+
+	// 2단계: 결정된 결과에 따라 도구와 섹션을 조립한다.
+	allowedTools := ResolveToolGroups(classification.ToolGroups, a.registry, a.connectorMgr)
+	sections := ResolveSectionsFromList(
+		classification.PromptSections,
+		classification.NeedsTools,
+		a.activeServer != nil,
+		len(servers) > 0,
+		len(connStates) > 0,
+		len(learnedSystems) > 0,
+		infractlMD != "",
+	)
+
+	var systemPrompt string
+	var enabledTools []tools.Tool
+	var toolDefs []llm.ToolDef
+
+	// 3단계: Qwen이 선택한 티어의 모델로 실행한다.
+	activeClient, activeTier, activeModelName := a.resolveClientForTier(classification.Tier)
+	
+	llm.LogSystemEvent("Execution Info", fmt.Sprintf("Final Tier: %s\nModel Name: %s", activeTier, activeModelName))
+
+	// classification이 완료된 시점에 프리페치 결과를 논블로킹으로 수집한다.
+	// 아직 준비되지 않았다면 LLM이 rag_search 도구로 직접 검색하게 된다.
+	var prefetchedKnowledge string
+	select {
+	case k := <-knowledgeCh:
+		prefetchedKnowledge = k
+	default:
+	}
+
+	if classification.NeedsTools {
+		enabledTools = a.registry.GetEnabledFiltered(allowedTools)
+		toolDefs = a.registry.ToToolDefsFiltered(allowedTools)
+		systemPrompt = BuildContextual(sections, enabledTools, infractlMD, servers, a.activeServer, connStates, learnedSystems, ragSources, knowledgeStats, activeModelName, prefetchedKnowledge)
+	} else {
+		systemPrompt = BuildMinimalChat(infractlMD)
+	}
+
 	if resolvedAlias != "" {
 		systemPrompt += fmt.Sprintf(
 			"\n\n[LATEST INPUT RESOLUTION]\nlatest user input resolved to SSH server alias <%s>.\nPrioritize this alias for this turn over stale history references.\n",
@@ -222,13 +313,9 @@ func (a *Agent) Run(ctx context.Context, userInput string) error {
 		)
 	}
 
-	// Phase 7: 도구 루프 진입 전 로컬 벡터 검색 결과를 시스템 프롬프트에 사전 주입
-	activeServerName := ""
-	if a.activeServer != nil {
-		activeServerName = a.activeServer.Name
-	}
-	if knowledgeCtx := buildKnowledgeContext(ctx, a.ragManager, userInput, activeServerName, a.currentSessionID); knowledgeCtx != "" {
-		systemPrompt += "\n\n" + knowledgeCtx
+	// Plan 모드: 계획 작성 전용 프롬프트 섹션 주입
+	if a.planMode {
+		systemPrompt += planModeInstruction()
 	}
 
 	// 시스템 프롬프트 길이를 캐싱하여 토큰 추정에 활용한다.
@@ -243,13 +330,18 @@ func (a *Agent) Run(ctx context.Context, userInput string) error {
 
 	systemMsg := llm.Message{Role: llm.RoleSystem, Content: systemPrompt}
 
-	toolDefs := a.registry.ToToolDefs()
+	// Qwen 모델일 경우 API의 명시적 tools 필드를 비우고 프롬프트 기반으로 툴 호출을 유도한다.
+	// 이는 vLLM 파서가 스트리밍 중 데이터를 유실하거나 400 에러를 내는 것을 방지하기 위함이다.
+	apiTools := toolDefs
+	if strings.Contains(strings.ToLower(activeModelName), "qwen") {
+		apiTools = nil
+	}
 
 	for i := 0; i < a.maxToolLoop; i++ {
 		messages := a.buildMessages(systemMsg)
 
-		a.handler.OnThinking()
-		resp, err := a.llmClient.ChatStream(ctx, messages, toolDefs, a.handler.OnThinkingToken, a.handler.OnToken)
+		a.handler.OnThinking(string(activeTier), activeModelName)
+		resp, err := activeClient.ChatStream(ctx, messages, apiTools, a.handler.OnThinkingToken, a.handler.OnToken)
 		if err != nil {
 			a.handler.OnError(fmt.Errorf("llm call failed: %w", err))
 			return fmt.Errorf("llm call: %w", err)
@@ -263,12 +355,28 @@ func (a *Agent) Run(ctx context.Context, userInput string) error {
 			a.handler.OnUsageUpdate(resp.InputTokens, resp.OutputTokens, 0, 0)
 			// Phase 8: 비용 기록 (비동기, 실패해도 루프 계속)
 			if a.costTracker != nil {
-				a.costTracker.Record(ctx, a.modelName, resp.InputTokens, resp.OutputTokens,
+				a.costTracker.Record(ctx, activeModelName, resp.InputTokens, resp.OutputTokens,
 					cost.SourceUser, a.currentSessionID)
 			}
 		}
 
 		if len(resp.ToolCalls) == 0 {
+			// Loop Guard: 상태 변경 작업이 있는데 verify_complete를 호출하지 않은 경우 강제 중단 방지
+			if a.isMutationPerformedWithoutVerification() {
+				slog.Info("Loop guard: mutation detected without verify_complete, injecting system hint", "session", a.currentSessionID)
+				
+				// 이미 스트리밍된 응답이 있다면, 사용자에게 루프 가드 상황임을 알림
+				if resp.Content != "" {
+					a.handler.OnResponse("[SYSTEM] 상태 변경 내역이 감지되어 최종 확인 절차를 진행합니다...")
+				}
+
+				a.history = append(a.history, llm.Message{
+					Role:    llm.RoleUser,
+					Content: "[SYSTEM] 당신은 시스템 상태를 변경하는 명령을 수행했지만, 아직 `verify_complete` 도구를 호출하지 않았습니다. 반드시 결과를 명령어로 직접 확인(Verify)한 뒤, `verify_complete` 도구를 호출하여 최종 보고를 완료하십시오. 이 도구 호출 전에는 작업을 마칠 수 없습니다.",
+				})
+				continue
+			}
+
 			assistantFinal := llm.Message{
 				Role:    llm.RoleAssistant,
 				Content: resp.Content,
@@ -292,6 +400,7 @@ func (a *Agent) Run(ctx context.Context, userInput string) error {
 
 		assistantMsg := llm.Message{
 			Role:      llm.RoleAssistant,
+			Content:   resp.Content,
 			ToolCalls: resp.ToolCalls,
 		}
 		a.history = append(a.history, assistantMsg)
@@ -308,6 +417,11 @@ func (a *Agent) Run(ctx context.Context, userInput string) error {
 		}
 
 		toolResults := a.executeToolCalls(ctx, resp.ToolCalls)
+		for i, tc := range resp.ToolCalls {
+			if i < len(toolResults) {
+				llm.LogToolResult(tc.Function.Name, toolResults[i].Content)
+			}
+		}
 		a.history = append(a.history, toolResults...)
 		if a.sessionStore != nil && a.currentSessionID > 0 {
 			for _, tr := range toolResults {
@@ -324,9 +438,9 @@ func (a *Agent) Run(ctx context.Context, userInput string) error {
 		}
 	}
 
-	err := fmt.Errorf("max tool loop iterations (%d) exceeded", a.maxToolLoop)
-	a.handler.OnError(err)
-	return err
+	loopErr := fmt.Errorf("max tool loop iterations (%d) exceeded", a.maxToolLoop)
+	a.handler.OnError(loopErr)
+	return loopErr
 }
 
 // Tools는 등록된 도구 목록을 반환한다.
@@ -364,3 +478,49 @@ func (a *Agent) ToggleYOROMode() bool {
 
 // IsYOROMode는 YORO 모드 활성 여부를 반환한다.
 func (a *Agent) IsYOROMode() bool { return a.yoroMode }
+
+// isMutationPerformedWithoutVerification은 현재 턴에서 상태 변경 작업이 있었으나
+// verify_complete 도구가 호출되지 않았는지 확인한다.
+func (a *Agent) isMutationPerformedWithoutVerification() bool {
+	hasMutation := false
+	hasVerification := false
+
+	// 현재 턴의 시작(가장 최근의 실제 사용자 입력)부터 탐색
+	for i := len(a.history) - 1; i >= 0; i-- {
+		msg := a.history[i]
+
+		// 루프 가드에 의해 주입된 시스템 메시지는 유저 역할이지만 Skip
+		if msg.Role == llm.RoleUser && !strings.Contains(msg.Content, "[SYSTEM]") {
+			break
+		}
+
+		if msg.Role == llm.RoleAssistant {
+			if len(msg.ToolCalls) > 0 {
+				for _, tc := range msg.ToolCalls {
+					if tc.Function.Name == "verify_complete" {
+						hasVerification = true
+						continue
+					}
+					// 도구 레지스트리에서 읽기 전용 여부 확인
+					if tool, ok := a.registry.Get(tc.Function.Name); ok {
+						if !tool.IsReadOnly() {
+							// 인자를 파싱하여 실제 위험도를 평가 (RiskNone이면 읽기 전용으로 취급)
+							var args map[string]interface{}
+							if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err == nil {
+								if evaluateToolSafety(tool, args).RiskLevel != tools.RiskNone {
+									hasMutation = true
+								}
+							} else {
+								// 파싱 실패 시 보수적으로 상태 변경으로 간주
+								hasMutation = true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 상태 변경은 있었는데 검증 도구 호출이 없었다면 true
+	return hasMutation && !hasVerification
+}

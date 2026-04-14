@@ -1,3 +1,8 @@
+// Package rag
+// File: local_search.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package rag
 
 import (
@@ -27,3 +32,4 @@ type SearchOptions struct {
 type LocalSearcher interface {
 	Search(ctx context.Context, query string, topK int, minScore float32) ([]LocalResult, error)
 }
+

@@ -1,0 +1,174 @@
+﻿
+========== PROMPT ==========
+You are a helpful assistant with tool calling capabilities.
+
+Hello, list the current files in this directory using shell_exec.
+
+[Tools: shell_exec]
+============================
+
+========== PROMPT ==========
+You are a helpful assistant. When asked to perform a system task, you MUST use the provided tools. Respond in English.
+
+What files are in the current directory? Use shell_exec to find out.
+
+[Tools: shell_exec]
+============================
+
+========== PROMPT ==========
+You are a helpful assistant. When asked to perform a system task, you MUST use the provided tools. Respond in English.
+
+What files are in the current directory? Use shell_exec to find out.
+
+[Tools: shell_exec]
+============================
+
+========== PROMPT ==========
+You are a helpful assistant. When asked to perform a system task, you MUST use the provided tools. Respond in English.
+
+What files are in the current directory? Use shell_exec to find out.
+
+[Tools: shell_exec]
+============================
+
+========== PROMPT ==========
+You are a helpful assistant. Use tools when needed.
+
+List files in current directory with shell_exec.
+
+[Tools: shell_exec]
+============================
+
+========== LLM RESPONSE ==========
+<tool_call>
+{"name": "shell_exec", "arguments": {"command": "ls -la"}}
+</tool_call>
+==================================
+
+========== PROMPT ==========
+You are a helpful assistant. Use tools when needed.
+
+List files in current directory with shell_exec.
+
+[Tools: shell_exec]
+============================
+
+========== PROMPT ==========
+You are a helpful assistant. Use tools when needed. If you use a tool, wrap it in <tool_call> tags.
+
+List files in current directory with shell_exec.
+
+[Tools: shell_exec]
+============================
+
+========== ERROR ==========
+Post "http://192.168.0.3:11434/v1/chat/completions": EOF
+===========================
+
+========== PROMPT ==========
+You are a helpful assistant. Use tools when needed. If you use a tool, wrap it in <tool_call> tags.
+
+List files in current directory with shell_exec.
+
+[Tools: shell_exec]
+============================
+
+========== PROMPT ==========
+You are a helpful assistant. Use tools when needed. If you use a tool, wrap it in <tool_call> tags.
+
+List files in current directory with shell_exec.
+
+[Tools: shell_exec]
+============================
+
+========== PROMPT ==========
+You are a helpful assistant. Use tools when needed. If you use a tool, wrap it in <tool_call> tags.
+
+List files in current directory with shell_exec.
+
+[Tools: shell_exec]
+============================
+
+========== PROMPT ==========
+You are a helpful assistant. Use tools when needed. If you use a tool, wrap it in <tool_call> tags.
+
+List files in current directory with shell_exec.
+
+[Tools: shell_exec]
+============================
+
+========== PROMPT ==========
+You are a helpful assistant. Use tools when needed. If you use a tool, wrap it in <tool_call> tags.
+
+List files in current directory with shell_exec.
+
+[Tools: shell_exec]
+============================
+
+========== ERROR ==========
+Post "http://192.168.0.3:11434/v1/chat/completions": EOF
+===========================
+
+========== PROMPT ==========
+You are a helpful assistant. Use tools when needed. If you use a tool, wrap it in <tool_call> tags.
+
+List files in current directory with shell_exec.
+
+[Tools: shell_exec]
+============================
+
+========== PROMPT ==========
+You are a helpful assistant. Use tools when needed. If you use a tool, wrap it in <tool_call> tags.
+
+List files in current directory with shell_exec.
+
+[Tools: shell_exec]
+============================
+
+========== ERROR ==========
+Post "http://192.168.0.3:11434/v1/chat/completions": EOF
+===========================
+
+========== PROMPT ==========
+You are a helpful assistant. To use tools, follow this format:
+<tool_call>
+{"name": "shell_exec", "arguments": {"command": "ls -la"}}
+</tool_call>
+
+Available Tool:
+- shell_exec: Execute a shell command. Args: {"command": "string"}
+
+List files in the current directory using shell_exec.
+============================
+
+========== ERROR ==========
+Post "http://192.168.0.3:11434/v1/chat/completions": EOF
+===========================
+
+========== PROMPT ==========
+You are a helpful assistant. To use tools, follow this format:
+<tool_call>
+{"name": "shell_exec", "arguments": {"command": "ls -la"}}
+</tool_call>
+
+Available Tool:
+- shell_exec: Execute a shell command. Args: {"command": "string"}
+
+List files in the current directory using shell_exec.
+============================
+
+========== ERROR ==========
+Post "http://192.168.0.3:11434/v1/chat/completions": EOF
+===========================
+
+========== PROMPT ==========
+You are a helpful assistant. To use tools, follow this format:
+<tool_call>
+{"name": "shell_exec", "arguments": {"command": "ls -la"}}
+</tool_call>
+
+Available Tool:
+- shell_exec: Execute a shell command. Args: {"command": "string"}
+
+List files in the current directory using shell_exec.
+============================

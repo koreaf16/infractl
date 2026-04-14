@@ -6,92 +6,92 @@
 package infrainit
 
 import (
-	"bufio"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/yourorg/infractl/internal/tui"
 	"golang.org/x/term"
 )
 
 // promptText는 라벨을 출력하고 한 줄을 읽어 반환한다.
 // 빈 입력이면 defaultVal을 반환한다.
-func promptText(reader *bufio.Reader, label, defaultVal string) string {
+func promptText(label, defaultVal string) string {
+	q := label
 	if defaultVal != "" {
-		fmt.Printf("  %s [%s]: ", label, defaultVal)
-	} else {
-		fmt.Printf("  %s: ", label)
+		q = fmt.Sprintf("%s [%s]", label, defaultVal)
 	}
 
-	input, _ := reader.ReadString('\n')
-	input = strings.TrimSpace(input)
-	if input == "" {
+	result := tui.RunSelect(q, []tui.SelectOption{}, 80)
+	if result.Label == "" {
 		return defaultVal
 	}
-	return input
+	return result.Label
 }
 
-// promptSecret는 라벨을 출력하고 에코 없이 한 줄을 읽어 반환한다.
-// API Key 등 민감한 값 입력에 사용한다.
+// promptSecret는 Gemini 박스 스타일로 API Key 등 존감한 값을 입력받는다.
 func promptSecret(label string) string {
-	fmt.Printf("  %s: ", label)
+	borderColor := lipgloss.NewStyle().Foreground(tui.ColorGeminiBox)
+	fmt.Println(borderColor.Render("╭") + " " + tui.StyleGeminiHeader.Render("🔐 Secret Input"))
+	fmt.Println(borderColor.Render("│"))
+	fmt.Print(borderColor.Render("│  ") + tui.StyleGeminiSubDesc.Render(label+": "))
 	b, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println() // ReadPassword는 개행을 출력하지 않으므로 직접 출력
+	fmt.Println(borderColor.Render("╰" + strings.Repeat("─", 50) + "╯"))
 	if err != nil {
-		// 터미널이 아닌 환경(파이프, 테스트)에서는 일반 readline으로 폴백
-		reader := bufio.NewReader(os.Stdin)
-		input, _ := reader.ReadString('\n')
-		return strings.TrimSpace(input)
+		res := tui.RunSelect(label, []tui.SelectOption{}, 80)
+		return strings.TrimSpace(res.Label)
 	}
 	return strings.TrimSpace(string(b))
 }
 
 // promptYN은 Y/N 질문을 출력하고 bool을 반환한다.
 // defaultYes=true이면 빈 입력을 Yes로 처리한다.
-func promptYN(reader *bufio.Reader, question string, defaultYes bool) bool {
-	hint := "y/N"
-	if defaultYes {
-		hint = "Y/n"
+func promptYN(question string, defaultYes bool) bool {
+	opts := []tui.SelectOption{
+		{Label: "Yes", HideOther: true},
+		{Label: "No", HideOther: true},
 	}
-	fmt.Printf("  %s (%s): ", question, hint)
-
-	input, _ := reader.ReadString('\n')
-	input = strings.TrimSpace(strings.ToLower(input))
-	if input == "" {
-		return defaultYes
+	if !defaultYes {
+		opts = []tui.SelectOption{
+			{Label: "No", HideOther: true},
+			{Label: "Yes", HideOther: true},
+		}
 	}
-	return input == "y" || input == "yes"
+	
+	result := tui.RunSelect(question, opts, 80)
+	return result.Label == "Yes" || strings.ToLower(result.Label) == "y" || strings.ToLower(result.Label) == "yes"
 }
 
 // promptSelect는 목록을 번호로 출력하고 선택된 0-based 인덱스를 반환한다.
 // 유효하지 않은 번호 입력 시 재시도한다.
-func promptSelect(reader *bufio.Reader, options []string) int {
-	for i, opt := range options {
-		fmt.Printf("    %d) %s\n", i+1, opt)
+func promptSelect(options []string) int {
+	opts := make([]tui.SelectOption, len(options))
+	for i, o := range options {
+		opts[i] = tui.SelectOption{Label: o, HideOther: true}
 	}
-	for {
-		fmt.Printf("  번호 입력 [1]: ")
-		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(input)
-		if input == "" {
-			return 0
-		}
-		n, err := strconv.Atoi(input)
-		if err != nil || n < 1 || n > len(options) {
-			fmt.Printf("  1~%d 사이의 번호를 입력하세요.\n", len(options))
-			continue
-		}
-		return n - 1
+	result := tui.RunSelect("선택하세요", opts, 80)
+	if result.Index < 0 {
+		return 0
 	}
+	return result.Index
 }
 
-// printSectionHeader는 단계 헤더를 출력한다.
+// printSectionHeader는 Gemini 스타일로 단계 헤더를 출력한다.
 func printSectionHeader(step, title string) {
-	fmt.Printf("\n[%s] %s\n", step, title)
+	borderColor := lipgloss.NewStyle().Foreground(tui.ColorGeminiBox)
+	sep := strings.Repeat("─", 50)
+	fmt.Println()
+	fmt.Println(borderColor.Render("╭"+sep+"╮"))
+	fmt.Println(borderColor.Render("│") + " " +
+		tui.StyleGeminiHeader.Render(step) + 
+		tui.StyleGeminiSubDesc.Render(" — "+title))
+	fmt.Println(borderColor.Render("╰"+sep+"╯"))
 }
 
-// printSuccess는 성공 메시지를 출력한다.
+// printSuccess는 Gemini 스타일로 성공 메시지를 출력한다.
 func printSuccess(msg string) {
-	fmt.Printf("\n✓ %s\n", msg)
+	fmt.Println()
+	fmt.Println(tui.StyleSuccess.Render("✓ ") + tui.StyleGeminiHeader.Render(msg))
 }

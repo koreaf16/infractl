@@ -1,3 +1,8 @@
+// Package connector
+// File: manager.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package connector
 
 import (
@@ -55,9 +60,9 @@ func (m *Manager) RegisterFactory(serviceType string, factory ConnectorFactory) 
 	m.factories[serviceType] = factory
 }
 
-// ProbeAndActivate는 OS 인증을 먼저 시도하고 성공하면 커넥터를 활성화한다.
-// 커넥터가 OSAuthProber를 구현하지 않거나 OS 인증이 실패하면 non-nil error를 반환한다.
-// 반환 값은 활성화된 도구 수이다.
+// ProbeAndActivate??OS ?�증??먼�? ?�도?�고 ?�공?�면 커넥?��? ?�성?�한??
+// 커넥?��? OSAuthProber�?구현?��? ?�거??OS ?�증???�패?�면 non-nil error�?반환?�다.
+// 반환 값�? ?�성?�된 ?�구 ?�이??
 func (m *Manager) ProbeAndActivate(ctx context.Context, info ServiceInfo, exec executor.Executor, saveMode SaveMode) (int, error) {
 	conn, err := m.createConnector(info.ServiceType)
 	if err != nil {
@@ -66,7 +71,7 @@ func (m *Manager) ProbeAndActivate(ctx context.Context, info ServiceInfo, exec e
 
 	prober, ok := conn.(OSAuthProber)
 	if !ok {
-		return 0, fmt.Errorf("서비스 %s는 OS 인증을 지원하지 않습니다", info.ServiceType)
+		return 0, fmt.Errorf("?�비??%s??OS ?�증??지?�하지 ?�습?�다", info.ServiceType)
 	}
 
 	creds, err := prober.ProbeOSAuth(ctx, info, exec)
@@ -326,3 +331,4 @@ func (m *Manager) createConnector(serviceType string) (Connector, error) {
 	}
 	return factory(), nil
 }
+

@@ -28,6 +28,7 @@ import (
 	"github.com/yourorg/infractl/internal/hooks"
 	"github.com/yourorg/infractl/internal/llm"
 	"github.com/yourorg/infractl/internal/mcp"
+	"github.com/yourorg/infractl/internal/privilege"
 	"github.com/yourorg/infractl/internal/rag"
 	"github.com/yourorg/infractl/internal/schedule"
 	"github.com/yourorg/infractl/internal/store"
@@ -60,13 +61,19 @@ func defaultTools(
 	fetcher := web.NewFetcher(100, 15*time.Minute)
 	return []tools.Tool{
 		// 빌트인 도구
-		&tools.ShellExecTool{},
-		&tools.SessionContextTool{Store: st},
+		&tools.ShellExecTool{PrivilegeCache: privilege.NewCache()},
+		&tools.FileTransferTool{},
+		&tools.SessionContextTool{Store: st, Manager: mgr},
 		&tools.FileReadTool{},
 		&tools.FileWriteTool{},
 		&tools.ReadPlaceholderTool{},
 		&tools.ProcessListTool{},
 		&tools.NetworkInfoTool{},
+		&tools.SystemInfoTool{},
+		&tools.ServiceStatusTool{},
+		&tools.LogTailTool{},
+		&tools.K8sQueryTool{},
+		&tools.DiskUsageTool{},
 		&tools.ServerAddTool{Store: st, Manager: mgr},
 		&tools.ServerListTool{Store: st},
 		&tools.ServerRemoveTool{Store: st, Manager: mgr, ConnectorCleanup: connMgr},
@@ -100,6 +107,10 @@ func defaultTools(
 		&schedule.ListTool{Scheduler: sched},
 		// 활성 서버 포커스 도구
 		&tools.ServerFocusTool{Store: st},
+		// 작업 완료 검증 도구
+		&tools.VerifyCompleteTool{},
+		// 질의응답 도구
+		&tools.AskUserQuestionTool{},
 	}
 }
 

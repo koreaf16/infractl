@@ -19,7 +19,7 @@ type KnowledgeSearchTool struct {
 	Store store.KnowledgeStore
 }
 
-func (t *KnowledgeSearchTool) Name() string        { return "knowledge_search" }
+func (t *KnowledgeSearchTool) Name() string         { return "knowledge_search" }
 func (t *KnowledgeSearchTool) RiskLevel() RiskLevel { return RiskNone }
 func (t *KnowledgeSearchTool) IsReadOnly() bool     { return true }
 func (t *KnowledgeSearchTool) IsEnabled() bool      { return true }

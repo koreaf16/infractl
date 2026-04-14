@@ -78,16 +78,15 @@ func (cv *chatView) renderItemLines(idx int, item chatItem) []string {
 			return nil
 		}
 		if len(item.renderedLines) > 0 {
-			// Claude CLI 스타일: ⎿ 브래킷 프리픽스
-			prefixed := applyBracketPrefix(item.renderedLines)
+			lines := item.renderedLines
 			if isSelected {
 				var styled []string
-				for _, l := range prefixed {
+				for _, l := range lines {
 					styled = append(styled, applySelection(l))
 				}
 				return addPrefix(styled, "\n")
 			}
-			return addPrefix(prefixed, "\n")
+			return addPrefix(lines, "\n")
 		}
 		content = "\n" + item.assistant
 
@@ -131,21 +130,6 @@ func applySelection(content string) string {
 		BorderForeground(ColorClaude).
 		PaddingLeft(1).
 		Render(content)
-}
-
-// applyBracketPrefix는 assistant 응답 줄에 Claude CLI 스타일 ⎿ 브래킷을 적용한다.
-func applyBracketPrefix(lines []string) []string {
-	bracket := StyleResponseBracket.Render("  ⎿  ")
-	indent := "     "
-	prefixed := make([]string, len(lines))
-	for i, line := range lines {
-		if i == 0 {
-			prefixed[i] = bracket + line
-		} else {
-			prefixed[i] = indent + line
-		}
-	}
-	return prefixed
 }
 
 // addPrefix는 줄 슬라이스 앞에 prefix를 분할하여 추가한다.

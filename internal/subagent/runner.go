@@ -85,7 +85,7 @@ func (r *Runner) Execute(ctx context.Context, cfg SubagentConfig) SubagentResult
 
 	client := r.resolveClient()
 	for i := 0; i < maxSubagentIter; i++ {
-		resp, err := client.Chat(ctx, messages, toolDefs)
+		resp, err := client.Chat(ctx, messages, toolDefs, nil)
 		if err != nil {
 			result.Err = fmt.Errorf("subagent llm call: %w", err)
 			r.fire(Event{
@@ -123,6 +123,7 @@ func (r *Runner) Execute(ctx context.Context, cfg SubagentConfig) SubagentResult
 				ToolArg:  tc.Function.Arguments,
 			})
 			toolResult := r.executeTool(ctx, tc, cfg.Server, filteredTools)
+			llm.LogToolResult(tc.Function.Name, toolResult.Content)
 			result.ToolUses++
 			messages = append(messages, toolResult)
 		}

@@ -77,9 +77,9 @@ func summaryFileRead(args map[string]any, result string) string {
 func summaryShellExec(result string, success bool) string {
 	lines := countLines(result)
 	if success {
-		return StyleSuccess.Render("✓") + fmt.Sprintf(" %d lines output", lines)
+		return fmt.Sprintf("%d lines output", lines)
 	}
-	return StyleError.Render("✗") + fmt.Sprintf(" %d lines output (failed)", lines)
+	return fmt.Sprintf("%d lines output (failed)", lines)
 }
 
 func summaryWebFetch(result string) string {
@@ -105,6 +105,43 @@ func summaryWebSearch(args map[string]any, result string) string {
 func summarySearch(result string) string {
 	lines := countLines(result)
 	return fmt.Sprintf("Found %d matches", lines)
+}
+
+// toolBoxContent는 도구 결과 박스 내부에 표시할 줄들을 반환한다.
+// shell_exec / file_transfer처럼 스트리밍 출력이 있는 도구는 호출자가 캡처된 라인을 전달한다.
+// 그 외 도구는 결과에서 간략한 요약 한 줄을 생성한다.
+func toolBoxContent(name string, args map[string]any, result string, success bool) []string {
+	switch name {
+	case "shell_exec", "file_transfer":
+		return nil // 호출자가 스트리밍 캡처 라인을 제공한다
+	case "system_info":
+		if result == "" {
+			return nil
+		}
+		return strings.Split(strings.TrimRight(result, "\r\n"), "\n")
+	case "file_write":
+		return []string{summaryFileWrite(args, result)}
+	case "file_read":
+		return []string{summaryFileRead(args, result)}
+	case "web_fetch":
+		return []string{summaryWebFetch(result)}
+	case "web_search":
+		return []string{summaryWebSearch(args, result)}
+	case "knowledge_search":
+		return []string{summarySearch(result)}
+	default:
+		first := firstLine(result)
+		if len(first) > 80 {
+			first = first[:77] + "..."
+		}
+		if first != "" {
+			return []string{StyleCmdBoxDim.Render(first)}
+		}
+		if success {
+			return []string{StyleSuccess.Render("Done")}
+		}
+		return []string{StyleError.Render("Failed")}
+	}
 }
 
 // truncateResult는 결과를 maxPreviewLines로 제한하고 초과분을 힌트로 표시한다.

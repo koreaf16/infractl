@@ -25,6 +25,7 @@ const (
 // shimmerState는 shimmer 애니메이션 상태를 관리한다.
 type shimmerState struct {
 	text             string
+	hint             string // 우측 보조 텍스트 (현재 작업 설명 등)
 	startTime        time.Time
 	lastActivityTime time.Time
 	pos              int
@@ -64,6 +65,12 @@ func (s *shimmerState) RecordActivity() {
 func (s *shimmerState) SetText(text string) {
 	s.text = text
 	s.RecordActivity()
+}
+
+// SetHint는 shimmer 우측 보조 텍스트를 변경한다.
+// thinking 스트리밍 내용 등을 실시간으로 표시하는 데 사용한다.
+func (s *shimmerState) SetHint(hint string) {
+	s.hint = hint
 }
 
 // Tick은 shimmer 위치를 전진시킨다.
@@ -108,11 +115,17 @@ func (s *shimmerState) View() string {
 		bulletStyle = lipgloss.NewStyle().Foreground(ColorStalled)
 	}
 
-	left := "  " + bulletStyle.Render(bullet) + " " + colored + " " + elapsedStr
+	left := bulletStyle.Render(bullet) + " " + colored + " " + elapsedStr
 
-	// 우측: background count
-	if s.bgCount > 0 && s.width > 0 {
-		right := StyleInfoBarDim.Render(fmt.Sprintf("%d in background", s.bgCount))
+	// 우측: hint(작업 설명) 또는 background count
+	var right string
+	if s.bgCount > 0 {
+		right = StyleInfoBarDim.Render(fmt.Sprintf("%d in background", s.bgCount))
+	} else if s.hint != "" {
+		right = StyleInfoBarDim.Render(s.hint)
+	}
+
+	if right != "" && s.width > 0 {
 		leftW := lipgloss.Width(left)
 		rightW := lipgloss.Width(right)
 		gap := s.width - leftW - rightW
@@ -177,6 +190,31 @@ func (s *shimmerState) colorize(text string, stalled bool) string {
 // StyleClaude는 Claude orange bold 스타일을 반환한다.
 func StyleClaude() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(ColorClaude).Bold(true)
+}
+
+// thinkHint는 누적된 thinking 내용에서 마지막 비어있지 않은 줄을 추출하여
+// shimmer hint로 표시할 짧은 문자열을 반환한다.
+// maxRunes를 초과하는 경우 앞부분을 "…"으로 대체한다.
+func thinkHint(content string, maxRunes int) string {
+	content = strings.ReplaceAll(content, "<think>", "")
+	content = strings.ReplaceAll(content, "</think>", "")
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		runes := []rune(line)
+		if len(runes) <= maxRunes {
+			return line
+		}
+		return "…" + string(runes[len(runes)-maxRunes:])
+	}
+	return ""
 }
 
 // shimmerTickCmd는 shimmer 간격으로 틱을 생성하는 Cmd를 반환한다.

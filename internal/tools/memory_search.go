@@ -1,3 +1,8 @@
+// Package tools
+// File: memory_search.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package tools
 
 import (

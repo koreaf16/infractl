@@ -15,11 +15,15 @@ import (
 )
 
 // renderUserInputLine은 사용자 입력을 스크롤백 출력용으로 렌더링한다.
-// 형식: ❯ You\n  입력 내용
-func renderUserInputLine(display string) string {
+// 형식: ❯ You\n  입력 내용 (배경색이 터미널 전체 너비까지 채워진다)
+func renderUserInputLine(display string, width int) string {
 	header := StyleInputPrompt.Render("❯ ") + lipgloss.NewStyle().Bold(true).Render("You")
-	body := StyleUserMsg.Render("  " + display)
-	return "\n" + header + "\n" + body
+	style := StyleUserMsg
+	if width > 0 {
+		style = style.Width(width)
+	}
+	body := style.Render("  " + display)
+	return header + "\n" + body
 }
 
 // renderToolHeaderLine은 도구 시작을 스크롤백 출력용으로 렌더링한다.
@@ -42,21 +46,15 @@ func renderToolSummaryLine(name string, args map[string]any, result string, dura
 }
 
 // renderResponseText는 최종 응답을 스크롤백 출력용으로 렌더링한다.
-// 형식: ⎿ 첫 줄\n     나머지 줄...
+// 각 줄 앞에 2칸 들여쓰기를 적용한다.
 func renderResponseText(content string, md *mdRenderer) string {
 	lines := md.Render(content)
 	if len(lines) == 0 {
 		return ""
 	}
-	bracket := StyleResponseBracket.Render("  ⎿  ")
-	indent := "     "
 	var sb strings.Builder
 	for i, line := range lines {
-		if i == 0 {
-			sb.WriteString(bracket + line)
-		} else {
-			sb.WriteString(indent + line)
-		}
+		sb.WriteString("   " + line)
 		if i < len(lines)-1 {
 			sb.WriteString("\n")
 		}
@@ -66,6 +64,7 @@ func renderResponseText(content string, md *mdRenderer) string {
 
 // renderStreamingPreview는 스트리밍 중 미리보기를 렌더링한다.
 // View()의 busy 상태에서 마지막 N줄을 표시할 때 사용한다.
+// 각 줄 앞에 2칸 들여쓰기를 적용한다.
 func renderStreamingPreview(content string, md *mdRenderer, cache *stableCache, maxLines int) []string {
 	if content == "" {
 		return nil
@@ -74,21 +73,15 @@ func renderStreamingPreview(content string, md *mdRenderer, cache *stableCache, 
 	if len(lines) == 0 {
 		return nil
 	}
-	bracket := StyleResponseBracket.Render("  ⎿  ")
-	indent := "     "
-	var rendered []string
-	for i, line := range lines {
-		if i == 0 {
-			rendered = append(rendered, bracket+line)
-		} else {
-			rendered = append(rendered, indent+line)
-		}
+	indented := make([]string, len(lines))
+	for i, l := range lines {
+		indented[i] = "   " + l
 	}
 	// 마지막 maxLines 줄만 반환
-	if maxLines > 0 && len(rendered) > maxLines {
-		rendered = rendered[len(rendered)-maxLines:]
+	if maxLines > 0 && len(indented) > maxLines {
+		indented = indented[len(indented)-maxLines:]
 	}
-	return rendered
+	return indented
 }
 
 // renderErrorLine은 에러를 스크롤백 출력용으로 렌더링한다.
@@ -99,6 +92,14 @@ func renderErrorLine(err error) string {
 // renderSystemLine은 시스템 메시지를 스크롤백 출력용으로 렌더링한다.
 func renderSystemLine(msg string) string {
 	return StyleInfoBarDim.Render(msg)
+}
+
+// renderTurnSeparator는 채팅 턴 사이의 전체 너비 회색 구분선을 렌더링한다.
+func renderTurnSeparator(width int) string {
+	if width < 2 {
+		return ""
+	}
+	return StyleInfoBarDim.Render(strings.Repeat("─", width))
 }
 
 // renderSubagentEvent는 서브에이전트 진행 이벤트를 스크롤백용 문자열로 렌더링한다.
@@ -144,8 +145,7 @@ func renderSubagentEvent(e subagent.Event) string {
 		parts = append(parts, dur)
 		summary := strings.Join(parts, " · ")
 		if e.Success {
-			return prefix1 + StyleSuccess.Render("✓") + " " +
-				StyleCmdBoxToolName.Render(label) + StyleCmdBoxDim.Render(" — Done ("+summary+")")
+			return prefix1 + StyleCmdBoxToolName.Render(label) + StyleCmdBoxDim.Render(" — Done ("+summary+")")
 		}
 		return prefix1 + StyleError.Render("✗") + " " +
 			StyleCmdBoxToolName.Render(label) + StyleCmdBoxDim.Render(" — Failed ("+summary+")")

@@ -1,3 +1,8 @@
+// Package store
+// File: memory_store.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package store
 
 import (
@@ -379,3 +384,4 @@ func appendMemoryFilter(query string, args []interface{}, filter MemoryQueryFilt
 
 	return query + " AND " + strings.Join(clauses, " AND "), args
 }
+

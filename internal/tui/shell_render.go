@@ -94,7 +94,7 @@ func renderRunningShell(cmd string, elapsed time.Duration, lastLines []string, t
 func renderExitCode(code int) string {
 	codeStr := strconv.Itoa(code)
 	if code == 0 {
-		return StyleSuccess.Render("✓ exit " + codeStr)
+		return StyleSuccess.Render("exit " + codeStr)
 	}
 	return StyleError.Render("✗ exit " + codeStr)
 }

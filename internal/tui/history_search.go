@@ -6,9 +6,13 @@
 package tui
 
 import (
+	"bufio"
 	"fmt"
+	"os"
 	"strings"
 	"time"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 const maxSearchResults = 10
@@ -109,51 +113,80 @@ func RunHistorySearch(entries []HistoryEntry, width int) string {
 	}
 }
 
-// renderHistoryUI는 히스토리 검색 UI를 렌더링한다.
+// renderHistoryUI는 Gemini CLI 박스 스타일로 히스토리 검색 UI를 렌더링한다.
 func renderHistoryUI(tw *termWriter, query string, entries []HistoryEntry, cursor int, width int) {
-	// 검색 헤더
-	searchIcon := StyleClaude().Render("🔍")
-	header := searchIcon + " " + StyleCmdBoxDim.Render("히스토리 검색: ") +
-		StyleCmdBoxToolName.Render(query) + StyleCmdBoxDim.Render("█")
-	tw.Println(header)
-	tw.Println(StyleSeparator.Render(strings.Repeat("─", min(width, 60))))
+	innerW := width - 6
+	if innerW < 40 {
+		innerW = 40
+	}
 
-	// 결과
+	// 콘텐츠 빌드
+	var content strings.Builder
+	content.WriteString("\n")
+
+	// 검색 입력 라인
+	queryDisplay := query
+	if queryDisplay == "" {
+		queryDisplay = StyleGeminiSubDesc.Render("(type to filter)")
+	} else {
+		queryDisplay = StyleGeminiSelected.Render(query)
+	}
+	content.WriteString(StyleGeminiSubDesc.Render("  Search: ") + queryDisplay + StyleGeminiOption.Render("█") + "\n")
+	content.WriteString("\n")
+
+	// 결과 목록
 	show := entries
 	if len(show) > maxSearchResults {
 		show = show[:maxSearchResults]
 	}
 
 	if len(show) == 0 {
-		tw.Println(StyleCmdBoxDim.Render("  검색 결과 없음"))
-		tw.prevLines = 3
-		return
-	}
-
-	for i, entry := range show {
-		prefix := "  "
-		if i == cursor {
-			prefix = StyleClaude().Render("❯ ")
+		content.WriteString(StyleGeminiSubDesc.Render("  No results found.") + "\n")
+	} else {
+		for i, entry := range show {
+			ago := formatTimeAgo(entry.Timestamp)
+			text := truncateStr(entry.Input, innerW-20)
+			if i == cursor {
+				bullet := StyleGeminiBullet.Render("●")
+				label := StyleGeminiSelected.Render(fmt.Sprintf("%d. %s", i+1, text))
+				content.WriteString(fmt.Sprintf("  %s %s  %s\n", bullet, label, StyleGeminiSubDesc.Render(ago)))
+			} else {
+				content.WriteString(StyleGeminiOption.Render(fmt.Sprintf("    %d. %s", i+1, text)) +
+					"  " + StyleGeminiSubDesc.Render(ago) + "\n")
+			}
 		}
-		ago := formatTimeAgo(entry.Timestamp)
-		text := truncateStr(entry.Input, width-20)
-		if i == cursor {
-			tw.Println(prefix + StyleCmdBoxToolName.Render(text) +
-				"  " + StyleCmdBoxDim.Render(ago))
-		} else {
-			tw.Println(prefix + text + "  " + StyleCmdBoxDim.Render(ago))
+		if len(entries) > maxSearchResults {
+			content.WriteString(StyleGeminiSubDesc.Render(
+				fmt.Sprintf("  ... +%d more", len(entries)-maxSearchResults)) + "\n")
 		}
 	}
 
-	if len(entries) > maxSearchResults {
-		tw.Println(StyleCmdBoxDim.Render(
-			fmt.Sprintf("  ... +%d more", len(entries)-maxSearchResults)))
+	content.WriteString("\n")
+	content.WriteString(StyleGeminiHint.Render("  Enter to select · ↑/↓ to navigate · Esc to cancel") + "\n")
+
+	// 박스 렌더링
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorGeminiBox).
+		PaddingLeft(1).
+		PaddingRight(1).
+		Width(innerW + 2)
+
+	rendered := boxStyle.Render(content.String())
+
+	// 헤더 타이틀 삽입
+	lines := strings.SplitN(rendered, "\n", 2)
+	if len(lines) >= 2 {
+		titleLine := " " + StyleGeminiHeader.Render("🔍 History Search") + " "
+		firstLineW := lipgloss.Width(lines[0])
+		headerLine := buildBoxHeader(titleLine, firstLineW)
+		rendered = headerLine + "\n" + lines[1]
 	}
 
-	tw.prevLines = len(show) + 2 // header + separator + entries
-	if len(entries) > maxSearchResults {
-		tw.prevLines++
-	}
+	// 줄 수 계산 후 출력
+	lineCount := strings.Count(rendered, "\n") + 1
+	tw.prevLines = lineCount
+	tw.Print(rendered + "\n")
 }
 
 // filterEntries는 쿼리로 히스토리를 필터링한다.
@@ -190,21 +223,34 @@ func formatTimeAgo(t time.Time) string {
 	}
 }
 
-// fallbackHistorySearch는 raw mode 실패 시 번호 입력 방식이다.
+// fallbackHistorySearch는 raw mode 실패 시 번호 입력 방식 폴백이다 (Gemini 스타일 적용).
 func fallbackHistorySearch(entries []HistoryEntry) string {
 	show := entries
 	if len(show) > maxSearchResults {
 		show = show[:maxSearchResults]
 	}
-	fmt.Println(StyleClaude().Render("🔍") + " 최근 히스토리:")
+	borderColor := lipgloss.NewStyle().Foreground(ColorGeminiBox)
+	fmt.Println(borderColor.Render("╭") + " " + StyleGeminiHeader.Render("🔍 History Search"))
+	fmt.Println(borderColor.Render("│"))
 	for i, e := range show {
 		ago := formatTimeAgo(e.Timestamp)
-		fmt.Printf("  %d. %s  %s\n", i+1, truncateStr(e.Input, 60), StyleCmdBoxDim.Render(ago))
+		fmt.Printf("%s    %d. %s  %s\n",
+			borderColor.Render("│"),
+			i+1,
+			truncateStr(e.Input, 60),
+			StyleGeminiSubDesc.Render(ago))
 	}
-	fmt.Print("선택 (번호, 빈 입력=취소): ")
-	result := readFreeText("")
+	fmt.Println(borderColor.Render("│"))
+	fmt.Print(borderColor.Render("│  ") + StyleGeminiHint.Render("선택 (번호, 빈 입력=취소): "))
+	
+	reader := bufio.NewReader(os.Stdin)
+	line, _ := reader.ReadString('\n')
+	text := strings.TrimSpace(line)
+	
+	fmt.Println(borderColor.Render("╰" + strings.Repeat("─", 50) + "╯"))
+	
 	for i, e := range show {
-		if result.Label == fmt.Sprintf("%d", i+1) {
+		if text == fmt.Sprintf("%d", i+1) {
 			return e.Input
 		}
 	}

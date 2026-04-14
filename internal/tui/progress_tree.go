@@ -35,6 +35,7 @@ type progressItem struct {
 	toolID     string
 	toolName   string
 	target     string
+	args       map[string]any
 	status     progressStatus
 	duration   time.Duration
 	startTime  time.Time
@@ -43,8 +44,9 @@ type progressItem struct {
 
 // progressTree는 현재 턴의 도구 실행 트리를 관리한다.
 type progressTree struct {
-	items []progressItem
-	width int
+	items  []progressItem
+	phases []phase // Phase 기반 그룹핑 (비어 있으면 flat 모드)
+	width  int
 }
 
 // newProgressTree는 새 progressTree를 생성한다.
@@ -53,11 +55,12 @@ func newProgressTree() *progressTree {
 }
 
 // AddTool은 새 도구 실행을 트리에 추가한다.
-func (pt *progressTree) AddTool(toolID, name, target string) {
+func (pt *progressTree) AddTool(toolID, name, target string, args map[string]any) {
 	pt.items = append(pt.items, progressItem{
 		toolID:    toolID,
 		toolName:  name,
 		target:    target,
+		args:      args,
 		status:    statusRunning,
 		startTime: time.Now(),
 	})
@@ -73,8 +76,12 @@ func (pt *progressTree) CompleteTool(toolID string, duration time.Duration, succ
 			} else {
 				pt.items[i].status = statusError
 			}
-			return
+			break
 		}
+	}
+	// Phase 상태 재계산
+	if len(pt.phases) > 0 {
+		pt.updatePhaseStatuses()
 	}
 }
 
@@ -88,9 +95,95 @@ func (pt *progressTree) SetOutput(toolID, line string) {
 	}
 }
 
+// AddToolWithPhase는 Phase에 소속된 도구를 트리에 추가한다.
+// Phase가 아직 선언되지 않았으면 자동으로 생성한다.
+func (pt *progressTree) AddToolWithPhase(toolID, name, target, phaseID, phaseDesc string, args map[string]any) {
+	pt.AddTool(toolID, name, target, args)
+
+	// Phase 찾기 또는 생성
+	for i := range pt.phases {
+		if pt.phases[i].id == phaseID {
+			pt.phases[i].tools = append(pt.phases[i].tools, toolID)
+			pt.phases[i].status = statusRunning
+			return
+		}
+	}
+	pt.phases = append(pt.phases, phase{
+		id:          phaseID,
+		description: phaseDesc,
+		status:      statusRunning,
+		tools:       []string{toolID},
+	})
+}
+
+// DeclarePhase는 아직 도구가 없는 Phase를 미리 선언한다 (pending 상태).
+func (pt *progressTree) DeclarePhase(id, description string) {
+	for _, ph := range pt.phases {
+		if ph.id == id {
+			return // 이미 존재
+		}
+	}
+	pt.phases = append(pt.phases, phase{
+		id:          id,
+		description: description,
+	})
+}
+
+// HasPhase는 해당 ID의 Phase가 존재하는지 확인한다.
+func (pt *progressTree) HasPhase(id string) bool {
+	for _, ph := range pt.phases {
+		if ph.id == id {
+			return true
+		}
+	}
+	return false
+}
+
+// updatePhaseStatuses는 소속 도구들의 상태를 기반으로 각 Phase의 상태를 갱신한다.
+func (pt *progressTree) updatePhaseStatuses() {
+	for i := range pt.phases {
+		pt.phases[i].status = pt.calcPhaseStatus(pt.phases[i].tools)
+	}
+}
+
+func (pt *progressTree) calcPhaseStatus(toolIDs []string) progressStatus {
+	if len(toolIDs) == 0 {
+		return 0 // pending (zero value)
+	}
+	hasRunning := false
+	hasError := false
+	allDone := true
+	for _, tid := range toolIDs {
+		for _, item := range pt.items {
+			if item.toolID == tid {
+				switch item.status {
+				case statusRunning:
+					hasRunning = true
+					allDone = false
+				case statusError:
+					hasError = true
+				case statusDone:
+					// ok
+				}
+			}
+		}
+	}
+	if hasRunning {
+		return statusRunning
+	}
+	if hasError {
+		return statusError
+	}
+	if allDone {
+		return statusDone
+	}
+	return 0
+}
+
 // Reset은 트리를 초기화한다.
 func (pt *progressTree) Reset() {
 	pt.items = nil
+	pt.phases = nil
 }
 
 // IsEmpty는 트리가 비어있는지 확인한다.
@@ -110,16 +203,18 @@ func (pt *progressTree) RunningCount() int {
 }
 
 // View는 진행 트리를 렌더링한다.
-// 단일 도구: ● Running shell_exec... (3s)
-// 복수 도구: ● 3 tool uses
-//
-//	├─ Shell · ls -la · ✓ (0.3s)
-//	└─ Read · config.yaml
-//	   ⎿  Reading file...
+// Phase가 있으면 Phase 그룹 뷰, 없으면 flat 뷰를 사용한다.
 func (pt *progressTree) View() string {
 	if len(pt.items) == 0 {
 		return ""
 	}
+
+	// Phase 모드: Phase 그룹별 렌더링
+	if len(pt.phases) > 0 {
+		return renderPhaseView(pt.phases, pt.items)
+	}
+
+	// Flat 모드 (기존 동작)
 
 	var b strings.Builder
 
@@ -128,8 +223,14 @@ func (pt *progressTree) View() string {
 	if len(pt.items) == 1 && running == 1 {
 		item := pt.items[0]
 		elapsed := formatElapsedShort(time.Since(item.startTime))
+		displayName := toolDisplayName(item.toolName)
+		arg := toolDisplayArg(item.toolName, item.args)
+		label := displayName
+		if arg != "" {
+			label = displayName + " " + arg
+		}
 		b.WriteString(treeIndent + StyleClaude().Render("●") + " ")
-		b.WriteString(StyleThinking.Render("Running "+progressLabel(item)+"..."))
+		b.WriteString(StyleThinking.Render(label + "..."))
 		b.WriteString(" " + StyleCmdBoxDim.Render("("+elapsed+")"))
 		if item.lastOutput != "" {
 			b.WriteString("\n" + treeIndent + treeBranchPad +
@@ -166,7 +267,7 @@ func renderTreeItem(item progressItem, isLast bool) string {
 
 	var b strings.Builder
 	b.WriteString(treeIndent + treeBranchPad + StyleTreeLine.Render(branch) + " ")
-	b.WriteString(StyleCmdBoxToolName.Render(item.toolName))
+	b.WriteString(StyleCmdBoxToolName.Render(toolDisplayName(item.toolName)))
 
 	if item.target != "" && item.target != "localhost" {
 		b.WriteString(StyleCmdBoxDim.Render(" → ") + StyleCmdBoxTarget.Render(item.target))
@@ -176,8 +277,7 @@ func renderTreeItem(item progressItem, isLast bool) string {
 	switch item.status {
 	case statusDone:
 		elapsed := formatElapsedShort(item.duration)
-		b.WriteString(" " + StyleSuccess.Render("✓") + " " +
-			StyleCmdBoxDim.Render("("+elapsed+")"))
+		b.WriteString(" " + StyleCmdBoxDim.Render("("+elapsed+")"))
 	case statusError:
 		elapsed := formatElapsedShort(item.duration)
 		b.WriteString(" " + StyleError.Render("✗") + " " +

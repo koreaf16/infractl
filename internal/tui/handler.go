@@ -35,8 +35,8 @@ func (h *TUIHandler) send(msg tea.Msg) {
 }
 
 // OnThinking은 LLM이 응답 생성을 시작했을 때 호출된다.
-func (h *TUIHandler) OnThinking() {
-	h.send(ThinkingStartMsg{})
+func (h *TUIHandler) OnThinking(tier string, model string) {
+	h.send(ThinkingStartMsg{Tier: tier, Model: model})
 }
 
 // OnThinkingToken은 LLM 내부 추론 토큰을 받았을 때 호출된다.
@@ -86,6 +86,9 @@ func (h *TUIHandler) OnError(err error) {
 func (h *TUIHandler) OnJobComplete(jobID int, description string, success bool) {
 	h.send(JobCompleteMsg{JobID: jobID, Description: description, Success: success})
 }
+
+// OnRAGContext는 내부 지식이 프롬프트에 주입될 때 호출된다.
+func (h *TUIHandler) OnRAGContext(_ int) {}
 
 // OnUsageUpdate는 LLM 호출 후 토큰/비용 정보를 전달한다.
 func (h *TUIHandler) OnUsageUpdate(inputTokens, outputTokens int, costUSD float64, durationMs int64) {

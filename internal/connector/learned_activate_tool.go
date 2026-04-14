@@ -1,3 +1,8 @@
+// Package connector
+// File: learned_activate_tool.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package connector
 
 import (
@@ -88,3 +93,4 @@ func (t *LearnedActivateTool) Execute(ctx context.Context, args map[string]inter
 	}
 	return fmt.Sprintf("Activated learned generic connector for %s @ %s", serviceType, serverName), nil
 }
+

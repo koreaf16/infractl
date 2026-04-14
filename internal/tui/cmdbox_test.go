@@ -1,3 +1,8 @@
+// Package tui
+// File: cmdbox_test.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package tui
 
 import (
@@ -25,3 +30,4 @@ func TestToolTargetLabelShowsRemoteShellContext(t *testing.T) {
 		t.Fatalf("toolTargetLabel(remote) = %q", got)
 	}
 }
+

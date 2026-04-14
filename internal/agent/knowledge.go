@@ -1,3 +1,8 @@
+// Package agent
+// File: knowledge.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package agent
 
 import (
@@ -119,7 +124,7 @@ Respond in this exact JSON format (no markdown, no explanation):
 	resp, err := kl.llmClient.Chat(ctx, []llm.Message{
 		{Role: llm.RoleSystem, Content: "You extract structured error patterns from tool execution logs. Always respond with valid JSON only."},
 		{Role: llm.RoleUser, Content: prompt},
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		return store.KnowledgeEntry{}, fmt.Errorf("llm extract pattern: %w", err)
 	}

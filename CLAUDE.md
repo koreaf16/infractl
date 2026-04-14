@@ -133,9 +133,19 @@ slog.Info("connecting to server", "host", host, "user", user)
 
 ---
 
+## 빌드 규칙
+
+### 11. 바이너리 출력 경로
+
+- 컴파일 시 반드시 **`bin/` 디렉토리**에 출력한다.
+- 올바른 명령: `go build -o bin/infractl ./cmd/infractl/`
+- 프로젝트 루트 또는 기타 경로에 바이너리를 직접 생성하지 않는다.
+
+---
+
 ## 커밋 규칙
 
-### 11. Conventional Commits
+### 12. Conventional Commits
 
 커밋 메시지는 아래 형식을 따른다:
 

@@ -1,3 +1,8 @@
+// Package executor
+// File: powershell.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package executor
 
 import (
@@ -26,3 +31,4 @@ func EncodePowerShell(script string) string {
 	}
 	return base64.StdEncoding.EncodeToString(bytes)
 }
+

@@ -36,8 +36,8 @@ const (
 	// 한국어 ~2 chars/token, 영어 ~4 chars/token → 평균 ~3으로 추정한다.
 	avgCharsPerToken = 3
 
-	tokenWarningThreshold  = 0.80
-	tokenCriticalThreshold = 0.95
+	tokenWarningThreshold  = 0.75
+	tokenCriticalThreshold = 0.87
 
 	// reservedOutputTokens는 compaction 요약 출력을 위해 예약하는 토큰 수이다.
 	// effective window = maxContextTokens - reservedOutputTokens
@@ -48,7 +48,8 @@ const (
 	maxConsecutiveCompactFailures = 3
 
 	// preserveRecentRounds는 partial compaction 시 원문으로 보존할 최근 라운드 수이다.
-	preserveRecentRounds = 3
+	// history.go의 filterHistory도 이 값을 참조한다.
+	preserveRecentRounds = 4
 
 	// maxPTLRetries는 prompt-too-long 에러 발생 시 재시도 최대 횟수이다.
 	maxPTLRetries = 3

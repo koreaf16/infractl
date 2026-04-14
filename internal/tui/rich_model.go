@@ -22,7 +22,6 @@ type RichModel struct {
 	shimmer  shimmerState
 	progress *progressTree
 	status   statusBar
-	confirm  confirmState
 	state    *SessionState
 
 	width, height int
@@ -30,6 +29,7 @@ type RichModel struct {
 	sp            spinner.Model
 	currentTool   string
 	currentTarget string
+	thinkingLabel string // tier+model shimmer 레이블
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -140,8 +140,12 @@ func (m RichModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ToolStartMsg:
 		m.currentTool = msg.Name
 		m.currentTarget = msg.Target
-		m.progress.AddTool(msg.ToolID, msg.Name, msg.Target)
-		m.shimmer.SetText(msg.Name)
+		desc, _ := msg.Args["description"].(string)
+		if phaseID, phaseName, ok := parsePhaseFromDescription(desc); ok {
+			m.progress.AddToolWithPhase(msg.ToolID, msg.Name, msg.Target, phaseID, phaseName, msg.Args)
+		} else {
+			m.progress.AddTool(msg.ToolID, msg.Name, msg.Target, msg.Args)
+		}
 		cmd := m.chat.AddCmdBox(msg.Name, msg.Target, msg.Args)
 		if cmd != nil {
 			cmds = append(cmds, cmd)
@@ -152,11 +156,19 @@ func (m RichModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.chat.AppendBoxOutput(msg.Line)
 		m.progress.SetOutput(msg.ToolID, msg.Line)
 
+	case ThinkingStartMsg:
+		m.thinkingLabel = ThinkingLabel(msg.Tier, msg.Model)
+		m.shimmer.SetText(m.thinkingLabel)
+
 	case ToolEndMsg:
 		m.currentTool = ""
 		m.currentTarget = ""
 		m.progress.CompleteTool(msg.ToolID, msg.Duration, msg.Success)
-		m.shimmer.SetText("thinking...")
+		label := m.thinkingLabel
+		if label == "" {
+			label = "thinking..."
+		}
+		m.shimmer.SetText(label)
 		m.chat.CompleteLastBox(msg.Result, msg.Duration, msg.Success)
 
 	case ResponseDoneMsg:
@@ -175,19 +187,6 @@ func (m RichModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.progress.Reset()
 		return m, tea.Quit
 
-	case ConfirmRequestMsg:
-		m.confirm = confirmState{
-			active:  true,
-			request: msg.Request,
-			replyCh: msg.ReplyCh,
-		}
-		return m, nil
-
-	case ConfirmResponseMsg:
-		go func() {
-			msg.ReplyCh <- msg.Response
-		}()
-		return m, nil
 	}
 
 	// chatView 스피너/박스 업데이트
@@ -211,11 +210,6 @@ func (m RichModel) View() string {
 		parts = append(parts, m.shimmer.View())
 	}
 
-	// 확인 오버레이
-	if m.confirm.active {
-		parts = append(parts, m.confirm.render(m.width))
-	}
-
 	// progress tree (도구 실행 중)
 	if !m.progress.IsEmpty() {
 		parts = append(parts, m.progress.View())
@@ -233,14 +227,6 @@ func (m *RichModel) syncStateBack() {
 	m.state.TotalCostUSD = m.status.totalCostUSD
 	m.state.InputTokens = m.status.inputTokens
 	m.state.OutputTokens = m.status.outputTokens
-}
-
-// confirmRender는 확인 오버레이 표시를 위한 헬퍼이다.
-func confirmRender(state confirmState, width int) string {
-	if !state.active {
-		return ""
-	}
-	return state.render(width)
 }
 
 // StatusLine은 현재 상태바를 한 줄 문자열로 반환한다 (외부 사용).
@@ -266,7 +252,7 @@ func PrintUserHeader(input string) {
 
 // PrintBanner는 시작 배너를 출력한다.
 func PrintBanner(state *SessionState) {
-	title := StyleBannerTitle.Render("Infractl") + " " + StyleBannerInfo.Render("v0.3.0")
+	title := StyleBannerTitle.Render("Infractl") + " " + StyleBannerInfo.Render("v1.0.0")
 	info := StyleInfoBarDim.Render(
 		fmt.Sprintf("model: %s · %d servers", state.Model, state.ServerCount))
 	fmt.Printf("\n  %s\n  %s\n\n", title, info)

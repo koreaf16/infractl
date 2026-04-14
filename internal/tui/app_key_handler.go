@@ -9,6 +9,7 @@ import (
 
 func (m AppModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if !msg.Paste {
+
 		if m.selection.active {
 			handled, respMsg := m.selection.handleKey(msg)
 			if handled {
@@ -21,16 +22,6 @@ func (m AppModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		if m.privilege.active {
 			handled, respMsg := m.privilege.handleKey(msg)
-			if handled {
-				if respMsg != nil {
-					return m.Update(respMsg)
-				}
-				return m, nil
-			}
-		}
-
-		if m.idle.active {
-			handled, respMsg := m.idle.handleKey(msg)
 			if handled {
 				if respMsg != nil {
 					return m.Update(respMsg)
@@ -78,15 +69,14 @@ func (m AppModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.String() == "ctrl+y" {
-			m.yoloMode = !m.yoloMode
-			if m.confirmHandler != nil {
-				if m.yoloMode {
-					m.confirmHandler.EnableYolo()
-				} else {
-					m.confirmHandler.DisableYolo()
-				}
-			}
+			m.yoloMode = m.ag.ToggleYoroMode()
 			m.statusBar.setYoloMode(m.yoloMode)
+			return m, nil
+		}
+
+		if msg.Type == tea.KeyShiftTab {
+			m.planMode = m.ag.TogglePlanMode()
+			m.statusBar.setPlanMode(m.planMode)
 			return m, nil
 		}
 
@@ -134,7 +124,7 @@ func (m AppModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func welcomeBanner(model string, serverCount int) string {
-	title := StyleBannerTitle.Render("Infractl") + " " + StyleBannerInfo.Render("v0.3.0")
+	title := StyleBannerTitle.Render("Infractl") + " " + StyleBannerInfo.Render("v1.0.0")
 	info := StyleInfoBarDim.Render(fmt.Sprintf("model: %s | %d servers", model, serverCount))
 	return fmt.Sprintf("\n  %s\n  %s\n", title, info)
 }

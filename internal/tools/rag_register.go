@@ -20,7 +20,7 @@ type RAGRegisterTool struct {
 
 var _ Tool = (*RAGRegisterTool)(nil)
 
-func (t *RAGRegisterTool) Name() string        { return "rag_register" }
+func (t *RAGRegisterTool) Name() string         { return "rag_register" }
 func (t *RAGRegisterTool) RiskLevel() RiskLevel { return RiskLow }
 func (t *RAGRegisterTool) IsReadOnly() bool     { return false }
 func (t *RAGRegisterTool) IsEnabled() bool      { return true }

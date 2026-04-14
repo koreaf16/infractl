@@ -1,3 +1,8 @@
+// Package checkpoint
+// File: tool.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package checkpoint
 
 import (
@@ -153,3 +158,4 @@ func (t *RollbackTool) resolveCheckpoint(ctx context.Context, cpIDRaw interface{
 	}
 	return cp, nil
 }
+

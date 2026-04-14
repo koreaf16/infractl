@@ -26,10 +26,10 @@ func NewUserDefinedTool(entry store.UserToolEntry) *UserDefinedTool {
 	return &UserDefinedTool{entry: entry}
 }
 
-func (t *UserDefinedTool) Name() string        { return t.entry.Name }
-func (t *UserDefinedTool) Description() string { return t.entry.Description }
+func (t *UserDefinedTool) Name() string         { return t.entry.Name }
+func (t *UserDefinedTool) Description() string  { return t.entry.Description }
 func (t *UserDefinedTool) RiskLevel() RiskLevel { return RiskLevel(t.entry.RiskLevel) }
-func (t *UserDefinedTool) IsReadOnly() bool    { return t.entry.RiskLevel == string(RiskNone) }
+func (t *UserDefinedTool) IsReadOnly() bool     { return t.entry.RiskLevel == string(RiskNone) }
 
 // IsEnabled는 스크립트 파일이 존재할 때만 활성화한다.
 func (t *UserDefinedTool) IsEnabled() bool {

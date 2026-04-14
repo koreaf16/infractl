@@ -1,3 +1,8 @@
+// Package checkpoint
+// File: tool_test.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package checkpoint
 
 import (
@@ -94,3 +99,4 @@ func TestRollbackToolExecutesOnlyOnCheckpointOwnerServer(t *testing.T) {
 		t.Fatalf("expected success output")
 	}
 }
+

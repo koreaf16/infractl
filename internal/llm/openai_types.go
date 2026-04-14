@@ -7,22 +7,11 @@ package llm
 
 // chatRequest는 OpenAI 호환 API에 전송하는 요청 본문이다.
 type chatRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Tools    []ToolDef `json:"tools,omitempty"` // 비어있으면 필드 자체를 제외
-	Stream   bool      `json:"stream"`
-}
-
-// chatResponse는 비스트리밍 API 응답의 최상위 구조체이다.
-type chatResponse struct {
-	Choices []chatChoice `json:"choices"`
-	Usage   *usageInfo   `json:"usage"`
-}
-
-// chatChoice는 API 응답의 단일 선택지를 나타낸다.
-type chatChoice struct {
-	Message      Message `json:"message"`
-	FinishReason *string `json:"finish_reason"`
+	Model      string      `json:"model"`
+	Messages   []Message   `json:"messages"`
+	Tools      []ToolDef   `json:"tools,omitempty"` // 비어있으면 필드 자체를 제외
+	ToolChoice interface{} `json:"tool_choice,omitempty"`
+	Stream     bool        `json:"stream"`
 }
 
 // streamChunk는 SSE 스트리밍 응답의 단일 청크를 나타낸다.
@@ -39,8 +28,9 @@ type streamChoice struct {
 
 // streamDelta는 스트리밍 응답의 증분 데이터를 나타낸다.
 type streamDelta struct {
-	Content   string              `json:"content"`
-	ToolCalls []streamToolCall    `json:"tool_calls"`
+	Reasoning string           `json:"reasoning"`  // vLLM --reasoning-parser 전용
+	Content   string           `json:"content"`
+	ToolCalls []streamToolCall `json:"tool_calls"`
 }
 
 // streamToolCall은 스트리밍 응답에서 tool_calls의 단일 delta를 나타낸다.

@@ -14,7 +14,7 @@ import (
 	"github.com/yourorg/infractl/internal/store"
 )
 
-const tuiVersion = "0.3.0"
+const tuiVersion = "1.0.0"
 
 // statusBar는 화면 하단 고정 정보바이다.
 type statusBar struct {
@@ -23,6 +23,7 @@ type statusBar struct {
 	width        int
 	busy         bool
 	yoloMode     bool
+	planMode     bool
 	activeServer *store.Server // 현재 활성 서버 (nil이면 표시 안 함)
 
 	// 토큰/비용 추적 (UsageUpdateMsg로 갱신)
@@ -73,6 +74,9 @@ func (s statusBar) View() string {
 
 	// 오른쪽: YOLO 표시 + 활성 서버 + 서버 수 + 버전
 	rightParts := []string{}
+	if s.planMode {
+		rightParts = append(rightParts, StyleSuccess.Render("📋 PLAN"))
+	}
 	if s.yoloMode {
 		rightParts = append(rightParts, StyleWarning.Render("⚡YOLO"))
 	}
@@ -104,6 +108,7 @@ func (s *statusBar) setWidth(w int)                    { s.width = w }
 func (s *statusBar) setServerCount(n int)               { s.serverCount = n }
 func (s *statusBar) setBusy(b bool)                     { s.busy = b }
 func (s *statusBar) setYoloMode(v bool)                 { s.yoloMode = v }
+func (s *statusBar) setPlanMode(v bool)                 { s.planMode = v }
 func (s *statusBar) setActiveServer(srv *store.Server)  { s.activeServer = srv }
 
 // updateUsage는 UsageUpdateMsg를 반영한다.

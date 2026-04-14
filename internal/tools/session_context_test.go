@@ -1,3 +1,8 @@
+// Package tools
+// File: session_context_test.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package tools
 
 import (

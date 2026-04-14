@@ -97,9 +97,9 @@ func (o *toolOverlayState) View(hist *toolHistory, width int) string {
 // renderHistoryEntry는 단일 이력 항목을 한 줄로 렌더링한다.
 func renderHistoryEntry(e toolHistoryEntry, width int) string {
 	// 상태 아이콘
-	icon := StyleSuccess.Render("✓")
+	icon := ""
 	if !e.success {
-		icon = StyleError.Render("✗")
+		icon = StyleError.Render("✗") + " "
 	}
 
 	// 도구명 + 대상

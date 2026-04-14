@@ -1,3 +1,8 @@
+// Package discovery
+// File: scanner.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package discovery
 
 import (
@@ -323,3 +328,4 @@ func truncate(s string, maxLen int) string {
 	}
 	return s[:maxLen] + "..."
 }
+

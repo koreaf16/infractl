@@ -6,7 +6,6 @@
 package ssh
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -47,6 +46,10 @@ type Client struct {
 
 	sessionMu sync.Mutex
 	stdinPipe io.WriteCloser // RunStream 실행 중에만 유효; InjectStdin이 사용
+
+	sessionMgr    *SessionManager // persistent shell 세션 풀 (lazy init)
+	sessionMgrMu  sync.Mutex
+	sessionMgrCtx context.CancelFunc // reaper 고루틴 취소 함수
 }
 
 // NewClient는 SSH 클라이언트를 생성한다. 아직 연결하지 않는다.
@@ -96,12 +99,14 @@ func (c *Client) Run(ctx context.Context, command string) (RunResult, error) {
 }
 
 // RunStream은 command를 비블로킹으로 실행하며 stdout을 라인 단위로 스트리밍한다.
+// requirePTY: true이면 PTY를 할당하여 sudo/su/passwd 등 /dev/tty 프롬프트를 stdout으로 캡처한다.
 // onLine: 각 stdout 라인을 수신할 콜백. nil이면 무시.
 // onIdle: 출력이 defaultIdleThreshold(10초) 동안 없을 때 호출. nil이면 무시.
 // 출력은 64KB로 제한된다.
 func (c *Client) RunStream(
 	ctx context.Context,
 	command string,
+	requirePTY bool,
 	onLine func(string),
 	onIdle func(executor.StdinInjector),
 ) (RunResult, error) {
@@ -113,17 +118,24 @@ func (c *Client) RunStream(
 	}
 	defer session.Close()
 
+	if requirePTY {
+		modes := ssh.TerminalModes{
+			ssh.ECHO:          0, // 입력 에코 끄기 — 주입된 패스워드가 출력에 노출되지 않도록
+			ssh.TTY_OP_ISPEED: 14400,
+			ssh.TTY_OP_OSPEED: 14400,
+		}
+		if err := session.RequestPty("xterm", 80, 120, modes); err != nil {
+			return RunResult{}, fmt.Errorf("ssh request pty: %w", err)
+		}
+	}
+
 	stdinPipe, err := session.StdinPipe()
 	if err != nil {
 		return RunResult{}, fmt.Errorf("ssh stdin pipe: %w", err)
 	}
-	c.sessionMu.Lock()
-	c.stdinPipe = stdinPipe
-	c.sessionMu.Unlock()
+	c.setStdinPipe(stdinPipe)
 	defer func() {
-		c.sessionMu.Lock()
-		c.stdinPipe = nil
-		c.sessionMu.Unlock()
+		c.clearStdinPipe(stdinPipe)
 		stdinPipe.Close()
 	}()
 
@@ -132,8 +144,11 @@ func (c *Client) RunStream(
 		return RunResult{}, fmt.Errorf("ssh stdout pipe: %w", err)
 	}
 
+	// PTY에서는 stderr가 stdout에 합쳐진다. PTY 없으면 별도 캡처.
 	var stderrBuf bytes.Buffer
-	session.Stderr = &executor.LimitedWriter{Buf: &stderrBuf, Limit: executor.MaxOutputBytes}
+	if !requirePTY {
+		session.Stderr = &executor.LimitedWriter{Buf: &stderrBuf, Limit: executor.MaxOutputBytes}
+	}
 
 	if err := session.Start(command); err != nil {
 		return RunResult{}, fmt.Errorf("ssh start command: %w", err)
@@ -153,11 +168,14 @@ func (c *Client) RunStream(
 		}()
 	}
 
+	// chunk 기반 라인 조립: "password:" 같은 \n 없는 프롬프트도 감지한다.
+	lineCh := executor.StartLineAssembler(executor.StartPipeReader(stdoutPipe))
+
 	var stdoutLines []string
-	scanner := bufio.NewScanner(stdoutPipe)
-	scanner.Buffer(make([]byte, 0, executor.MaxOutputBytes), executor.MaxOutputBytes)
-	for scanner.Scan() {
-		line := scanner.Text()
+	for line := range lineCh {
+		if requirePTY {
+			line = executor.StripANSI(line)
+		}
 		watcher.Ping()
 		stdoutLines = append(stdoutLines, line)
 		if onLine != nil {
@@ -185,6 +203,93 @@ func (c *Client) RunStream(
 	}, nil
 }
 
+// RunInteractive executes an SSH command and streams raw terminal chunks.
+func (c *Client) RunInteractive(
+	ctx context.Context,
+	command string,
+	requirePTY bool,
+	onChunk func(string),
+) (RunResult, error) {
+	start := time.Now()
+
+	session, err := c.newSession(ctx)
+	if err != nil {
+		return RunResult{}, err
+	}
+	defer session.Close()
+
+	if requirePTY {
+		modes := ssh.TerminalModes{
+			ssh.ECHO:          1,
+			ssh.TTY_OP_ISPEED: 14400,
+			ssh.TTY_OP_OSPEED: 14400,
+		}
+		if err := session.RequestPty("xterm", 80, 120, modes); err != nil {
+			return RunResult{}, fmt.Errorf("ssh request pty: %w", err)
+		}
+	}
+
+	stdinPipe, err := session.StdinPipe()
+	if err != nil {
+		return RunResult{}, fmt.Errorf("ssh stdin pipe: %w", err)
+	}
+	c.setStdinPipe(stdinPipe)
+	defer func() {
+		c.clearStdinPipe(stdinPipe)
+		stdinPipe.Close()
+	}()
+
+	stdoutPipe, err := session.StdoutPipe()
+	if err != nil {
+		return RunResult{}, fmt.Errorf("ssh stdout pipe: %w", err)
+	}
+
+	if !requirePTY {
+		session.Stderr = &executor.LimitedWriter{Buf: &bytes.Buffer{}, Limit: executor.MaxOutputBytes}
+	}
+
+	if err := session.Start(command); err != nil {
+		return RunResult{}, fmt.Errorf("ssh start command: %w", err)
+	}
+
+	var outputBuf bytes.Buffer
+	readBuf := make([]byte, 1024)
+	for {
+		n, readErr := stdoutPipe.Read(readBuf)
+		if n > 0 {
+			chunk := string(readBuf[:n])
+			outputBuf.WriteString(chunk)
+			if onChunk != nil {
+				onChunk(chunk)
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			return RunResult{}, fmt.Errorf("ssh interactive read: %w", readErr)
+		}
+	}
+
+	waitErr := session.Wait()
+	duration := time.Since(start)
+
+	exitCode := 0
+	if waitErr != nil {
+		if exitErr, ok := waitErr.(*ssh.ExitError); ok {
+			exitCode = exitErr.ExitStatus()
+		} else {
+			return RunResult{}, fmt.Errorf("ssh wait command: %w", waitErr)
+		}
+	}
+
+	return RunResult{
+		Stdout:   executor.TruncateOutput(outputBuf.String(), executor.MaxOutputBytes),
+		ExitCode: exitCode,
+		Duration: duration,
+	}, nil
+}
+
 // InjectStdin은 현재 RunStream으로 실행 중인 프로세스의 stdin에 line+"\n"을 쓴다.
 // executor.StdinInjector 인터페이스를 구현한다.
 func (c *Client) InjectStdin(line string) error {
@@ -201,8 +306,50 @@ func (c *Client) InjectStdin(line string) error {
 	return nil
 }
 
-// Close는 SSH 연결과 keep-alive 고루틴을 종료한다.
+func (c *Client) setStdinPipe(pipe io.WriteCloser) {
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
+	c.stdinPipe = pipe
+}
+
+func (c *Client) clearStdinPipe(pipe io.WriteCloser) {
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
+	if c.stdinPipe == pipe {
+		c.stdinPipe = nil
+	}
+}
+
+// SessionMgr returns the SessionManager for this client, creating it lazily on first call.
+func (c *Client) SessionMgr() *SessionManager {
+	c.sessionMgrMu.Lock()
+	defer c.sessionMgrMu.Unlock()
+	if c.sessionMgr == nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		c.sessionMgrCtx = cancel
+		c.sessionMgr = newSessionManager(ctx, c)
+	}
+	return c.sessionMgr
+}
+
+// Close는 persistent shell 세션, keep-alive 고루틴, SSH 연결을 순서대로 종료한다.
 func (c *Client) Close() error {
+	// 1. persistent shell 세션 전체 닫기
+	c.sessionMgrMu.Lock()
+	mgr := c.sessionMgr
+	cancelMgr := c.sessionMgrCtx
+	c.sessionMgr = nil
+	c.sessionMgrCtx = nil
+	c.sessionMgrMu.Unlock()
+
+	if cancelMgr != nil {
+		cancelMgr() // reaper 고루틴 종료
+	}
+	if mgr != nil {
+		mgr.CloseAll()
+	}
+
+	// 2. SSH 연결 닫기
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

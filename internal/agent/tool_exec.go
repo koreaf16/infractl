@@ -1,3 +1,8 @@
+// Package agent
+// File: tool_exec.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package agent
 
 import (
@@ -11,6 +16,7 @@ import (
 
 	"github.com/yourorg/infractl/internal/hooks"
 	"github.com/yourorg/infractl/internal/llm"
+	"github.com/yourorg/infractl/internal/pipeline"
 	"github.com/yourorg/infractl/internal/tools"
 )
 
@@ -77,7 +83,6 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 			Content:    fmt.Sprintf("Error: failed to parse arguments: %s", err),
 		}
 	}
-
 	target := tools.ExtractTarget(args)
 	if tc.Function.Name == "checkpoint_rollback" {
 		if rollbackServer, ok := args["server"].(string); ok && strings.TrimSpace(rollbackServer) != "" {
@@ -104,27 +109,14 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 		target = normalizedTarget
 	}
 	safetyDecision := evaluateToolSafety(tool, args)
+
 	riskLevel := safetyDecision.RiskLevel
-	if safetyDecision.BackupRequired {
-		preBackup, _ := args["pre_backup_command"].(string)
-		if strings.TrimSpace(preBackup) == "" {
-			reason := safetyDecision.BackupReason
-			if reason == "" {
-				reason = "destructive shell command"
-			}
-			return llm.Message{
-				Role:       llm.RoleTool,
-				ToolCallID: tc.ID,
-				Content:    fmt.Sprintf("Error: pre_backup_command is required before executing this command (%s).", reason),
-			}
-		}
-	}
 	if riskLevel != tools.RiskNone {
 		if a.yoroMode {
 			slog.Warn("YORO mode: skipping confirmation",
 				"tool", tc.Function.Name, "risk", riskLevel, "target", target)
 		} else {
-			confirmed, confirmErr := runConfirmationFlow(ctx, a.confirmHandler, tool, target, args, riskLevel)
+			confirmed, confirmErr := runConfirmationFlow(ctx, a.questionHandler, tool, target, args, riskLevel)
 			if confirmErr != nil {
 				slog.Warn("confirmation flow error", "tool", tc.Function.Name, "err", confirmErr)
 			}
@@ -132,7 +124,7 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 				return llm.Message{
 					Role:       llm.RoleTool,
 					ToolCallID: tc.ID,
-					Content:    "?ъ슜?먭? ?묒뾽??痍⑥냼?덉뒿?덈떎.",
+					Content:    "????�? ?묒뾽???�⑥???�뒿??�떎.",
 				}
 			}
 		}
@@ -159,6 +151,35 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 		toolID := tc.ID
 		st.OutputCb = func(line string) {
 			a.handler.OnToolOutput(toolID, line)
+		}
+
+		// check for background execution
+		if isBackground, ok := args["is_background"].(bool); ok && isBackground && a.bgManager != nil {
+			jobID := a.bgManager.Submit(ctx, fmt.Sprintf("shell_exec: %s", tc.Function.Arguments), func(ctx context.Context) (string, error) {
+				return tool.Execute(ctx, args, exec)
+			})
+			return llm.Message{
+				Role:       llm.RoleTool,
+				ToolCallID: tc.ID,
+				Content:    fmt.Sprintf("Command started in background as task #%d", jobID),
+			}
+		}
+	}
+	if ft, ok := tool.(*tools.FileTransferTool); ok {
+		toolID := tc.ID
+		ft.OutputCb = func(line string) {
+			a.handler.OnToolOutput(toolID, line)
+		}
+	}
+	if wf, ok := tool.(*tools.WebFetchTool); ok {
+		toolID := tc.ID
+		wf.OutputCb = func(line string) {
+			a.handler.OnToolOutput(toolID, line)
+		}
+	}
+	if aq, ok := tool.(*tools.AskUserQuestionTool); ok && a.questionHandler != nil {
+		aq.QuestionCb = func(ctx context.Context, req tools.QuestionRequest) (tools.QuestionResponse, error) {
+			return a.questionHandler.RequestQuestion(ctx, req)
 		}
 	}
 
@@ -188,7 +209,6 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 			success:   false,
 		})
 		content := fmt.Sprintf("Error: %s", err)
-		content += a.buildErrorHints()
 		return llm.Message{
 			Role:       llm.RoleTool,
 			ToolCallID: tc.ID,
@@ -217,8 +237,12 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 			Output:   resultStr,
 		})
 	}
-	contentStr := resultStr
-	if len(contentStr) > 4000 {
+	// ?�트 ?�캔 결과??well-known ?�트 주석 추�? (LLM 추측 기반 ?�별 방�?)
+	resultStr = annotatePortOutput(tc.Function.Name, resultStr)
+	// ?�구�??�기 ?�한 ?�용: head + tail 보존, CLI ?�이�??�거
+	limit := toolResultLimit(tc.Function.Name)
+	contentStr := pipeline.NewPreprocessor(pipeline.WithMaxLLMBytes(limit)).Process(resultStr)
+	if len(contentStr) > limit {
 		contentStr = SaveLargeOutput(contentStr)
 	}
 
@@ -232,23 +256,6 @@ func argsToStrings(args map[string]interface{}) map[string]string {
 	result := make(map[string]string, len(args))
 	for k, v := range args {
 		result[k] = fmt.Sprintf("%v", v)
-	}
-	return result
-}
-func (a *Agent) buildErrorHints() string {
-	var hints []string
-	if a.registry.Has("knowledge_search") {
-		hints = append(hints, "Use knowledge_search to check if this error has been resolved before.")
-	}
-	if a.registry.Has("web_search") {
-		hints = append(hints, "Use web_search to find solutions for this error online.")
-	}
-	if len(hints) == 0 {
-		return ""
-	}
-	result := "\n\n[Suggested next steps]"
-	for _, h := range hints {
-		result += "\n- " + h
 	}
 	return result
 }

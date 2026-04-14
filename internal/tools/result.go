@@ -52,12 +52,12 @@ type InputRequest struct {
 
 // ToolResult는 tool 실행 결과를 구조화해서 보관한다.
 type ToolResult struct {
-	Status       ToolResultStatus     `json:"status"`
-	Summary      string               `json:"summary,omitempty"`
-	Body         string               `json:"body,omitempty"`
-	Metadata     map[string]any       `json:"metadata,omitempty"`
-	Artifacts    []ArtifactRef        `json:"artifacts,omitempty"`
-	InputRequest *InputRequest        `json:"input_request,omitempty"`
+	Status       ToolResultStatus `json:"status"`
+	Summary      string           `json:"summary,omitempty"`
+	Body         string           `json:"body,omitempty"`
+	Metadata     map[string]any   `json:"metadata,omitempty"`
+	Artifacts    []ArtifactRef    `json:"artifacts,omitempty"`
+	InputRequest *InputRequest    `json:"input_request,omitempty"`
 }
 
 // ResultTool은 구조화된 결과를 반환하는 tool을 위한 선택적 인터페이스다.

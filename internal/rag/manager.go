@@ -1,9 +1,15 @@
+// Package rag
+// File: manager.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package rag
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 
 	"github.com/yourorg/infractl/internal/store"
 )
@@ -64,10 +70,8 @@ func (m *Manager) Search(ctx context.Context, query string, topK int) ([]SearchR
 	return m.SearchWithOptions(ctx, query, SearchOptions{TopK: topK, MinScore: 0.05})
 }
 
-// SearchWithOptions returns scoped internal results first, followed by external RAG results.
+// SearchWithOptions returns scoped results (local + external) reranked by a cross-encoder if available.
 func (m *Manager) SearchWithOptions(ctx context.Context, query string, opts SearchOptions) ([]SearchResult, error) {
-	var results []SearchResult
-
 	topK := opts.TopK
 	if topK <= 0 {
 		topK = 5
@@ -76,12 +80,23 @@ func (m *Manager) SearchWithOptions(ctx context.Context, query string, opts Sear
 		opts.MinScore = 0.05
 	}
 
-	localResults, err := m.searchLocal(ctx, query, opts)
+	// 1. 후보군 수집 (리랭커가 있다면 더 넉넉하게 수집)
+	candidateK := topK
+	if m.reranker != nil {
+		candidateK = 30 // 리랭커를 위한 충분한 후보 확보
+	}
+
+	var candidates []SearchResult
+
+	// 로컬 검색 수행
+	localOpts := opts
+	localOpts.TopK = candidateK
+	localResults, err := m.searchLocal(ctx, query, localOpts)
 	if err != nil {
 		slog.Warn("local memory search failed", "err", err)
 	}
 	for _, lr := range localResults {
-		results = append(results, SearchResult{
+		candidates = append(candidates, SearchResult{
 			Source:          "local",
 			Priority:        0,
 			Title:           lr.Document.Title,
@@ -91,57 +106,62 @@ func (m *Manager) SearchWithOptions(ctx context.Context, query string, opts Sear
 			ServerName:      lr.Document.ServerName,
 		})
 	}
-	if opts.LocalOnly {
-		return results, nil
-	}
 
-	sources, err := m.ragSourceStore.ListRAGSources(ctx)
-	if err != nil {
-		slog.Warn("list rag sources failed", "err", err)
-		return results, nil
-	}
-	if len(sources) == 0 || m.externalEmbedder == nil {
-		return results, nil
-	}
-
-	queryVec, err := m.externalEmbedder.Generate(ctx, query)
-	if err != nil {
-		slog.Warn("generate query embedding for external search", "err", err)
-		return results, nil
-	}
-
-	var externalResults []SearchResult
-	for _, src := range sources {
-		if src.EmbeddingModel != "" && src.EmbeddingModel != m.externalEmbedder.ModelName() {
-			slog.Warn("embedding model mismatch",
-				"source", src.Name,
-				"source_model", src.EmbeddingModel,
-				"current_model", m.externalEmbedder.ModelName())
-		}
-
-		extResults, err := m.externalSearcher.Search(ctx, src, queryVec, topK)
-		if err != nil {
-			slog.Warn("external rag search failed", "source", src.Name, "err", err)
-			continue
-		}
-		for _, er := range extResults {
-			externalResults = append(externalResults, SearchResult{
-				Source:     src.Name,
-				Priority:   src.Priority,
-				Title:      fmt.Sprintf("[%s] %s", src.Name, src.Description),
-				Content:    formatExternalResult(er, src.ResultColumns),
-				Score:      0,
-				ServerName: src.ServerName,
-			})
+	// 외부 검색 수행 (LocalOnly가 아닌 경우)
+	if !opts.LocalOnly {
+		sources, err := m.ragSourceStore.ListRAGSources(ctx)
+		if err == nil && len(sources) > 0 && m.externalEmbedder != nil {
+			queryVec, err := m.externalEmbedder.Generate(ctx, query)
+			if err == nil {
+				for _, src := range sources {
+					extResults, err := m.externalSearcher.Search(ctx, src, queryVec, candidateK)
+					if err != nil {
+						slog.Warn("external rag search failed", "source", src.Name, "err", err)
+						continue
+					}
+					for _, er := range extResults {
+						candidates = append(candidates, SearchResult{
+							Source:     src.Name,
+							Priority:   src.Priority,
+							Title:      fmt.Sprintf("[%s] %s", src.Name, src.Description),
+							Content:    formatExternalResult(er, src.ResultColumns),
+							Score:      0, // 외부 검색은 베이스 점수 생략 (리랭커가 채점함)
+							ServerName: src.ServerName,
+						})
+					}
+				}
+			} else {
+				slog.Warn("generate query embedding for external search", "err", err)
+			}
 		}
 	}
 
-	if m.reranker != nil && len(externalResults) > 0 {
-		externalResults = m.rerankResults(ctx, query, externalResults, topK)
+	if len(candidates) == 0 {
+		return nil, nil
 	}
 
-	results = append(results, externalResults...)
-	return results, nil
+	// 2. 리랭킹 적용 (통합 후보군 대상)
+	if m.reranker != nil && len(candidates) > 1 {
+		slog.Debug("applying unified reranking", "candidates", len(candidates), "topK", topK)
+		reranked := m.rerankResults(ctx, query, candidates, topK)
+		if len(reranked) > 0 {
+			return reranked, nil
+		}
+		// 리랭커 실패 시 폴백: 기존 순서(Local -> External) 유지하되 점수 기반 정렬만 수행
+	}
+
+	// 3. 리랭킹 미적용 또는 실패 시: 점수 및 우선순위 기반 정렬 후 top-K 반환
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Priority != candidates[j].Priority {
+			return candidates[i].Priority < candidates[j].Priority
+		}
+		return candidates[i].Score > candidates[j].Score
+	})
+
+	if len(candidates) > topK {
+		candidates = candidates[:topK]
+	}
+	return candidates, nil
 }
 
 func (m *Manager) searchLocal(ctx context.Context, query string, opts SearchOptions) ([]LocalResult, error) {
@@ -273,3 +293,4 @@ func formatExternalResult(r ExternalResult, resultCols string) string {
 		return ""
 	}()
 }
+

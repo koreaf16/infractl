@@ -1,3 +1,8 @@
+// Package executor
+// File: detect.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package executor
 
 import (
@@ -37,3 +42,4 @@ func DetectOS(ctx context.Context, exec Executor) (string, Platform) {
 
 	return "", PlatformUnknown
 }
+

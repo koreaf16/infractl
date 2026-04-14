@@ -111,7 +111,8 @@ func (ib *inputBar) applySearch() {
 
 func (ib *inputBar) handleTabComplete() {
 	val := ib.ti.Value()
-	if !strings.HasPrefix(val, "/") {
+	// 경로(/home/... 등)는 자동완성 대상에서 제외
+	if !IsSlashCommandPrefix(val) {
 		return
 	}
 	for _, cmd := range slashCommands {

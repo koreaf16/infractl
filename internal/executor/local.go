@@ -1,35 +1,37 @@
-// Package executor
-// File: local.go
-// Description: 로컬 머신에서 쉘 명령을 실행하는 Executor 구현
-// Responsibility: 로컬 bash(Linux/Mac) 또는 PowerShell(Windows) 명령 실행
-
 package executor
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
 	"io"
-	"log/slog"
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
+// stdinMode describes how the active stdin pipe should handle line endings for injection.
+type stdinMode int
+
 const (
-	// defaultTimeout은 명령 실행의 기본 타임아웃이다.
-	defaultTimeout = 30 * time.Second
+	stdinModePipe stdinMode = iota // regular OS pipe — LF (\n) is the newline
+	stdinModePTY                   // PTY / ConPTY — CR (\r) or CR+LF is required for Enter
 )
 
-// LocalExecutor는 로컬 머신에서 명령을 실행하는 Executor 구현체이다.
+const defaultTimeout = 30 * time.Second
+
+// LocalExecutor runs commands on the local controller.
 type LocalExecutor struct {
 	timeout time.Duration
+
+	sessionMu     sync.Mutex
+	activeStdin   io.Writer
+	activeStdinMode stdinMode
 }
 
-// NewLocalExecutor는 지정된 타임아웃으로 LocalExecutor를 생성한다.
-// timeout이 0이면 defaultTimeout(30초)을 사용한다.
+// NewLocalExecutor builds a local executor with a default timeout.
 func NewLocalExecutor(timeout time.Duration) *LocalExecutor {
 	if timeout == 0 {
 		timeout = defaultTimeout
@@ -37,15 +39,22 @@ func NewLocalExecutor(timeout time.Duration) *LocalExecutor {
 	return &LocalExecutor{timeout: timeout}
 }
 
-// Execute는 로컬 쉘에서 command를 실행하고 결과를 반환한다.
-// 비정상 종료(exit code != 0)는 error가 아닌 ExecResult로 반환한다.
+// Execute runs a command and buffers stdout/stderr until completion.
 func (e *LocalExecutor) Execute(ctx context.Context, command string) (ExecResult, error) {
 	start := time.Now()
 
-	ctx, cancel := context.WithTimeout(ctx, e.timeout)
+	var cancel context.CancelFunc
+	if _, ok := ctx.Deadline(); ok {
+		ctx, cancel = context.WithCancel(ctx)
+	} else {
+		ctx, cancel = context.WithTimeout(ctx, e.timeout)
+	}
 	defer cancel()
 
-	cmd := buildCommand(ctx, command)
+	cmd, err := buildCommand(ctx, command)
+	if err != nil {
+		return ExecResult{}, fmt.Errorf("build command: %w", err)
+	}
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
@@ -57,10 +66,8 @@ func (e *LocalExecutor) Execute(ctx context.Context, command string) (ExecResult
 	exitCode := 0
 	if runErr != nil {
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
-			// 비정상 종료 — exit code만 기록하고 error는 nil 반환
 			exitCode = exitErr.ExitCode()
 		} else {
-			// 실행 자체가 실패 (바이너리 없음, 컨텍스트 취소 등)
 			return ExecResult{}, fmt.Errorf("execute command: %w", runErr)
 		}
 	}
@@ -73,7 +80,7 @@ func (e *LocalExecutor) Execute(ctx context.Context, command string) (ExecResult
 	}, nil
 }
 
-// Target은 이 executor의 대상 식별자를 반환한다.
+// Target returns the local execution label.
 func (e *LocalExecutor) Target() string {
 	return "localhost"
 }
@@ -88,75 +95,80 @@ func (e *LocalExecutor) ShellName() string {
 	return LocalShellName()
 }
 
-// ExecuteStream은 명령을 실행하면서 stdout 라인마다 onLine 콜백을 호출한다.
-// stderr는 별도 버퍼에 수집하여 최종 ExecResult에 포함한다.
-//
-// 유휴 감지: 출력이 defaultIdleThreshold(10초) 동안 없으면 프로세스를 강제 종료한다.
-// 로컬 실행은 stdin=/dev/null이라 stdin 주입이 불가하므로 kill 후 명확한 오류를 반환한다.
+
+// ExecuteStream runs a command while streaming stdout and stderr line-by-line via onLine.
+// stderr는 password: 같은 프롬프트 감지를 위해 stdout과 동일한 partial-line 파이프라인으로 처리된다.
 func (e *LocalExecutor) ExecuteStream(ctx context.Context, command string, onLine func(string)) (ExecResult, error) {
 	start := time.Now()
 
-	ctx, cancel := context.WithTimeout(ctx, e.timeout)
+	var cancel context.CancelFunc
+	if _, ok := ctx.Deadline(); ok {
+		ctx, cancel = context.WithCancel(ctx)
+	} else {
+		ctx, cancel = context.WithTimeout(ctx, e.timeout)
+	}
 	defer cancel()
 
-	cmd := buildCommand(ctx, command)
+	cmd, err := buildCommand(ctx, command)
+	if err != nil {
+		return ExecResult{}, fmt.Errorf("build command: %w", err)
+	}
+
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		return ExecResult{}, fmt.Errorf("create stdin pipe: %w", err)
+	}
+	e.sessionMu.Lock()
+	e.activeStdin = stdinPipe
+	e.activeStdinMode = stdinModePipe
+	e.sessionMu.Unlock()
+	defer func() {
+		e.clearActiveStdin(stdinPipe)
+		stdinPipe.Close()
+	}()
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("create stdout pipe: %w", err)
 	}
 
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return ExecResult{}, fmt.Errorf("create stderr pipe: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		return ExecResult{}, fmt.Errorf("start command: %w", err)
 	}
 
-	// 유휴 감지: 출력이 없으면 인터랙티브 프롬프트 대기로 판단해 프로세스를 종료한다.
-	watcher := NewIdleWatcher(defaultIdleThreshold)
-	watcher.Start(ctx)
-	defer watcher.Stop()
+	lineCh := StartLineAssembler(StartPipeReader(stdoutPipe))
+	stderrLineCh := StartLineAssembler(StartPipeReader(stderrPipe))
 
+	// stderr를 별도 goroutine에서 수집하며 onLine으로 idle 감지(password 프롬프트)에도 전달한다.
+	stderrDone := make(chan []string, 1)
 	go func() {
-		select {
-		case <-watcher.Triggered():
-			slog.Warn("local command idle timeout, killing process",
-				"command", command, "threshold", defaultIdleThreshold)
-			cancel() // ctx 취소 → cmd.Wait()이 에러 반환
-		case <-ctx.Done():
+		var lines []string
+		for line := range stderrLineCh {
+			lines = append(lines, line)
+			if onLine != nil {
+				onLine(line)
+			}
 		}
+		stderrDone <- lines
 	}()
 
 	var stdoutLines []string
-	scanner := bufio.NewScanner(stdoutPipe)
-	scanner.Buffer(make([]byte, 0, MaxOutputBytes), MaxOutputBytes)
-	for scanner.Scan() {
-		line := scanner.Text()
-		watcher.Ping()
+	for line := range lineCh {
 		stdoutLines = append(stdoutLines, line)
 		if onLine != nil {
 			onLine(line)
 		}
 	}
-	if scanErr := scanner.Err(); scanErr != nil && scanErr != io.EOF {
-		stderrBuf.WriteString(fmt.Sprintf("\n[scan error: %s]", scanErr))
-	}
+
+	stderrLines := <-stderrDone
 
 	waitErr := cmd.Wait()
 	duration := time.Since(start)
-
-	// 유휴 타임아웃에 의한 종료인지 확인 (ctx.Err() == context.Canceled)
-	select {
-	case <-watcher.Triggered():
-		return ExecResult{
-			Stdout:   TruncateOutput(strings.Join(stdoutLines, "\n"), MaxOutputBytes),
-			Stderr:   fmt.Sprintf("[인터랙티브 입력 대기로 판단되어 %s 후 종료]\n%s", defaultIdleThreshold, stderrBuf.String()),
-			ExitCode: -1,
-			Duration: duration,
-		}, nil
-	default:
-	}
 
 	exitCode := 0
 	if waitErr != nil {
@@ -169,21 +181,70 @@ func (e *LocalExecutor) ExecuteStream(ctx context.Context, command string, onLin
 
 	return ExecResult{
 		Stdout:   TruncateOutput(strings.Join(stdoutLines, "\n"), MaxOutputBytes),
-		Stderr:   TruncateOutput(stderrBuf.String(), MaxOutputBytes),
+		Stderr:   TruncateOutput(strings.Join(stderrLines, "\n"), MaxOutputBytes),
 		ExitCode: exitCode,
 		Duration: duration,
 	}, nil
 }
 
-// buildCommand는 OS에 맞는 명령 객체를 생성한다.
-// Windows: PowerShell 5/7 우선 사용 — Get-* cmdlet 등 PS 명령 직접 실행 가능.
-//
-//	출력 인코딩을 UTF-8로 강제하여 한글 깨짐을 방지한다.
-//
-// Linux/Mac: bash -c 사용.
-func buildCommand(ctx context.Context, command string) *exec.Cmd {
+// InjectStdin writes a line to the active command stdin.
+// On Windows with a ConPTY, uses CR+LF so the process receives a proper Enter keystroke.
+// On all other platforms (Unix PTY, regular pipe), uses LF only.
+func (e *LocalExecutor) InjectStdin(line string) error {
+	e.sessionMu.Lock()
+	pipe := e.activeStdin
+	mode := e.activeStdinMode
+	e.sessionMu.Unlock()
+
+	if pipe == nil {
+		return fmt.Errorf("inject stdin: no active local stdin pipe")
+	}
+	var writeErr error
+	if mode == stdinModePTY && runtime.GOOS == "windows" {
+		// ConPTY VT emulator maps CR (0x0D) to the Enter key; LF alone is not enough.
+		_, writeErr = fmt.Fprintf(pipe, "%s\r\n", line)
+	} else {
+		_, writeErr = fmt.Fprintln(pipe, line)
+	}
+	if writeErr != nil {
+		return fmt.Errorf("inject stdin: %w", writeErr)
+	}
+	return nil
+}
+
+// setActivePTY registers a PTY master as the active stdin (uses PTY line-ending mode).
+func (e *LocalExecutor) setActivePTY(ptmx io.Writer) {
+	e.sessionMu.Lock()
+	defer e.sessionMu.Unlock()
+	e.activeStdin = ptmx
+	e.activeStdinMode = stdinModePTY
+}
+
+func (e *LocalExecutor) clearActiveStdin(key io.Writer) {
+	e.sessionMu.Lock()
+	defer e.sessionMu.Unlock()
+	if e.activeStdin == key {
+		e.activeStdin = nil
+		e.activeStdinMode = stdinModePipe
+	}
+}
+
+// resolveLocalShell finds the best available POSIX shell via PATH.
+// Tries bash first, then sh. Returns an error if neither is found.
+func resolveLocalShell() (string, error) {
+	for _, sh := range []string{"bash", "sh"} {
+		if path, err := exec.LookPath(sh); err == nil {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("no shell found in PATH (tried: bash, sh): install bash or sh to run local commands")
+}
+
+// buildCommand returns the OS-specific command wrapper.
+// On Windows, uses powershell.exe (always available). On Linux/macOS, resolves
+// the shell via PATH — fails clearly if neither bash nor sh is installed.
+func buildCommand(ctx context.Context, command string) (*exec.Cmd, error) {
 	if runtime.GOOS == "windows" {
-		// [Console]::OutputEncoding 설정으로 한글 포함 출력이 UTF-8로 전달된다.
 		psCmd := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " +
 			"$OutputEncoding = [System.Text.Encoding]::UTF8; " + command
 		return exec.CommandContext(ctx,
@@ -191,7 +252,12 @@ func buildCommand(ctx context.Context, command string) *exec.Cmd {
 			"-NoProfile",
 			"-NonInteractive",
 			"-Command", psCmd,
-		)
+		), nil
 	}
-	return exec.CommandContext(ctx, "bash", "-c", command)
+	sh, err := resolveLocalShell()
+	if err != nil {
+		return nil, err
+	}
+	return exec.CommandContext(ctx, sh, "-c", command), nil
 }
+

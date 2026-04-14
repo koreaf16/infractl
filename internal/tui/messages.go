@@ -20,7 +20,11 @@ type TokenMsg string
 type ThinkingTokenMsg string
 
 // ThinkingStartMsg는 LLM이 응답 생성을 시작했음을 나타낸다.
-type ThinkingStartMsg struct{}
+// Tier와 Model로 shimmer에 사용 중인 LLM 정보를 표시한다.
+type ThinkingStartMsg struct {
+	Tier  string // "reasoning", "general", "fast"
+	Model string // 예: "qwen-35b"
+}
 
 // ToolStartMsg는 도구 실행이 시작되었음을 나타낸다.
 type ToolStartMsg struct {
@@ -114,3 +118,5 @@ type ActiveServerMsg struct {
 type SubagentEventMsg struct {
 	Event subagent.Event
 }
+
+

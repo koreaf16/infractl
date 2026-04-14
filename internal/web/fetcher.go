@@ -12,6 +12,9 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/yourorg/infractl/internal/cache"
+	"golang.org/x/net/html/charset"
 )
 
 const (
@@ -24,14 +27,15 @@ const (
 // Fetcher는 URL 내용을 가져와 Markdown으로 변환하는 HTTP 클라이언트이다.
 type Fetcher struct {
 	client *http.Client
-	cache  *LRUCache
+	cache  *cache.Cache[string, string]
 }
 
-// NewFetcher는 LRU 캐시를 포함한 Fetcher를 생성한다.
-func NewFetcher(cacheSize int, cacheTTL time.Duration) *Fetcher {
+// NewFetcher는 크기 기반 LRU 캐시를 포함한 Fetcher를 생성한다.
+// cacheSize, cacheTTL 파라미터는 하위 호환성을 위해 유지되나 내부적으로 기본 설정을 사용한다.
+func NewFetcher(_ int, _ time.Duration) *Fetcher {
 	return &Fetcher{
 		client: &http.Client{Timeout: fetchTimeout},
-		cache:  NewLRUCache(cacheSize, cacheTTL),
+		cache:  cache.NewWebCache(),
 	}
 }
 
@@ -74,14 +78,14 @@ func (f *Fetcher) FetchWithPrompt(ctx context.Context, rawURL string, promptFn f
 	return result, nil
 }
 
-// httpGet은 HTTP GET으로 URL 내용을 반환한다.
+// httpGet은 HTTP GET으로 URL 내용을 반환한다. (자동 인코딩 변환 포함)
 func (f *Fetcher) httpGet(ctx context.Context, rawURL string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request %s: %w", rawURL, err)
 	}
 	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,*/*")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 
 	resp, err := f.client.Do(req)
 	if err != nil {
@@ -93,7 +97,13 @@ func (f *Fetcher) httpGet(ctx context.Context, rawURL string) ([]byte, error) {
 		return nil, fmt.Errorf("http %d for %s", resp.StatusCode, rawURL)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	// 인코딩 자동 감지 및 변환 리더 생성 (UTF-8로 변환)
+	utf8Reader, err := charset.NewReader(resp.Body, resp.Header.Get("Content-Type"))
+	if err != nil {
+		return nil, fmt.Errorf("create charset reader %s: %w", rawURL, err)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(utf8Reader, maxBodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("read body %s: %w", rawURL, err)
 	}

@@ -1,3 +1,8 @@
+// Package tui
+// File: app_init.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package tui
 
 import (
@@ -27,3 +32,4 @@ func initialWindowSizeCmd(fd fdProvider) tea.Cmd {
 		return tea.WindowSizeMsg{Width: width, Height: height}
 	}
 }
+

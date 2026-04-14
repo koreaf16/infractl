@@ -95,3 +95,36 @@ func (r *Registry) ToToolDefs() []llm.ToolDef {
 	}
 	return defs
 }
+
+// ToToolDefsFiltered는 allowed에 포함된 이름의 도구만 ToolDef로 변환한다.
+// chat 의도 등 최소 도구만 필요한 경우 페이로드를 줄이기 위해 사용한다.
+func (r *Registry) ToToolDefsFiltered(allowed map[string]bool) []llm.ToolDef {
+	tools := r.GetEnabled()
+	defs := make([]llm.ToolDef, 0, len(allowed))
+	for _, t := range tools {
+		if !allowed[t.Name()] {
+			continue
+		}
+		defs = append(defs, llm.ToolDef{
+			Type: "function",
+			Function: llm.FunctionDef{
+				Name:        t.Name(),
+				Description: t.Description(),
+				Parameters:  t.Parameters(),
+			},
+		})
+	}
+	return defs
+}
+
+// GetEnabledFiltered는 allowed에 포함된 이름의 활성 도구만 반환한다.
+func (r *Registry) GetEnabledFiltered(allowed map[string]bool) []Tool {
+	all := r.GetEnabled()
+	result := make([]Tool, 0, len(allowed))
+	for _, t := range all {
+		if allowed[t.Name()] {
+			result = append(result, t)
+		}
+	}
+	return result
+}

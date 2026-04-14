@@ -1,3 +1,8 @@
+// Package generic
+// File: connector.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package generic
 
 import (
@@ -228,7 +233,7 @@ func buildParameters(cmd LearnedCommand) map[string]interface{} {
 	if !cmd.ReadOnly {
 		params["skip_backup"] = map[string]interface{}{
 			"type":        "boolean",
-			"description": "true이면 사전 백업을 건너뜁니다. 공간 부족이나 백업 불필요 확인 시에만 사용하세요.",
+			"description": "true?�면 ?�전 백업??건너?�니?? 공간 부족이??백업 불필???�인 ?�에�??�용?�세??",
 		}
 	}
 
@@ -404,3 +409,4 @@ func argBool(args map[string]interface{}, key string, defaultVal bool) bool {
 	}
 	return b
 }
+

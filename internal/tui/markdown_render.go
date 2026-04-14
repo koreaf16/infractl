@@ -86,13 +86,15 @@ func (r *ansiRenderer) renderDocument(w util.BufWriter, _ []byte, n ast.Node, en
 func (r *ansiRenderer) renderHeading(w util.BufWriter, source []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
 		h := n.(*ast.Heading)
-		text := string(n.Text(source))
+		text := stripEmoji(string(n.Text(source)))
 		var styled string
-		if h.Level == 1 {
+		switch h.Level {
+		case 1:
 			styled = lipgloss.NewStyle().Bold(true).Foreground(ColorClaude).Render(text)
-		} else {
-			prefix := strings.Repeat("#", h.Level) + " "
-			styled = lipgloss.NewStyle().Bold(true).Render(prefix + text)
+		case 2:
+			styled = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Render(text)
+		default:
+			styled = lipgloss.NewStyle().Bold(true).Foreground(ColorDim).Render(text)
 		}
 		r.flushLine()
 		r.writeStr(styled)
@@ -259,4 +261,41 @@ func (r *ansiRenderer) renderThematicBreak(_ util.BufWriter, _ []byte, _ ast.Nod
 	return ast.WalkContinue, nil
 }
 
+// stripEmoji는 텍스트에서 이모지 문자를 제거한다.
+// Windows 터미널에서 이모지가 깨지는 문제를 방지한다.
+func stripEmoji(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if isEmoji(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	// 이모지 제거 후 연속 공백 정리
+	result := strings.TrimSpace(b.String())
+	return result
+}
 
+// isEmoji는 rune이 이모지 범위에 속하는지 확인한다.
+func isEmoji(r rune) bool {
+	switch {
+	case r >= 0x1F600 && r <= 0x1F64F: // Emoticons
+		return true
+	case r >= 0x1F300 && r <= 0x1F5FF: // Misc Symbols and Pictographs
+		return true
+	case r >= 0x1F680 && r <= 0x1F6FF: // Transport and Map
+		return true
+	case r >= 0x1F900 && r <= 0x1F9FF: // Supplemental Symbols
+		return true
+	case r >= 0x1FA00 && r <= 0x1FAFF: // Extended Symbols
+		return true
+	case r >= 0x2600 && r <= 0x27BF: // Misc symbols, Dingbats
+		return true
+	case r >= 0x1F1E0 && r <= 0x1F1FF: // Flags
+		return true
+	case r == 0xFE0F || r == 0x200D: // Variation Selector, ZWJ
+		return true
+	}
+	return false
+}

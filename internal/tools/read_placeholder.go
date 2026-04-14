@@ -17,7 +17,7 @@ import (
 // ReadPlaceholderTool은 저장된 대규모 명령어 출력 원본을 읽어오는 도구이다.
 type ReadPlaceholderTool struct{}
 
-func (t *ReadPlaceholderTool) Name() string        { return "read_placeholder" }
+func (t *ReadPlaceholderTool) Name() string         { return "read_placeholder" }
 func (t *ReadPlaceholderTool) RiskLevel() RiskLevel { return RiskNone }
 func (t *ReadPlaceholderTool) IsReadOnly() bool     { return true }
 func (t *ReadPlaceholderTool) IsEnabled() bool      { return true }

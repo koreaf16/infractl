@@ -1,3 +1,8 @@
+// Package rag
+// File: memory_service.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package rag
 
 import (
@@ -606,3 +611,4 @@ func errString(err error) string {
 	}
 	return err.Error()
 }
+

@@ -66,11 +66,43 @@ type rerankRequest struct {
 	TopN      int      `json:"top_n"`
 }
 
-type rerankResponse struct {
+// rerankResponseCohere는 Cohere 호환 응답 형식이다 ({"results":[...]}).
+type rerankResponseCohere struct {
 	Results []struct {
 		Index          int     `json:"index"`
 		RelevanceScore float64 `json:"relevance_score"`
 	} `json:"results"`
+}
+
+// rerankResponseSGLang는 SGLang 응답 형식이다 ([{score, index}]).
+type rerankResponseSGLang []struct {
+	Index int     `json:"index"`
+	Score float64 `json:"score"`
+}
+
+// parseRerankResponse는 SGLang 배열 형식과 Cohere 객체 형식을 모두 처리한다.
+// SGLang: [{score, index, ...}]
+// Cohere:  {"results":[{index, relevance_score}]}
+func parseRerankResponse(data []byte) ([]RerankResult, error) {
+	var sgResp rerankResponseSGLang
+	if err := json.Unmarshal(data, &sgResp); err == nil && len(sgResp) > 0 {
+		out := make([]RerankResult, 0, len(sgResp))
+		for _, r := range sgResp {
+			out = append(out, RerankResult{Index: r.Index, Score: r.Score})
+		}
+		return out, nil
+	}
+
+	var cohereResp rerankResponseCohere
+	if err := json.Unmarshal(data, &cohereResp); err == nil {
+		out := make([]RerankResult, 0, len(cohereResp.Results))
+		for _, r := range cohereResp.Results {
+			out = append(out, RerankResult{Index: r.Index, Score: r.RelevanceScore})
+		}
+		return out, nil
+	}
+
+	return nil, fmt.Errorf("unknown rerank response format: %s", data)
 }
 
 // Rerank는 Cohere 호환 /rerank 엔드포인트를 호출하여 결과를 재순위화한다.
@@ -105,24 +137,20 @@ func (r *httpReranker) Rerank(ctx context.Context, query string, documents []str
 	}
 	defer resp.Body.Close()
 
+	rawBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read rerank response: %w", err)
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		rawBody, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("rerank status %d: %s", resp.StatusCode, rawBody)
 	}
 
-	var result rerankResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode rerank response: %w", err)
+	out, parseErr := parseRerankResponse(rawBody)
+	if parseErr != nil {
+		return nil, fmt.Errorf("decode rerank response: %w", parseErr)
 	}
 
-	slog.Debug("reranker response", "query_len", len(query), "docs", len(documents), "results", len(result.Results))
-
-	out := make([]RerankResult, 0, len(result.Results))
-	for _, r := range result.Results {
-		out = append(out, RerankResult{
-			Index: r.Index,
-			Score: r.RelevanceScore,
-		})
-	}
+	slog.Debug("reranker response", "query_len", len(query), "docs", len(documents), "results", len(out))
 	return out, nil
 }

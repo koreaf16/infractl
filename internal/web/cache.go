@@ -1,7 +1,9 @@
 // Package web
 // File: cache.go
-// Description: HTTP 응답 LRU 캐시 (URL 기반, TTL 15분)
-// Responsibility: 동일 URL 재요청을 방지하는 인메모리 LRU 캐시 제공
+// Description: HTTP 응답 LRU 캐시 (Deprecated — internal/cache.Cache로 대체됨)
+// Responsibility: 하위 호환성 유지를 위해 보존. 신규 코드에서는 cache.NewWebCache() 사용.
+//
+// Deprecated: 이 파일은 internal/cache 패키지로 대체되었다. fetcher.go 참고.
 
 package web
 

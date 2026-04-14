@@ -20,6 +20,15 @@ var skipTags = map[string]bool{
 	"form": true, "iframe": true,
 }
 
+// voidElements는 닫는 태그가 없는 HTML void 요소 집합이다.
+// skipDepth 추적 시 이 요소들은 카운터를 증가시키지 않아야 한다.
+var voidElements = map[string]bool{
+	"area": true, "base": true, "br": true, "col": true,
+	"embed": true, "hr": true, "img": true, "input": true,
+	"link": true, "meta": true, "param": true, "source": true,
+	"track": true, "wbr": true,
+}
+
 // blockTags는 앞뒤 개행이 필요한 블록 태그이다.
 var blockTags = map[string]bool{
 	"p": true, "div": true, "section": true, "article": true,
@@ -48,10 +57,26 @@ func HTMLToMarkdown(htmlBytes []byte, maxLen int) string {
 		token := tokenizer.Token()
 
 		switch tt {
-		case html.StartTagToken, html.SelfClosingTagToken:
+		case html.SelfClosingTagToken:
+			// Self-closing 태그는 end tag가 없으므로 skipDepth를 변경하지 않는다.
+			if skipDepth > 0 {
+				continue
+			}
+			// skip 대상이 아닌 self-closing 태그는 아래 StartTagToken과 동일하게 처리한다.
+			tag := token.Data
+			switch tag {
+			case "br":
+				sb.WriteString("\n")
+			}
+			continue
+
+		case html.StartTagToken:
 			tag := token.Data
 			if skipDepth > 0 {
-				skipDepth++
+				// void 요소는 닫는 태그가 없으므로 skipDepth를 올리지 않는다.
+				if !voidElements[tag] {
+					skipDepth++
+				}
 				continue
 			}
 			if skipTags[tag] {

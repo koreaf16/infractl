@@ -1,3 +1,8 @@
+// Package tools
+// File: save_learned_system.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package tools
 
 import (
@@ -55,7 +60,7 @@ func (t *SaveLearnedSystemTool) Parameters() map[string]interface{} {
   "status": "kafka-topics.sh --list",
   "restart": {
     "command": "systemctl restart kafka",
-    "description": "Kafka 재시작",
+    "description": "Kafka ?�시??,
     "read_only": false,
     "backup_command": "cp /etc/kafka/server.properties /etc/kafka/server.properties.bak"
   }

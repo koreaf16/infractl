@@ -1,3 +1,8 @@
+// Package tools
+// File: server_add.go
+// Description: [TODO: Add description]
+// Responsibility: [TODO: Add responsibility]
+
 package tools
 
 import (

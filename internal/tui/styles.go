@@ -202,4 +202,45 @@ var (
 	// 리치 셀렉션 — 키보드 힌트
 	StyleSelectionHint = lipgloss.NewStyle().
 				Foreground(ColorDim)
+
+	// ── Gemini CLI 스타일 박스형 선택 UI ───────────────────────────────
+	// 박스 테두리 색상 (프롬프트 보더와 일치)
+	ColorGeminiBox = lipgloss.Color("#4EBA65") // ColorSuccess 와 동일한 초록색 계열로 변경하여 선택 UI 통일
+
+	// 박스 헤더 라벨 (볼드, 테마색)
+	StyleGeminiHeader = lipgloss.NewStyle().
+				Foreground(ColorSuccess).
+				Bold(true)
+
+	// ● 불릿 — 현재 선택된 항목 표시
+	StyleGeminiBullet = lipgloss.NewStyle().
+				Foreground(ColorSuccess).
+				Bold(true)
+
+	// 선택된 항목 번호+라벨 (음영 스타일 - 초록 바탕에 검정 글씨)
+	StyleGeminiSelected = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#000000")).
+				Background(ColorSuccess).
+				Bold(true).
+				PaddingLeft(1).
+				PaddingRight(1)
+
+	// 비선택 항목 번호+라벨
+	StyleGeminiOption = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#AAAAAA"))
+
+	// 옵션 서브 설명 (들여쓰기)
+	StyleGeminiSubDesc = lipgloss.NewStyle().
+				Foreground(ColorDim)
+
+	// 하단 키보드 힌트
+	StyleGeminiHint = lipgloss.NewStyle().
+				Foreground(ColorDim)
+
+	// 전체 박스 컨테이너
+	StyleGeminiBox = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(ColorGeminiBox).
+				PaddingLeft(1).
+				PaddingRight(1)
 )

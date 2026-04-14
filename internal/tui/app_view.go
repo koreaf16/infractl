@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 func (m AppModel) View() string {
@@ -23,9 +24,18 @@ func (m AppModel) View() string {
 	if m.busy && len(m.streamLines) > 0 {
 		parts = append(parts, strings.Join(m.streamLines, "\n"))
 	}
+	// 실행 중 도구 박스 표시 (→ ToolName <arg> + streaming output)
+	if m.busy {
+		if st := m.activeTools.MostRecentForeground(); st != nil {
+			elapsed := time.Since(st.startTime)
+			parts = append(parts, renderShellBoxRunning(st.toolName, st.args, st.shellLines, elapsed, m.width))
+		}
+	}
 	if m.queue.Len() > 0 {
 		parts = append(parts, m.queue.View(m.width))
 	}
+	// 채팅 영역과 thinking 표시 사이에 항상 빈 줄을 하나 예약한다.
+	parts = append(parts, "")
 	// shimmer 라인은 항상 인풋박스 바로 위에 고정 예약한다.
 	// busy 중 아닐 때는 빈 줄로 유지해 레이아웃이 흔들리지 않게 한다.
 	shimmerLine := ""
@@ -40,8 +50,6 @@ func (m AppModel) View() string {
 	switch {
 	case m.privilege.active:
 		parts = append(parts, renderInputBox(m.width, m.privilege.render(m.width), ColorWarning, ""))
-	case m.idle.active:
-		parts = append(parts, renderInputBox(m.width, m.idle.render(m.width), ColorWarning, ""))
 	default:
 		parts = append(parts, renderInputBox(m.width, m.input.View(), borderColor, ""))
 	}
@@ -49,9 +57,6 @@ func (m AppModel) View() string {
 	footerSt := footerIdle
 	if m.busy {
 		footerSt = footerBusy
-	}
-	if m.idle.active {
-		footerSt = footerIdlePrompt
 	}
 	if m.privilege.active {
 		footerSt = footerSecretPrompt
@@ -66,7 +71,7 @@ func (m AppModel) View() string {
 	}
 	parts = append(parts, m.statusBar.View())
 
-	if m.parker != nil && !m.idle.active && !m.selection.active && !m.privilege.active {
+	if m.parker != nil && !m.selection.active && !m.privilege.active {
 		m.updateCursorTarget()
 	} else if m.parker != nil {
 		m.parker.SetTarget(0, 0, false)
@@ -83,7 +88,7 @@ func (m AppModel) updateCursorTarget() {
 	if m.queue.Len() > 0 {
 		linesAbove++
 	}
-	linesAbove++ // shimmer 라인 (항상 1줄 예약)
+	linesAbove += 2 // 빈 줄 separator + shimmer 라인 (항상 2줄 예약)
 
 	inputH := inputBoxHeight(m.input.View())
 	linesBelow := 1

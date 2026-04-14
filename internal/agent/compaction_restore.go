@@ -60,7 +60,8 @@ func (a *Agent) injectPostCompactContext(_ context.Context) {
 		return
 	}
 
-	note := "[Context restored after compaction]\n" + strings.Join(parts, "\n")
+	note := "[Context restored after compaction]\n" + strings.Join(parts, "\n") +
+		"\n\n[Reminder] 서비스/포트 식별 시 반드시 discover_services 또는 process_list로 검증하세요. 추측하지 마세요."
 
 	a.history = append(a.history,
 		llm.Message{Role: llm.RoleUser, Content: note},

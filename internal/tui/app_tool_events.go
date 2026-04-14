@@ -17,14 +17,13 @@ import (
 func (m AppModel) handleToolMsg(msg tea.Msg) (AppModel, tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case ToolStartMsg:
-		m.activeTools.Add(msg.ToolID, msg.Name, msg.Target)
+		m.activeTools.Add(msg.ToolID, msg.Name, msg.Target, msg.Args)
 		desc, _ := msg.Args["description"].(string)
 		if phaseID, phaseName, ok := parsePhaseFromDescription(desc); ok {
 			m.progress.AddToolWithPhase(msg.ToolID, msg.Name, msg.Target, phaseID, phaseName, msg.Args)
 		} else {
 			m.progress.AddTool(msg.ToolID, msg.Name, msg.Target, msg.Args)
 		}
-		m.shimmer.SetText(toolShimmerLabel(msg.Name, msg.Args))
 		m.shimmer.bgCount = max(0, m.activeTools.RunningCount()-1)
 		// 스트리밍 미리보기를 영구 출력 후 초기화 (도구 실행 전 LLM 텍스트 유지)
 		if m.streamTokens != "" && m.box != nil {
@@ -50,7 +49,6 @@ func (m AppModel) handleToolMsg(msg tea.Msg) (AppModel, tea.Cmd, bool) {
 
 	case ToolEndMsg:
 		isBackground := m.activeTools.IsBackgrounded(msg.ToolID)
-		isLastTool := m.activeTools.RunningCount() == 1 // Remove 전에 체크
 		var capturedLines []string
 		if prev := m.activeTools.MostRecent(); prev != nil && prev.toolID == msg.ToolID {
 			capturedLines = prev.shellLines
@@ -80,31 +78,27 @@ func (m AppModel) handleToolMsg(msg tea.Msg) (AppModel, tea.Cmd, bool) {
 				m.box.Println(renderBackgroundDone(msg.Name, msg.Duration, msg.Success))
 			} else {
 				var args map[string]any
-				var target string
 				for _, item := range m.progress.items {
 					if item.toolID == msg.ToolID {
 						args = item.args
-						target = item.target
 						break
 					}
 				}
-				m.box.Println(renderToolHeaderLine(msg.Name, target, args))
-				m.box.Println(renderToolSummaryLine(msg.Name, args, msg.Result, msg.Duration, msg.Success))
-
-				// 마지막 툴 완료 직후 Done 표시 (LLM 응답 앞에 위치)
-				if isLastTool {
-					if summary := m.stats.Summary(); summary != "" {
-						m.box.Println(summary)
-					}
+				contentLines := capturedLines
+				if !isShellBoxTool(msg.Name) {
+					contentLines = toolBoxContent(msg.Name, args, msg.Result, msg.Success)
 				}
+				m.box.Println(renderShellBoxCompleted(msg.Name, args, contentLines, msg.Duration, msg.Success, m.width))
 			}
 		}
 		return m, nil, true
 
 	case ResponseDoneMsg:
 		m.shimmer.RecordActivity()
-		if m.streamTokens != "" {
-			m.box.Println(renderResponseText(string(msg), m.mdRend))
+		// streamTokens 여부와 무관하게 내용이 있으면 항상 렌더링한다.
+		// LLM이 스트리밍 없이 최종 응답을 반환하는 경우도 처리한다.
+		if content := string(msg); content != "" {
+			m.box.Println(renderResponseText(content, m.mdRend))
 		}
 		m.streamTokens = ""
 		m.streamLines = nil
@@ -121,6 +115,10 @@ func (m AppModel) handleToolMsg(msg tea.Msg) (AppModel, tea.Cmd, bool) {
 		return m, nil, true
 
 	case AgentDoneMsg:
+		// ResponseDoneMsg보다 먼저 처리될 경우를 대비한 안전망
+		if m.streamTokens != "" && m.box != nil {
+			m.box.Println(renderResponseText(m.streamTokens, m.mdRend))
+		}
 		m.activeTools.Clear()
 		m.shimmer.Stop()
 		m.progress.Reset()

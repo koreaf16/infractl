@@ -57,7 +57,7 @@ func (r *Router) classify(ctx context.Context, task string, hasReasoning, hasFas
 	resp, err := general.Chat(ctx, []Message{
 		{Role: RoleSystem, Content: systemPrompt},
 		{Role: RoleUser, Content: prompt},
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		slog.Warn("llm tier classification failed, using general", "err", err)
 		return TierGeneral

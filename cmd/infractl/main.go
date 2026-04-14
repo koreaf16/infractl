@@ -1,7 +1,7 @@
 // Package main
 // File: main.go
-// Description: infractl CLI ?酉?껆뵳?猷?紐낅뱜 獄???뺥닏?뚣끇????브쑨由?
-// Responsibility: ??뤵??鈺곌퀡??composition root)????쎈뻬 筌뤴뫀諭?野껉퀣??(TUI / REPL)
+// Description: infractl CLI 진입점 및 메인 루프 오케스트레이션
+// Responsibility: 전역 의존성 주입(composition root) 및 실행 모드 선택(TUI / REPL)
 
 package main
 
@@ -12,13 +12,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/yourorg/infractl/internal/agent"
 	"github.com/yourorg/infractl/internal/background"
 	"github.com/yourorg/infractl/internal/checkpoint"
-	"github.com/yourorg/infractl/internal/cli"
 	"github.com/yourorg/infractl/internal/config"
 	"github.com/yourorg/infractl/internal/connector"
 	"github.com/yourorg/infractl/internal/cost"
@@ -27,6 +27,7 @@ import (
 	infrainit "github.com/yourorg/infractl/internal/infrainit"
 	"github.com/yourorg/infractl/internal/llm"
 	"github.com/yourorg/infractl/internal/mcp"
+	"github.com/yourorg/infractl/internal/privilege"
 	"github.com/yourorg/infractl/internal/rag"
 	"github.com/yourorg/infractl/internal/schedule"
 	"github.com/yourorg/infractl/internal/store"
@@ -35,7 +36,7 @@ import (
 	"github.com/yourorg/infractl/internal/tui"
 )
 
-const appVersion = "0.5.0"
+const appVersion = "1.0.0"
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
@@ -51,22 +52,13 @@ func main() {
 func run() error {
 	args := os.Args[1:]
 	filtered := args[:0]
-	useREPL := false
 	for _, a := range args {
-		switch a {
-		case "--tui":
-			// default interactive mode
-		case "--repl":
-			useREPL = true
-		default:
+		if a != "--tui" {
 			filtered = append(filtered, a)
 		}
 	}
 
 	if len(filtered) == 0 {
-		if useREPL {
-			return runREPL()
-		}
 		return runTUI()
 	}
 
@@ -119,7 +111,6 @@ type deps struct {
 	llmClient llm.Client
 
 	llmRegistry *llm.Registry
-	llmRouter   *llm.Router
 
 	externalEmbedder rag.EmbeddingGenerator
 	memoryService    *rag.MemoryService
@@ -167,30 +158,41 @@ func buildDeps(ctx context.Context) (*deps, error) {
 	// LLM Registry 鈺곌퀡?????怨쀫선癰??????곷섧???源낆쨯
 	llmReg := llm.NewRegistry()
 
+	// Qwen 계열 모델 여부 확인 헬퍼
+	isQwen := func(model string) bool {
+		return strings.Contains(strings.ToLower(model), "qwen")
+	}
+
 	generalClient := llm.NewOpenAIClient(
 		generalCfg.Endpoint,
 		generalCfg.Model,
 		generalCfg.APIKey,
 		time.Duration(generalCfg.Timeout)*time.Second,
 	)
+	// Qwen 계열 모델들은 스트리밍 중 tool_calls 필드가 불안정하므로
+	// 본문 내 XML(<tool_call>)을 직접 가로채서 파싱하는 특수 모드를 활성화한다.
+	if isQwen(generalCfg.Model) {
+		generalClient.SetUseInlineToolCalls(true)
+	}
 	llmReg.Register(llm.TierGeneral, generalClient, generalCfg.Model)
 
 	if cfg.Models.Reasoning != nil {
 		rc := cfg.Models.Reasoning
-		llmReg.Register(llm.TierReasoning,
-			llm.NewOpenAIClient(rc.Endpoint, rc.Model, rc.APIKey, time.Duration(rc.Timeout)*time.Second),
-			rc.Model,
-		)
+		reasoningClient := llm.NewOpenAIClient(rc.Endpoint, rc.Model, rc.APIKey, time.Duration(rc.Timeout)*time.Second)
+		if isQwen(rc.Model) {
+			reasoningClient.SetUseInlineToolCalls(true)
+		}
+		llmReg.Register(llm.TierReasoning, reasoningClient, rc.Model)
 	}
 	if cfg.Models.Fast != nil {
 		fc := cfg.Models.Fast
-		llmReg.Register(llm.TierFast,
-			llm.NewOpenAIClient(fc.Endpoint, fc.Model, fc.APIKey, time.Duration(fc.Timeout)*time.Second),
-			fc.Model,
-		)
+		fastClient := llm.NewOpenAIClient(fc.Endpoint, fc.Model, fc.APIKey, time.Duration(fc.Timeout)*time.Second)
+		if isQwen(fc.Model) {
+			fastClient.SetUseInlineToolCalls(true)
+		}
+		llmReg.Register(llm.TierFast, fastClient, fc.Model)
 	}
 
-	llmRouter := llm.NewRouter(llmReg)
 
 	// general ?????곷섧?紐? llmClient嚥?????(??륁맄?紐낆넎 ??疫꿸퀣???꾨뗀諭?癰궰野?筌ㅼ뮇???
 	llmClient := generalClient
@@ -285,7 +287,6 @@ func buildDeps(ctx context.Context) (*deps, error) {
 		registry:         registry,
 		llmClient:        llmClient,
 		llmRegistry:      llmReg,
-		llmRouter:        llmRouter,
 		externalEmbedder: externalEmbedder,
 		memoryService:    memoryService,
 		ragManager:       ragMgr,
@@ -334,8 +335,11 @@ func runTUI() error {
 	ag.SetRAGManager(d.ragManager)
 	// 筌렺??LLM ?????쎈뱜??+ ??깆뒭??雅뚯눘??
 	ag.SetLLMRegistry(d.llmRegistry)
-	ag.SetLLMRouter(d.llmRouter)
 	ag.SetBackgroundManager(d.bgManager)
+	ag.SetCostTracker(d.costTracker)
+	ag.SetModelName(d.cfg.GeneralLLM().Model)
+	ag.SetCheckpointManager(d.checkpointMgr)
+	ag.SetHooksManager(d.hooksMgr)
 	d.memoryService.SubmitBackfill(ctx)
 	if ct, ok := d.registry.Get("session_context"); ok {
 		if tool, ok2 := ct.(*tools.SessionContextTool); ok2 {
@@ -360,10 +364,9 @@ func runTUI() error {
 	// program 筌〓챷???뚢뫂???瑗???tea.NewProgram() ??곸읈??AppModel??雅뚯눘??
 	box := tui.NewProgramBox()
 
-	// /server ?щ옒??紐낅졊???몃뱾?? p ?앹꽦 ?꾩뿉 AppOptions???꾨떖?섍퀬 p ?앹꽦 ??SetProgram?쇰줈 珥덇린??
+	// /server 클래시 명령 핸들러 p 생성 후 SetProgram으로 초기화
 	slashSelectHandler := &tui.TUISelectHandler{}
-	// ?뺤씤 ?몃뱾?? p ?앹꽦 ??鍮?援ъ“泥대줈 ?앹꽦, p ?앹꽦 ??SetProgram?쇰줈 珥덇린??(YOLO ?곹깭 怨듭쑀)
-	confirmHandler := &tui.TUIConfirmHandler{}
+	privCache := privilege.NewCache()
 	app := tui.NewAppWithOptions(ag, d.cfg, d.serverStore, d.execMgr, tui.AppOptions{
 		InitialSessionID: ag.CurrentSessionID(),
 		HistoryStore:     d.historyStore,
@@ -374,19 +377,26 @@ func runTUI() error {
 		CursorParker:     parker,
 		ProgramBox:       box,
 		SelectHandler:    slashSelectHandler,
-		ConfirmHandler:   confirmHandler,
+		KnowledgeStore:   d.knowledgeStore,
+		RAGSourceStore:   d.ragSourceStore,
+		CostTracker:      d.costTracker,
+		CheckpointMgr:    d.checkpointMgr,
+		HooksMgr:         d.hooksMgr,
+		ScheduleMgr:      d.scheduler,
+		PrivCache:        privCache,
 	})
 	// WithAltScreen() ??볤탢 ???紐껋뵬??筌뤴뫀諭? tea.WithOutput??곗쨮 ?뚣끉苑???곌때 writer 雅뚯눘??
 	p := tea.NewProgram(app, tea.WithOutput(parker))
 	box.Set(p) // p.Run() ?袁⑸퓠 ??쇱젟 ??Send()?? ?????怨뺣굡????곸벉
 	handler.SetProgram(p)
+	d.bgManager.SetNotifyFunc(handler.OnJobComplete)
 	ag.SetActiveServerNotifier(func(srv *store.Server) {
 		p.Send(tui.ActiveServerMsg{Server: srv})
 	})
 	// shell_exec OutputCb??tool_exec.go?먯꽌 ?ㅽ뻾 ?쒕쭏??toolID? ?④퍡 二쇱엯??
 	// connector ?꾧뎄???대쫫 異⑸룎 disambiguation UI ?곌껐
 	selectHandler := tui.NewTUISelectHandler(p)
-	slashSelectHandler.SetProgram(p) // 吏??珥덇린?? p ?앹꽦 ??/server ?щ옒??紐낅졊 ?몃뱾?ъ뿉 p 二쇱엯
+	slashSelectHandler.SetProgram(p) // 직접 초기화, p 생성 후 /server 슬래시 핸들러에 p 주입
 	disambig := &tuiDisambiguateAdapter{h: selectHandler}
 	if at, ok := d.registry.Get("connector_activate"); ok {
 		if tool, ok2 := at.(*connector.ActivateTool); ok2 {
@@ -417,11 +427,15 @@ func runTUI() error {
 			analyzeTool.EventCb = handler.SubagentEventCallback()
 		}
 	}
-	// Phase 5: TUI ?뺤씤 ?몃뱾??program ?ㅼ젙 ???먯씠?꾪듃???깅줉
-	confirmHandler.SetProgram(p)
-	confirmHandler.SetSelectHandler(selectHandler)
-	ag.SetConfirmationHandler(confirmHandler)
-	ag.SetIdleInputHandler(agent.NewSmartIdleInputHandler(d.llmClient, tui.NewTUIIdleInputHandler(p)))
+	// Phase 5: TUI 확인 핸들러 대신 QuestionHandler 사용 (이미 SetQuestionHandler로 등록됨)
+	ag.SetIdleInputHandler(ag.NewSmartIdleInputHandler())
+	// 공유 privilege cache: ShellExecTool과 /ospermission이 같은 인스턴스를 참조한다.
+	if sh, ok := d.registry.Get("shell_exec"); ok {
+		if tool, ok2 := sh.(*tools.ShellExecTool); ok2 {
+			tool.PrivilegeCache = privCache
+			tool.PromptHandler = newStorePrivilegeHandler(d.serverStore, tui.NewPrivilegePromptHandler(p))
+		}
+	}
 
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("tui run: %w", err)
@@ -429,101 +443,10 @@ func runTUI() error {
 	return nil
 }
 
-func runREPL() error {
-	if !config.Exists() {
-		fmt.Fprintln(os.Stderr, "??쇱젟 ???뵬????곷뮸??덈뼄. ?믪눘? 'infractl init'????쎈뻬??뤾쉭??")
-		os.Exit(1)
-	}
-
-	ctx := context.Background()
-	d, err := buildDeps(ctx)
-	if err != nil {
-		return err
-	}
-	defer d.serverStore.Close()
-	defer d.execMgr.Close()
-	defer closeMCPClients(d.mcpClients)
-
-	// ?귐딇뒄 ???쐭筌? RichHandler揶쎛 EventHandler ??釉?
-	servers, _ := d.serverStore.List(ctx)
-	state := tui.NewSessionState(d.cfg.GeneralLLM().Model, len(servers))
-	richHandler := tui.NewRichHandler(state)
-
-	handler := &cli.REPLHandler{} // ??媛???醫?
-	ag := agent.New(d.llmClient, d.registry, d.execMgr, richHandler, d.serverStore)
-	ag.SetConnectorManager(d.connectorMgr)
-	// RichHandler揶쎛 ConfirmationHandler???닌뗭겱
-	ag.SetConfirmationHandler(richHandler)
-	ag.SetIdleInputHandler(agent.NewSmartIdleInputHandler(d.llmClient, nil))
-	ag.SetSessionStore(d.sessionStore)
-	ag.SetExecLogStore(d.execLogStore)
-	// Phase 6: ?癒???덈뮸 ?뚮똾猷??곕뱜 雅뚯눘??
-	ag.SetKnowledgeLearner(agent.NewKnowledgeLearner(d.knowledgeStore, d.execLogStore, d.llmClient, d.memoryService))
-	ag.SetAdaptiveLearner(agent.NewAdaptiveLearner(d.learnedSysStore))
-	// Phase 7: RAG 筌띲끇??? 雅뚯눘??
-	ag.SetRAGManager(d.ragManager)
-	// 筌렺??LLM ?????쎈뱜??+ ??깆뒭??雅뚯눘??
-	ag.SetLLMRegistry(d.llmRegistry)
-	ag.SetLLMRouter(d.llmRouter)
-	// Phase 8: ??쑴???곕뗄?삥묾?+ 獄쏄퉫???깆뒲??筌띲끇??? + 筌ｋ똾寃?????+ ??雅뚯눘??
-	ag.SetCostTracker(d.costTracker)
-	ag.SetModelName(d.cfg.GeneralLLM().Model)
-	ag.SetBackgroundManager(d.bgManager)
-	ag.SetCheckpointManager(d.checkpointMgr)
-	ag.SetHooksManager(d.hooksMgr)
-	if ct, ok := d.registry.Get("session_context"); ok {
-		if tool, ok2 := ct.(*tools.SessionContextTool); ok2 {
-			tool.ActiveServer = ag.ActiveServerSnapshot
-		}
-	}
-	if rt, ok := d.registry.Get("server_remove"); ok {
-		if tool, ok2 := rt.(*tools.ServerRemoveTool); ok2 {
-			tool.ActiveServer = ag.ActiveServerSnapshot
-			tool.OnActiveServerClear = ag.ClearActiveServer
-		}
-	}
-	d.bgManager.SetNotifyFunc(richHandler.OnJobComplete)
-	ag.SetActiveServerNotifier(func(srv *store.Server) {
-		if srv == nil {
-			fmt.Println("[active server] cleared")
-			return
-		}
-		fmt.Printf("[active server] %s (%s:%d)\n", srv.Name, srv.Host, srv.Port)
-	})
-	if ft, ok := d.registry.Get("server_focus"); ok {
-		if tool, ok2 := ft.(*tools.ServerFocusTool); ok2 {
-			tool.OnChange = func(srv *store.Server) {
-				if srv == nil {
-					ag.ClearActiveServer()
-					return
-				}
-				ag.SetActiveServer(*srv)
-			}
-		}
-	}
-
-	repl := cli.NewPromptREPL(ag, handler, d.cfg, d.serverStore, d.execMgr)
-	repl.SetConnectorManager(d.connectorMgr)
-	repl.SetMCPClients(d.mcpClients)
-	repl.SetSessionStore(d.sessionStore)
-	repl.SetExecLogStore(d.execLogStore)
-	repl.SetHistoryStore(d.historyStore)
-	repl.SetKnowledgeStore(d.knowledgeStore)
-	repl.SetRAGSourceStore(d.ragSourceStore)
-	repl.SetCostTracker(d.costTracker)
-	repl.SetCheckpointManager(d.checkpointMgr)
-	repl.SetHooksManager(d.hooksMgr)
-	repl.SetScheduleManager(d.scheduler)
-	d.memoryService.SubmitBackfill(ctx)
-	repl.SetRichHandler(richHandler, state)
-	return repl.Run(ctx)
-}
-
 func printUsage() {
 	fmt.Printf("infractl v%s - AI infrastructure management CLI\n\n", appVersion)
 	fmt.Println("Usage:")
 	fmt.Println("  infractl           Run TUI mode")
-	fmt.Println("  infractl --repl    Run REPL mode")
 	fmt.Println("  infractl init      Initialize configuration")
 	fmt.Println("  infractl version   Show version")
 	fmt.Println("  infractl help      Show help")

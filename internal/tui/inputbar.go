@@ -23,7 +23,11 @@ type SubmitMsg struct {
 }
 
 var slashCommands = []string{
-	"/help", "/tools", "/servers", "/clear", "/model", "/quit",
+	"/help", "/tools", "/servers", "/server", "/clear", "/model",
+	"/connectors", "/mcp", "/sessions", "/history",
+	"/yoro", "/knowledge", "/rag", "/cost",
+	"/checkpoints", "/hooks", "/schedules",
+	"/ospermission", "/quit", "/exit",
 }
 
 type inputHistoryEntry struct {
@@ -50,6 +54,13 @@ type inputBar struct {
 
 	// 펼쳐진(expanded) 붙여넣기 블록 ID 집합 — Space 토글 추적용
 	expandedPasteIDs map[int]bool
+
+	// 유휴(Idle) 입력 모드 (비밀번호 프롬프트 등)
+	idleMode   bool
+	idlePrompt string
+	isPassword bool
+	replyCh    chan string
+	abortCh    chan bool
 }
 
 func newInputBar(width int) inputBar {

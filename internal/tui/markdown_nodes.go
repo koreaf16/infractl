@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/util"
 )
@@ -207,7 +206,7 @@ func renderWrappedTableRow(cells []string, colWidths []int, bold bool) []string 
 
 // wrapCellText는 텍스트를 maxW 터미널 열 너비에 맞게 최대 2줄로 나눈다.
 func wrapCellText(text string, maxW int) []string {
-	if runewidth.StringWidth(text) <= maxW {
+	if lipgloss.Width(text) <= maxW {
 		return []string{text}
 	}
 	runes := []rune(text)
@@ -229,7 +228,7 @@ func wrapCellText(text string, maxW int) []string {
 func splitRunesByWidth(runes []rune, maxW int) (first, rest []rune) {
 	w := 0
 	for i, r := range runes {
-		rw := runewidth.RuneWidth(r)
+		rw := lipgloss.Width(string(r))
 		if w+rw > maxW {
 			return runes[:i], runes[i:]
 		}
@@ -298,9 +297,9 @@ func buildHorizLine(left, fill, mid, right string, colWidths []int) string {
 }
 
 // padCell은 표시 너비를 기준으로 텍스트를 좌측 정렬 패딩한다.
-// runewidth.StringWidth를 사용해 이모지·CJK 등 와이드 문자를 정확히 처리한다.
+// lipgloss.Width를 사용해 이모지·CJK 등 와이드 문자를 정확히 처리한다.
 func padCell(text string, targetW int) string {
-	w := runewidth.StringWidth(text)
+	w := lipgloss.Width(text)
 	if w >= targetW {
 		return text
 	}
@@ -309,7 +308,7 @@ func padCell(text string, targetW int) string {
 
 // cellDisplayWidth는 터미널 표시 너비를 반환한다 (이모지·CJK 포함).
 func cellDisplayWidth(s string) int {
-	return runewidth.StringWidth(s)
+	return lipgloss.Width(s)
 }
 
 // collectBlockLines는 코드 블록 노드의 텍스트를 줄 단위로 수집한다.

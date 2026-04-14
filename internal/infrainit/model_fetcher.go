@@ -6,7 +6,6 @@
 package infrainit
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,6 +14,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/yourorg/infractl/internal/tui"
 )
 
 // ServerType은 감지된 서버 종류를 나타낸다.
@@ -80,21 +81,29 @@ func DiscoverServer(ctx context.Context, rawURL, apiKey string) (DiscoveryResult
 	}, fmt.Errorf("서버 탐지 실패: %s 에서 알려진 API를 찾지 못했습니다", base)
 }
 
-// SelectModel은 모델 목록을 번호로 출력하고 사용자 선택을 받는다.
+// SelectModel은 모델 목록을 선택지로 출력하고 사용자 선택을 받는다.
 // models가 비어 있으면 직접 텍스트 입력으로 폴백한다.
-func SelectModel(reader *bufio.Reader, label string, models []string, fallbackDefault string) string {
+func SelectModel(label string, models []string, fallbackDefault string) string {
 	if len(models) == 0 {
-		return promptText(reader, label+" (직접 입력)", fallbackDefault)
+		return promptText(label+" (직접 입력)", fallbackDefault)
 	}
 
-	fmt.Printf("  %s:\n", label)
-	options := append(models, "직접 입력")
-	idx := promptSelect(reader, options)
-
-	if idx == len(options)-1 {
-		return promptText(reader, label+" (직접 입력)", fallbackDefault)
+	opts := make([]tui.SelectOption, len(models))
+	for i, m := range models {
+		opts[i] = tui.SelectOption{Label: m, HideOther: false}
 	}
-	return models[idx]
+
+	// RunSelect automatically adds "Other — 직접 입력" if HideOther is false for the last item,
+	// but currently RunSelect's logic applies HideOther to individual items. Wait, RunSelect's HideOther logic:
+	// If any item is present, RunSelect loops and shows Other unless we hide it. Actually, `HideOther: false` allows the Other option.
+
+	result := tui.RunSelect(label, opts, 80)
+
+	if result.Index < 0 || result.IsOther {
+		return promptText(label+" (직접 입력)", fallbackDefault)
+	}
+
+	return result.Label
 }
 
 // normalizeBaseURL은 URL에서 경로를 제거하고 http://host:port 형태로 반환한다.

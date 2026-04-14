@@ -16,6 +16,10 @@ const (
 	ServicePostgreSQL ServiceType = "postgresql"
 	ServiceTomcat     ServiceType = "tomcat"
 	ServiceWebLogic   ServiceType = "weblogic"
+	ServiceEtcd       ServiceType = "etcd"
+	ServiceKubeAPI    ServiceType = "kube-apiserver"
+	ServiceKubelet    ServiceType = "kubelet"
+	ServicePrometheus ServiceType = "prometheus"
 	ServiceUnknown    ServiceType = "unknown"
 )
 
