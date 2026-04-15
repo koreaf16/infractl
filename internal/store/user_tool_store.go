@@ -19,7 +19,6 @@ CREATE TABLE IF NOT EXISTS user_tools (
     name        TEXT NOT NULL UNIQUE,
     description TEXT NOT NULL DEFAULT '',
     script_path TEXT NOT NULL,
-    risk_level  TEXT NOT NULL DEFAULT 'low',
     parameters  TEXT NOT NULL DEFAULT '{}',
     created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );`
@@ -27,11 +26,10 @@ CREATE TABLE IF NOT EXISTS user_tools (
 // UserToolEntry는 user_tools 테이블의 단일 행이다.
 type UserToolEntry struct {
 	ID          int64
-	Name        string    // 고유 도구명 (예: "cleanup_archive")
-	Description string    // LLM에 표시되는 설명
-	ScriptPath  string    // ~/.infractl/scripts/<name>.sh
-	RiskLevel   string    // none/low/medium/high
-	Parameters  string    // JSON 파라미터 스키마
+	Name        string // 고유 도구명 (예: "cleanup_archive")
+	Description string // LLM에 표시되는 설명
+	ScriptPath  string // ~/.infractl/scripts/<name>.sh
+	Parameters  string // JSON 파라미터 스키마
 	CreatedAt   time.Time
 }
 
@@ -61,15 +59,14 @@ func (s *SQLiteStore) initUserToolSchema(ctx context.Context) {
 // 같은 이름이 이미 있으면 업데이트한다 (UPSERT).
 func (s *SQLiteStore) SaveUserTool(ctx context.Context, entry UserToolEntry) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO user_tools (name, description, script_path, risk_level, parameters, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?)
+		`INSERT INTO user_tools (name, description, script_path, parameters, created_at)
+		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT(name) DO UPDATE SET
 		   description=excluded.description,
 		   script_path=excluded.script_path,
-		   risk_level=excluded.risk_level,
 		   parameters=excluded.parameters`,
 		entry.Name, entry.Description, entry.ScriptPath,
-		entry.RiskLevel, entry.Parameters, time.Now().UTC(),
+		entry.Parameters, time.Now().UTC(),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("save user tool %s: %w", entry.Name, err)
@@ -82,7 +79,7 @@ func (s *SQLiteStore) SaveUserTool(ctx context.Context, entry UserToolEntry) (in
 // GetUserTool은 이름으로 사용자 도구를 조회한다.
 func (s *SQLiteStore) GetUserTool(ctx context.Context, name string) (UserToolEntry, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, description, script_path, risk_level, parameters, created_at
+		`SELECT id, name, description, script_path, parameters, created_at
 		 FROM user_tools WHERE name=?`, name)
 	return scanUserTool(row)
 }
@@ -90,7 +87,7 @@ func (s *SQLiteStore) GetUserTool(ctx context.Context, name string) (UserToolEnt
 // ListUserTools는 저장된 모든 사용자 도구를 이름순으로 반환한다.
 func (s *SQLiteStore) ListUserTools(ctx context.Context) ([]UserToolEntry, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, description, script_path, risk_level, parameters, created_at
+		`SELECT id, name, description, script_path, parameters, created_at
 		 FROM user_tools ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list user tools: %w", err)
@@ -133,7 +130,7 @@ func scanUserTool(row userToolScanner) (UserToolEntry, error) {
 	var entry UserToolEntry
 	err := row.Scan(
 		&entry.ID, &entry.Name, &entry.Description,
-		&entry.ScriptPath, &entry.RiskLevel, &entry.Parameters, &entry.CreatedAt,
+		&entry.ScriptPath, &entry.Parameters, &entry.CreatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return UserToolEntry{}, fmt.Errorf("user tool not found")

@@ -16,22 +16,20 @@ import (
 )
 
 const (
-	shimmerInterval  = 50 * time.Millisecond // 고주파 50ms (20fps)
-	shimmerWidth     = 4 // 하이라이트 너비 확장
-	shimmerPause     = 30 // 간격이 짧아졌으므로 pause도 조정
-	stalledThreshold = 3 * time.Second
+	shimmerInterval = 50 * time.Millisecond // 고주파 50ms (20fps)
+	shimmerWidth    = 4                     // 하이라이트 너비 확장
+	shimmerPause    = 30                    // 간격이 짧아졌으므로 pause도 조정
 )
 
 // shimmerState는 shimmer 애니메이션 상태를 관리한다.
 type shimmerState struct {
-	text             string
-	hint             string // 우측 보조 텍스트 (현재 작업 설명 등)
-	startTime        time.Time
-	lastActivityTime time.Time
-	pos              int
-	width            int
-	bgCount          int // "N in background" 표시용
-	active           bool
+	text      string
+	hint      string // 우측 보조 텍스트 (현재 작업 설명 등)
+	startTime time.Time
+	pos       int
+	width     int
+	bgCount   int // "N in background" 표시용
+	active    bool
 }
 
 // newShimmer는 새 shimmerState를 생성한다.
@@ -42,9 +40,7 @@ func newShimmer() shimmerState {
 // Start는 shimmer 애니메이션을 시작한다.
 func (s *shimmerState) Start(text string) tea.Cmd {
 	s.text = text
-	now := time.Now()
-	s.startTime = now
-	s.lastActivityTime = now
+	s.startTime = time.Now()
 	s.pos = 0
 	s.active = true
 	return shimmerTickCmd()
@@ -56,15 +52,12 @@ func (s *shimmerState) Stop() {
 	s.pos = 0
 }
 
-// RecordActivity는 마지막 활동 시각을 갱신한다.
-func (s *shimmerState) RecordActivity() {
-	s.lastActivityTime = time.Now()
-}
+// RecordActivity는 하위 호환을 위해 남겨둔 no-op 메서드다.
+func (s *shimmerState) RecordActivity() {}
 
 // SetText는 shimmer 텍스트를 변경한다 (도구명 등).
 func (s *shimmerState) SetText(text string) {
 	s.text = text
-	s.RecordActivity()
 }
 
 // SetHint는 shimmer 우측 보조 텍스트를 변경한다.
@@ -83,7 +76,7 @@ func (s *shimmerState) Tick() tea.Cmd {
 }
 
 // View는 shimmer 애니메이션을 렌더링한다.
-// 형식: "  ● thinking... (3s)          2 in background"
+// 형식: "● thinking... (3s)          2 in background"
 func (s *shimmerState) View() string {
 	if !s.active {
 		return ""
@@ -94,28 +87,14 @@ func (s *shimmerState) View() string {
 		text = "thinking..."
 	}
 
-	// 지연 감지
-	stalledDur := time.Since(s.lastActivityTime)
-	stalled := stalledDur > stalledThreshold
-	isVeryStalled := stalledDur > 5*time.Second
-
-	// shimmer 색상 적용
-	colored := s.colorize(text, stalled)
+	// shimmer 색상 적용 (항상 정상 애니메이션 유지)
+	colored := s.colorize(text)
 
 	// 경과시간
 	elapsed := formatElapsed(time.Since(s.startTime))
 	elapsedStr := StyleInfoBarDim.Render("(" + elapsed + ")")
 
-	// 좌측: dot + shimmer text + elapsed
-	bullet := "●"
-	bulletStyle := StyleClaude()
-	if isVeryStalled {
-		bulletStyle = StyleStalled
-	} else if stalled {
-		bulletStyle = lipgloss.NewStyle().Foreground(ColorStalled)
-	}
-
-	left := bulletStyle.Render(bullet) + " " + colored + " " + elapsedStr
+	left := StyleClaude().Render("●") + " " + colored + " " + elapsedStr
 
 	// 우측: hint(작업 설명) 또는 background count
 	var right string
@@ -139,15 +118,16 @@ func (s *shimmerState) View() string {
 }
 
 // colorize는 텍스트에 shimmer 하이라이트를 적용한다.
-func (s *shimmerState) colorize(text string, stalled bool) string {
+// 항상 정상 shimmer 그라디언트를 사용하여 애니메이션이 멈추지 않는다.
+func (s *shimmerState) colorize(text string) string {
+	if utf8.RuneCountInString(text) == 0 {
+		return ""
+	}
+
 	runes := []rune(text)
 	textLen := len(runes)
 	cycleLen := textLen + shimmerPause
 	peakPos := s.pos % cycleLen
-
-	// 지연 정도에 따른 강도 조절
-	stalledDur := time.Since(s.lastActivityTime)
-	isVeryStalled := stalledDur > 5*time.Second
 
 	var buf strings.Builder
 	for i, r := range runes {
@@ -157,31 +137,17 @@ func (s *shimmerState) colorize(text string, stalled bool) string {
 		}
 
 		var style lipgloss.Style
-		if isVeryStalled {
-			// 5초 이상: 강력한 경고 (Bold)
-			style = StyleStalled
-		} else if stalled {
-			// 3초 이상: 가벼운 지연 예고 (Italic + Dim)
-			style = lipgloss.NewStyle().Foreground(ColorStalled).Italic(true)
-		} else {
-			// 정상: 부드러운 Shimmer
-			switch {
-			case dist == 0:
-				style = lipgloss.NewStyle().Foreground(ColorShimmerPeak).Bold(true)
-			case dist <= 1:
-				style = lipgloss.NewStyle().Foreground(ColorShimmerMid)
-			case dist <= shimmerWidth/2:
-				style = lipgloss.NewStyle().Foreground(ColorShimmerBase)
-			default:
-				style = StyleInfoBarDim // 기본은 매우 희미하게 (Visual Diet)
-			}
+		switch {
+		case dist == 0:
+			style = lipgloss.NewStyle().Foreground(ColorShimmerPeak).Bold(true)
+		case dist <= 1:
+			style = lipgloss.NewStyle().Foreground(ColorShimmerMid)
+		case dist <= shimmerWidth/2:
+			style = lipgloss.NewStyle().Foreground(ColorShimmerBase)
+		default:
+			style = StyleInfoBarDim
 		}
 		buf.WriteString(style.Render(string(r)))
-	}
-
-	// 텍스트가 비어있으면 빈 문자열
-	if utf8.RuneCountInString(text) == 0 {
-		return ""
 	}
 
 	return buf.String()

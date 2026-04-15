@@ -9,6 +9,8 @@ package agent
 //
 // 설계 근거:
 //   - network_info, discover_services: 포트 스캔 결과는 고가치 데이터이므로 넉넉히 허용
+//   - shell_exec: DB 쿼리·명령 출력이 수만 bytes에 달할 수 있어 보수적 제한
+//     → SmartTruncate가 head(헤더/첫 행) + tail(마지막 행/"N rows selected") 보존
 //   - log_tail: 로그는 방대할 수 있으므로 더 보수적으로 제한
 //   - 그 외: 기본값 16KB (DefaultMaxLLMBytes)
 func toolResultLimit(toolName string) int {
@@ -16,9 +18,9 @@ func toolResultLimit(toolName string) int {
 	case "network_info", "discover_services":
 		return 24000
 	case "system_info", "process_list":
-		return 16000
+		return 8000
 	case "shell_exec":
-		return 16000
+		return 6000
 	case "log_tail":
 		return 8000
 	default:

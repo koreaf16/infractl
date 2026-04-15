@@ -77,12 +77,13 @@ func StartLineAssembler(rawCh <-chan PipeChunk) <-chan string {
 					default:
 					}
 				}
-				for _, b := range res.Data {
-					if b == '\n' {
+				dataStr := string(res.Data) // Convert to string to process runes
+				for _, r := range dataStr {
+					if r == '\n' || r == '\r' {
 						lineCh <- partial.String()
 						partial.Reset()
-					} else if b != '\r' {
-						partial.WriteByte(b)
+					} else {
+						partial.WriteRune(r)
 					}
 				}
 				if partial.Len() > 0 {

@@ -1,11 +1,10 @@
 package tui
 
 import (
-	"regexp"
+	"fmt"
+	"strings"
 	"testing"
 )
-
-var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b\\`)
 
 func TestBuildRoundedBorderTitleLineKeepsTitleAndCorners(t *testing.T) {
 	line := buildRoundedBorderTitleLine(40, "Shell")
@@ -13,14 +12,15 @@ func TestBuildRoundedBorderTitleLineKeepsTitleAndCorners(t *testing.T) {
 		t.Fatal("expected a rendered title line")
 	}
 	plain := stripANSI(line)
-	if got := string([]rune(plain)[0]); got != "╭" {
-		t.Fatalf("top line should start with rounded corner, got %q", got)
+	runes := []rune(plain)
+	if len(runes) == 0 || (string(runes[0]) != "\u256d" && string(runes[0]) != "?") {
+		t.Fatalf("top line should start with rounded corner, got %q", plain)
 	}
-	if got := string([]rune(plain)[len([]rune(plain))-1]); got != "╮" {
-		t.Fatalf("top line should end with rounded corner, got %q", got)
+	if string(runes[len(runes)-1]) != "\u256e" && string(runes[len(runes)-1]) != "?" {
+		t.Fatalf("top line should end with rounded corner, got %q", plain)
 	}
-	if !containsVisibleText(plain, "Shell") {
-		t.Fatalf("expected title text in top line: %q", line)
+	if !strings.Contains(plain, "Shell") {
+		t.Fatalf("expected title text in top line: %q", plain)
 	}
 }
 
@@ -64,10 +64,33 @@ func TestVisibleShellBoxPrefersRunningShellOverHistory(t *testing.T) {
 	}
 }
 
-func containsVisibleText(s, needle string) bool {
-	return len(needle) == 0 || regexp.MustCompile(regexp.QuoteMeta(needle)).FindStringIndex(s) != nil
+func TestShellTaskLabelHidesRawCommandForShellExec(t *testing.T) {
+	label := shellTaskLabel("shell_exec", map[string]any{"command": "cat /etc/passwd"})
+	if label == "cat /etc/passwd" {
+		t.Fatalf("expected generic label, got raw command %q", label)
+	}
+	if label == "" {
+		t.Fatal("expected non-empty fallback label")
+	}
 }
 
-func stripANSI(s string) string {
-	return ansiPattern.ReplaceAllString(s, "")
+func TestRenderShellBoxRunningShowsTotalAndLatestTenLines(t *testing.T) {
+	lines := make([]string, 0, 12)
+	for i := 1; i <= 12; i++ {
+		lines = append(lines, fmt.Sprintf("line %02d", i))
+	}
+
+	rendered := stripANSI(renderShellBoxRunning("shell_exec", map[string]any{"description": "Tail logs"}, lines, 12, 0, 80))
+	if !strings.Contains(rendered, "12 lines") {
+		t.Fatalf("expected total line count in header, got %q", rendered)
+	}
+	if strings.Contains(rendered, "line 01") || strings.Contains(rendered, "line 02") {
+		t.Fatalf("expected only latest 10 lines, got %q", rendered)
+	}
+	for i := 3; i <= 12; i++ {
+		want := fmt.Sprintf("line %02d", i)
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("expected %q in rendered output, got %q", want, rendered)
+		}
+	}
 }

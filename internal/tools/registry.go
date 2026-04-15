@@ -88,7 +88,7 @@ func (r *Registry) ToToolDefs() []llm.ToolDef {
 			Type: "function",
 			Function: llm.FunctionDef{
 				Name:        t.Name(),
-				Description: t.Description(),
+				Description: modelPromptForTool(t),
 				Parameters:  t.Parameters(),
 			},
 		}
@@ -109,12 +109,21 @@ func (r *Registry) ToToolDefsFiltered(allowed map[string]bool) []llm.ToolDef {
 			Type: "function",
 			Function: llm.FunctionDef{
 				Name:        t.Name(),
-				Description: t.Description(),
+				Description: modelPromptForTool(t),
 				Parameters:  t.Parameters(),
 			},
 		})
 	}
 	return defs
+}
+
+func modelPromptForTool(t Tool) string {
+	if mp, ok := t.(ModelPromptDescriber); ok {
+		if v := mp.ModelPrompt(); v != "" {
+			return v
+		}
+	}
+	return t.Description()
 }
 
 // GetEnabledFiltered는 allowed에 포함된 이름의 활성 도구만 반환한다.

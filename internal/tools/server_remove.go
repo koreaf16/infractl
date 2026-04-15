@@ -49,8 +49,6 @@ func (t *ServerRemoveTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *ServerRemoveTool) RiskLevel() RiskLevel { return RiskLow }
-
 func (t *ServerRemoveTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
 	name, err := argString(args, "name", true)
 	if err != nil {

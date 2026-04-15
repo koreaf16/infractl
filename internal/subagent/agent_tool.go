@@ -25,7 +25,6 @@ type DelegateAgentTool struct {
 }
 
 func (t *DelegateAgentTool) Name() string        { return "delegate_task" }
-func (t *DelegateAgentTool) RiskLevel() tools.RiskLevel { return tools.RiskNone }
 func (t *DelegateAgentTool) IsReadOnly() bool     { return true }
 func (t *DelegateAgentTool) IsEnabled() bool      { return true }
 

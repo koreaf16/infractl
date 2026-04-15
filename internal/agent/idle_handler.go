@@ -28,6 +28,7 @@ type IdleDetectExecutor struct {
 	original    executor.Executor
 	wrapped     executor.StreamExecutor
 	injector    executor.StdinInjector
+	eofSender   executor.StdinEOFSender
 	idleHandler IdleInputHandler
 	toolName    string
 	target      string
@@ -42,10 +43,12 @@ func wrapWithIdleDetect(exec executor.Executor, handler IdleInputHandler, toolNa
 	if !isStream || !isInject {
 		return exec
 	}
+	eofSender, _ := exec.(executor.StdinEOFSender)
 	return &IdleDetectExecutor{
 		original:    exec,
 		wrapped:     se,
 		injector:    inj,
+		eofSender:   eofSender,
 		idleHandler: handler,
 		toolName:    toolName,
 		target:      target,
@@ -131,6 +134,13 @@ func (e *IdleDetectExecutor) ExecuteStream(ctx context.Context, command string, 
 
 func (e *IdleDetectExecutor) InjectStdin(line string) error {
 	return e.injector.InjectStdin(line)
+}
+
+func (e *IdleDetectExecutor) SendEOF() error {
+	if e.eofSender == nil {
+		return fmt.Errorf("stdin EOF is not supported on %s", executor.ExecutionContextLabel(e.original))
+	}
+	return e.eofSender.SendEOF()
 }
 
 // Upload forwards file upload to the original executor when it supports FileTransferExecutor.
@@ -223,6 +233,18 @@ func (e *IdleDetectExecutor) handleIdle(ctx context.Context, cancel context.Canc
 		cancel()
 		return
 	}
+	if resp.CloseStdin {
+		if e.eofSender == nil {
+			slog.Warn("idle EOF requested but unsupported, aborting command", "tool", e.toolName, "target", e.target)
+			cancel()
+			return
+		}
+		if eofErr := e.eofSender.SendEOF(); eofErr != nil {
+			slog.Warn("idle stdin EOF failed", "err", eofErr)
+			cancel()
+		}
+		return
+	}
 	if injectErr := e.injector.InjectStdin(resp.Input); injectErr != nil {
 		slog.Warn("idle stdin inject failed", "err", injectErr)
 		cancel()
@@ -256,10 +278,13 @@ func (h *SmartIdleInputHandler) SetServerStore(st store.ServerStore) {
 const idleClassifySystemPrompt = `You are helping an AI agent respond to interactive shell prompts autonomously.
 The shell command is waiting for stdin. Analyze the last output lines and respond with JSON ONLY (no other text):
 
-{"input": "<string to send>", "abort": false}
+{"input": "<string to send>", "close_stdin": false, "abort": false}
+
+If EOF/Ctrl-D is the best response, respond:
+{"input": "", "close_stdin": true, "abort": false}
 
 If you cannot safely determine a response (e.g., an unknown password is required), respond:
-{"input": "", "abort": true}
+{"input": "", "close_stdin": false, "abort": true}
 
 Decision rules:
 - SSH host key "(yes/no/[fingerprint])?" or "(yes/no)?": {"input": "yes", "abort": false}
@@ -269,11 +294,13 @@ Decision rules:
 - unzip "replace FILE? [y]es, [n]o, [A]ll, [N]one, [r]ename:": {"input": "A", "abort": false}
 - Any multi-choice prompt with bracketed options: pick the most appropriate option letter/word
 - Password / passphrase field when no stored credential is available: {"input": "", "abort": true}
+- DB client REPL prompts like SQL>, mysql>, db=>, db=#: prefer EOF/Ctrl-D when the executor supports it
 - NEVER abort for simple yes/no/choice prompts — always pick the best answer`
 
 type idleAction struct {
-	Input string `json:"input"`
-	Abort bool   `json:"abort"`
+	Input      string `json:"input"`
+	CloseStdin bool   `json:"close_stdin"`
+	Abort      bool   `json:"abort"`
 }
 
 // passwordPromptRegex detects common password prompts in English and Korean.
@@ -361,10 +388,61 @@ func parsePasswordPrompt(text string) passwordPromptMatcher {
 	return matcher
 }
 
+func databaseREPLNeedsEOF(command string, lines []string) bool {
+	cmd := strings.ToLower(strings.TrimSpace(command))
+	sawSQLPrompt := false
+	sawMySQLPrompt := false
+	sawPSQLPrompt := false
+	sawSQLBanner := false
+	sawMySQLBanner := false
+	sawPSQLBanner := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(ansiEscapeRegex.ReplaceAllString(line, ""))
+		switch {
+		case trimmed == "SQL>" || strings.HasPrefix(trimmed, "SQL> "):
+			sawSQLPrompt = true
+		case trimmed == "mysql>" || strings.HasPrefix(trimmed, "mysql> "):
+			sawMySQLPrompt = true
+		case strings.HasSuffix(trimmed, "=>"):
+			name := strings.TrimSpace(strings.TrimSuffix(trimmed, "=>"))
+			if name != "" && !strings.ContainsAny(name, " \t") {
+				sawPSQLPrompt = true
+			}
+		case strings.HasSuffix(trimmed, "=#"):
+			name := strings.TrimSpace(strings.TrimSuffix(trimmed, "=#"))
+			if name != "" && !strings.ContainsAny(name, " \t") {
+				sawPSQLPrompt = true
+			}
+		case strings.HasPrefix(trimmed, "SQL*Plus:"):
+			sawSQLBanner = true
+		case strings.HasPrefix(trimmed, "Welcome to the MySQL monitor."):
+			sawMySQLBanner = true
+		case strings.HasPrefix(trimmed, "psql ("):
+			sawPSQLBanner = true
+		}
+	}
+
+	if sawSQLPrompt && (strings.Contains(cmd, "sqlplus") || sawSQLBanner) {
+		return true
+	}
+	if sawMySQLPrompt && (strings.Contains(cmd, "mysql") || sawMySQLBanner) {
+		return true
+	}
+	if sawPSQLPrompt && (strings.Contains(cmd, "psql") || sawPSQLBanner) {
+		return true
+	}
+	return false
+}
+
 func (h *SmartIdleInputHandler) RequestIdleInput(ctx context.Context, req IdleInputRequest) (IdleInputResponse, error) {
 	if pw, ok := resolveStoredPassword(ctx, h.serverStore, req); ok {
 		slog.Info("idle auto-respond password", "target", req.Target, "tool", req.ToolName)
 		return IdleInputResponse{Input: pw}, nil
+	}
+	if databaseREPLNeedsEOF(req.Command, req.LastLines) {
+		slog.Warn("idle sending EOF to close open-ended database repl", "target", req.Target, "tool", req.ToolName, "command", req.Command)
+		return IdleInputResponse{CloseStdin: true}, nil
 	}
 
 	userContent := fmt.Sprintf("Command: %s\nTarget: %s\nLast output lines:\n%s",

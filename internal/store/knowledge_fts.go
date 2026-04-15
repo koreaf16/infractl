@@ -20,11 +20,16 @@ CREATE TABLE IF NOT EXISTS knowledge_base (
     tool_name           TEXT NOT NULL DEFAULT '',
     error_pattern       TEXT NOT NULL DEFAULT '',
     success_command     TEXT NOT NULL DEFAULT '',
+    server_name         TEXT NOT NULL DEFAULT '',
+    task_key            TEXT NOT NULL DEFAULT '',
+    command_key         TEXT NOT NULL DEFAULT '',
+    workflow_json       TEXT NOT NULL DEFAULT '[]',
     embedding           BLOB,
     source_execution_id INTEGER REFERENCES execution_logs(id),
     confidence          REAL NOT NULL DEFAULT 1.0,
     use_count           INTEGER NOT NULL DEFAULT 0,
     created_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_used_at        DATETIME
 );`
 
@@ -37,7 +42,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
 const createKnowledgeIdxSQL = `
 CREATE INDEX IF NOT EXISTS idx_kb_category ON knowledge_base(category);
 CREATE INDEX IF NOT EXISTS idx_kb_tool ON knowledge_base(tool_name);
-CREATE INDEX IF NOT EXISTS idx_kb_error ON knowledge_base(error_pattern);`
+CREATE INDEX IF NOT EXISTS idx_kb_error ON knowledge_base(error_pattern);
+CREATE INDEX IF NOT EXISTS idx_kb_task_scope ON knowledge_base(category, server_name, task_key);
+CREATE INDEX IF NOT EXISTS idx_kb_command_key ON knowledge_base(category, command_key);`
 
 // initKnowledgeFTSSchema는 knowledge_base 테이블과 FTS5 가상 테이블을 생성하고 마이그레이션한다.
 // Phase 5 기존 DB(6컬럼)가 있으면 컬럼을 추가하고 FTS5를 재생성한다.
@@ -57,6 +64,11 @@ func (s *SQLiteStore) initKnowledgeFTSSchema(ctx context.Context) {
 		`ALTER TABLE knowledge_base ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0`,
 		`ALTER TABLE knowledge_base ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE knowledge_base ADD COLUMN last_used_at DATETIME`,
+		`ALTER TABLE knowledge_base ADD COLUMN server_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE knowledge_base ADD COLUMN task_key TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE knowledge_base ADD COLUMN command_key TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE knowledge_base ADD COLUMN workflow_json TEXT NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE knowledge_base ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP`,
 	}
 	for _, stmt := range alterStmts {
 		// ALTER TABLE 실패는 컬럼이 이미 존재하는 경우이므로 무시한다.
@@ -77,6 +89,8 @@ func (s *SQLiteStore) initKnowledgeFTSSchema(ctx context.Context) {
 		`CREATE INDEX IF NOT EXISTS idx_kb_category ON knowledge_base(category)`,
 		`CREATE INDEX IF NOT EXISTS idx_kb_tool ON knowledge_base(tool_name)`,
 		`CREATE INDEX IF NOT EXISTS idx_kb_error ON knowledge_base(error_pattern)`,
+		`CREATE INDEX IF NOT EXISTS idx_kb_task_scope ON knowledge_base(category, server_name, task_key)`,
+		`CREATE INDEX IF NOT EXISTS idx_kb_command_key ON knowledge_base(category, command_key)`,
 	}
 	for _, stmt := range idxStmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {

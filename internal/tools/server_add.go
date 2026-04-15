@@ -64,8 +64,6 @@ func (t *ServerAddTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *ServerAddTool) RiskLevel() RiskLevel { return RiskLow }
-
 func (t *ServerAddTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
 	name, err := argString(args, "name", true)
 	if err != nil {

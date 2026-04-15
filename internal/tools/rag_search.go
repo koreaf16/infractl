@@ -22,7 +22,6 @@ type RAGSearchTool struct {
 var _ Tool = (*RAGSearchTool)(nil)
 
 func (t *RAGSearchTool) Name() string         { return "rag_search" }
-func (t *RAGSearchTool) RiskLevel() RiskLevel { return RiskNone }
 func (t *RAGSearchTool) IsReadOnly() bool     { return true }
 func (t *RAGSearchTool) IsEnabled() bool      { return true }
 

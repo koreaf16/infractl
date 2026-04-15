@@ -1,7 +1,8 @@
 // Package generic
 // File: connector.go
-// Description: [TODO: Add description]
-// Responsibility: [TODO: Add responsibility]
+// Description: 학습된 명령어를 기반으로 동적 도구 생성 및 SQL 오류 시 스키마 자동 검증
+// Responsibility: LLM이 생성한 명령어 스펙(JSON)을 tools.Tool 인스턴스로 변환하고,
+//                 SQL 쿼리 명령의 컬럼/테이블 오류 시 schema_check_command로 자동 스키마 조회
 
 package generic
 
@@ -9,39 +10,27 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"regexp"
 	"strings"
 
 	conn "github.com/yourorg/infractl/internal/connector"
 	"github.com/yourorg/infractl/internal/executor"
-	"github.com/yourorg/infractl/internal/safety"
 	"github.com/yourorg/infractl/internal/tools"
 )
 
 var invalidToolName = regexp.MustCompile(`[^a-z0-9_]+`)
-var artifactLineRe = regexp.MustCompile(`(?i)^ARTIFACT\s+(.+)$`)
 
-// GenericConnector recreates tools from learned command specs or synthesized profiles.
+// GenericConnector는 학습된 명령어 스펙이나 합성된 프로필에서 도구를 다시 생성한다.
 type GenericConnector struct {
 	info        conn.ServiceInfo
 	creds       conn.Credentials
-	learnedCmds []LearnedCommand
+	learnedCmds []conn.LearnedCommand
 	status      conn.ConnectorStatus
 	names       []string
 }
 
-// LearnedCommand describes a reconstructed generic command.
-type LearnedCommand struct {
-	Name          string                 `json:"name"`
-	Description   string                 `json:"description"`
-	Command       string                 `json:"command"`
-	ReadOnly      bool                   `json:"read_only"`
-	BackupCommand string                 `json:"backup_command,omitempty"`
-	Parameters    map[string]interface{} `json:"parameters,omitempty"`
-	Required      []string               `json:"required,omitempty"`
-}
-
-// New creates a generic connector.
+// New는 GenericConnector를 생성한다.
 func New() *GenericConnector {
 	return &GenericConnector{status: conn.StatusDisconnected}
 }
@@ -50,7 +39,7 @@ func (c *GenericConnector) ServiceType() string          { return "generic" }
 func (c *GenericConnector) Status() conn.ConnectorStatus { return c.status }
 func (c *GenericConnector) ToolNames() []string          { return c.names }
 
-// GenerateTools creates connector tools from learned commands.
+// GenerateTools는 학습된 명령어 정보로 도구를 생성한다.
 func (c *GenericConnector) GenerateTools(info conn.ServiceInfo, creds conn.Credentials) []tools.Tool {
 	c.info = info
 	c.creds = creds
@@ -72,78 +61,35 @@ func (c *GenericConnector) GenerateTools(info conn.ServiceInfo, creds conn.Crede
 			continue
 		}
 		cmd := cmd
-		riskLevel := safety.EnforceRisk(cmd.Command, tools.RiskNone).MinLevel
 		params := buildParameters(cmd)
 
 		t := conn.NewGeneratedTool(
 			prefix+"."+sanitizeToolName(cmd.Name),
 			defaultString(cmd.Description, fmt.Sprintf("Run learned command %s", cmd.Name)),
 			params,
-			riskLevel,
 			cmd.ReadOnly,
 			&c.status,
-			func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (tools.ToolResult, error) {
+			func(ctx context.Context, args map[string]any, exec executor.Executor) (string, error) {
 				merged := buildTemplateValues(c.info, c.creds, args)
-				skipBackup := argBool(args, "skip_backup", false)
-
-				if strings.TrimSpace(cmd.BackupCommand) != "" && !cmd.ReadOnly && !skipBackup {
-					backupCmd := renderCommandTemplate(cmd.BackupCommand, merged)
-					backupRes, backupErr := exec.Execute(ctx, backupCmd)
-					if backupErr != nil || backupRes.ExitCode != 0 {
-						errOut := ""
-						if backupErr != nil {
-							errOut = backupErr.Error()
-						} else {
-							errOut = formatOutput(backupRes.Stdout, backupRes.Stderr, backupRes.ExitCode)
-						}
-						return tools.ToolResult{
-							Status:  tools.ToolResultError,
-							Summary: "Backup command failed",
-							Body:    errOut,
-						}, nil
-					}
-				} else if cmd.BackupCommand == "" && tools.RiskOrd(riskLevel) >= tools.RiskOrd(tools.RiskHigh) && !skipBackup {
-					return tools.ToolResult{
-						Status:  tools.ToolResultError,
-						Summary: "Backup command missing for high-risk command",
-						Body: fmt.Sprintf(
-							"No backup_command was generated for high-risk command %s. Re-run with skip_backup=true or regenerate the profile.",
-							cmd.Name,
-						),
-					}, nil
-				}
 
 				rendered := renderCommandTemplate(cmd.Command, merged)
 				res, err := exec.Execute(ctx, rendered)
 				if err != nil {
-					return tools.ToolResult{
-						Status:  tools.ToolResultError,
-						Summary: fmt.Sprintf("Execution failed: %s", err),
-					}, nil
+					return fmt.Sprintf("Execution failed: %s", err), nil
 				}
 
-				body := formatOutput(res.Stdout, res.Stderr, res.ExitCode)
-				artifacts, body := parseArtifacts(body)
-				status := tools.ToolResultOK
-				summary := defaultString(cmd.Description, fmt.Sprintf("Run learned command %s", cmd.Name))
-				if res.ExitCode != 0 {
-					status = tools.ToolResultError
-					if body == "" {
-						body = formatOutput(res.Stdout, res.Stderr, res.ExitCode)
+				output := formatOutput(res.Stdout, res.Stderr, res.ExitCode)
+
+				// SQL 쿼리 명령에서 컬럼/테이블 오류 발생 시 자동 스키마 조회
+				if cmd.IsSQLQuery && cmd.SchemaCheckCommand != "" && conn.HasQueryError(output, 0) {
+					sql, _ := args["sql"].(string)
+					schemaNote := runSchemaCheck(ctx, cmd, sql, merged, exec)
+					if schemaNote != "" {
+						output += "\n\n[자동 스키마 조회 결과]\n" + schemaNote
 					}
 				}
 
-				return tools.ToolResult{
-					Status:    status,
-					Summary:   summary,
-					Body:      body,
-					Artifacts: artifacts,
-					Metadata: map[string]any{
-						"command":   rendered,
-						"exit_code": res.ExitCode,
-						"duration":  res.Duration.String(),
-					},
-				}, nil
+				return output, nil
 			},
 		)
 		toolList = append(toolList, t)
@@ -156,32 +102,61 @@ func (c *GenericConnector) GenerateTools(info conn.ServiceInfo, creds conn.Crede
 	return toolList
 }
 
-// AddLearnedCommand appends a learned command before activation.
-func (c *GenericConnector) AddLearnedCommand(cmd LearnedCommand) {
-	c.learnedCmds = append(c.learnedCmds, cmd)
+// runSchemaCheck는 SQL에서 테이블명을 추출하고 schema_check_command를 실행한다.
+func runSchemaCheck(ctx context.Context, cmd conn.LearnedCommand, sql string, baseValues map[string]string, exec executor.Executor) string {
+	tables := conn.ExtractTableNames(sql)
+	if len(tables) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	for _, table := range tables {
+		values := make(map[string]string, len(baseValues)+1)
+		maps.Copy(values, baseValues)
+		values["table_name"] = table
+
+		rendered := renderCommandTemplate(cmd.SchemaCheckCommand, values)
+		res, err := exec.Execute(ctx, rendered)
+		if err != nil {
+			continue
+		}
+		out := strings.TrimSpace(res.Stdout)
+		if out == "" {
+			fmt.Fprintf(&sb, "── %s: 테이블/뷰를 찾을 수 없습니다.\n", table)
+			continue
+		}
+		fmt.Fprintf(&sb, "── %s 컬럼 목록:\n", table)
+		for line := range strings.SplitSeq(out, "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				sb.WriteString("  " + line + "\n")
+			}
+		}
+	}
+	return sb.String()
 }
 
-func loadLearnedCommands(raw string) []LearnedCommand {
+func loadLearnedCommands(raw string) []conn.LearnedCommand {
 	if strings.TrimSpace(raw) == "" {
 		return nil
 	}
 
-	var payload map[string]interface{}
+	var payload map[string]any
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		return nil
 	}
 
-	var commands []LearnedCommand
+	var commands []conn.LearnedCommand
 	for name, value := range payload {
 		switch v := value.(type) {
 		case string:
-			commands = append(commands, LearnedCommand{
+			commands = append(commands, conn.LearnedCommand{
 				Name:        name,
 				Description: fmt.Sprintf("Run learned command %s", name),
 				Command:     v,
 				ReadOnly:    inferReadOnly(v),
 			})
-		case map[string]interface{}:
+		case map[string]any:
 			command, _ := v["command"].(string)
 			description, _ := v["description"].(string)
 			readOnly, ok := v["read_only"].(bool)
@@ -189,18 +164,20 @@ func loadLearnedCommands(raw string) []LearnedCommand {
 				readOnly = inferReadOnly(command)
 			}
 			backupCmd, _ := v["backup_command"].(string)
+			schemaCheckCmd, _ := v["schema_check_command"].(string)
+			isSQLQuery, _ := v["is_sql_query"].(bool)
 			toolName := name
 			if explicit, ok := v["name"].(string); ok && explicit != "" {
 				toolName = explicit
 			}
 
-			params := map[string]interface{}{}
-			if rawParams, ok := v["parameters"].(map[string]interface{}); ok {
+			params := map[string]any{}
+			if rawParams, ok := v["parameters"].(map[string]any); ok {
 				params = rawParams
 			}
 
 			var required []string
-			if rawReq, ok := v["required"].([]interface{}); ok {
+			if rawReq, ok := v["required"].([]any); ok {
 				for _, item := range rawReq {
 					if s, ok := item.(string); ok && s != "" {
 						required = append(required, s)
@@ -208,50 +185,44 @@ func loadLearnedCommands(raw string) []LearnedCommand {
 				}
 			}
 
-			commands = append(commands, LearnedCommand{
-				Name:          toolName,
-				Description:   description,
-				Command:       command,
-				ReadOnly:      readOnly,
-				BackupCommand: backupCmd,
-				Parameters:    params,
-				Required:      required,
+			commands = append(commands, conn.LearnedCommand{
+				Name:               toolName,
+				Description:        description,
+				Command:            command,
+				ReadOnly:           readOnly,
+				BackupCommand:      backupCmd,
+				Parameters:         params,
+				Required:           required,
+				IsSQLQuery:         isSQLQuery,
+				SchemaCheckCommand: schemaCheckCmd,
 			})
 		}
 	}
 	return commands
 }
 
-func buildParameters(cmd LearnedCommand) map[string]interface{} {
-	params := map[string]interface{}{
+func buildParameters(cmd conn.LearnedCommand) map[string]any {
+	params := map[string]any{
 		"target": targetParam(),
 	}
 
-	for k, v := range cmd.Parameters {
-		params[k] = v
-	}
-	if !cmd.ReadOnly {
-		params["skip_backup"] = map[string]interface{}{
-			"type":        "boolean",
-			"description": "true?�면 ?�전 백업??건너?�니?? 공간 부족이??백업 불필???�인 ?�에�??�용?�세??",
-		}
-	}
+	maps.Copy(params, cmd.Parameters)
 
 	required := append([]string{}, cmd.Required...)
 	if len(required) > 0 {
-		return map[string]interface{}{
+		return map[string]any{
 			"type":       "object",
 			"properties": params,
 			"required":   required,
 		}
 	}
-	return map[string]interface{}{
+	return map[string]any{
 		"type":       "object",
 		"properties": params,
 	}
 }
 
-func buildTemplateValues(info conn.ServiceInfo, creds conn.Credentials, args map[string]interface{}) map[string]string {
+func buildTemplateValues(info conn.ServiceInfo, creds conn.Credentials, args map[string]any) map[string]string {
 	values := map[string]string{
 		"server_name":  info.ServerName,
 		"service_type": info.ServiceType,
@@ -262,18 +233,14 @@ func buildTemplateValues(info conn.ServiceInfo, creds conn.Credentials, args map
 		"password":     creds.Password,
 		"role":         creds.Role,
 	}
-	for k, v := range info.Details {
-		values[k] = v
-	}
+	maps.Copy(values, info.Details)
 	for k, v := range args {
-		if k == "target" || k == "skip_backup" {
+		if k == "target" {
 			continue
 		}
 		switch tv := v.(type) {
 		case string:
 			values[k] = tv
-		case fmt.Stringer:
-			values[k] = tv.String()
 		default:
 			values[k] = fmt.Sprintf("%v", v)
 		}
@@ -284,12 +251,17 @@ func buildTemplateValues(info conn.ServiceInfo, creds conn.Credentials, args map
 func renderCommandTemplate(template string, values map[string]string) string {
 	return templatePlaceholderRe.ReplaceAllStringFunc(template, func(match string) string {
 		inner := strings.TrimSpace(match[2 : len(match)-2])
-		mode, key := splitTemplateSpec(inner)
+		parts := strings.SplitN(inner, ":", 2)
+		var mode, key string
+		if len(parts) == 1 {
+			key = strings.TrimSpace(parts[0])
+		} else {
+			mode = strings.TrimSpace(parts[0])
+			key = strings.TrimSpace(parts[1])
+		}
 		val := values[key]
 		switch mode {
-		case "", "q", "quote", "shell":
-			return shellQuote(val)
-		case "raw":
+		case "raw", "q":
 			return val
 		default:
 			return shellQuote(val)
@@ -298,54 +270,6 @@ func renderCommandTemplate(template string, values map[string]string) string {
 }
 
 var templatePlaceholderRe = regexp.MustCompile(`\{\{([^}]+)\}\}`)
-
-func splitTemplateSpec(spec string) (mode, key string) {
-	parts := strings.SplitN(strings.TrimSpace(spec), ":", 2)
-	if len(parts) == 1 {
-		return "", strings.TrimSpace(parts[0])
-	}
-	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-}
-
-func parseArtifacts(body string) ([]tools.ArtifactRef, string) {
-	lines := strings.Split(body, "\n")
-	var cleaned []string
-	var artifacts []tools.ArtifactRef
-
-	for _, line := range lines {
-		matches := artifactLineRe.FindStringSubmatch(strings.TrimSpace(line))
-		if len(matches) == 0 {
-			cleaned = append(cleaned, line)
-			continue
-		}
-
-		artifact := tools.ArtifactRef{Kind: "artifact"}
-		fields := strings.Fields(matches[1])
-		for _, field := range fields {
-			kv := strings.SplitN(field, "=", 2)
-			if len(kv) != 2 {
-				continue
-			}
-			key := strings.ToLower(strings.TrimSpace(kv[0]))
-			val := strings.Trim(strings.TrimSpace(kv[1]), `"'`)
-			switch key {
-			case "kind":
-				artifact.Kind = val
-			case "name":
-				artifact.Name = val
-			case "path":
-				artifact.Path = val
-			case "content_type":
-				artifact.ContentType = val
-			case "description":
-				artifact.Description = val
-			}
-		}
-		artifacts = append(artifacts, artifact)
-	}
-
-	return artifacts, strings.TrimSpace(strings.Join(cleaned, "\n"))
-}
 
 func inferReadOnly(command string) bool {
 	lower := strings.ToLower(command)
@@ -377,13 +301,16 @@ func defaultString(v string, fallback string) string {
 }
 
 func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-func targetParam() map[string]interface{} {
-	return map[string]interface{}{
+func targetParam() map[string]any {
+	return map[string]any{
 		"type":        "string",
-		"description": "Target server name. When omitted, the connector's registered server is used.",
+		"description": "Target server name.",
 	}
 }
 
@@ -397,16 +324,3 @@ func formatOutput(stdout, stderr string, exitCode int) string {
 	}
 	return out
 }
-
-func argBool(args map[string]interface{}, key string, defaultVal bool) bool {
-	v, ok := args[key]
-	if !ok || v == nil {
-		return defaultVal
-	}
-	b, ok := v.(bool)
-	if !ok {
-		return defaultVal
-	}
-	return b
-}
-

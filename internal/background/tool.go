@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/yourorg/infractl/internal/executor"
-	"github.com/yourorg/infractl/internal/tools"
 )
 
 // ManageTool은 백그라운드 작업을 관리하는 LLM 도구이다.
@@ -45,7 +44,6 @@ func (t *ManageTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *ManageTool) RiskLevel() tools.RiskLevel { return tools.RiskNone }
 func (t *ManageTool) IsReadOnly() bool            { return true }
 func (t *ManageTool) IsEnabled() bool             { return true }
 

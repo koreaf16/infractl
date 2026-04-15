@@ -16,7 +16,7 @@ import (
 
 const (
 	jsonMaxBytes  = 10240 // JSON 포맷팅 최대 크기 (10KB)
-	tailLineCount = 5     // Running 상태에서 보여줄 최근 줄 수
+	tailLineCount = 10    // Running 상태에서 보여줄 최근 줄 수
 )
 
 var urlRegex = regexp.MustCompile(`https?://[^\s"'<>]+`)

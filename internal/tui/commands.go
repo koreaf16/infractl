@@ -82,6 +82,12 @@ func (m AppModel) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 			}
 			return m, m.serverFocusCmd()
 		}
+	case "/services":
+		serverFilter := ""
+		if len(parts) >= 2 {
+			serverFilter = strings.TrimSpace(parts[1])
+		}
+		println(renderSystemLine(m.buildServicesView(context.Background(), serverFilter)))
 	case "/connectors":
 		println(renderSystemLine(m.formatConnectors()))
 	case "/mcp":
@@ -179,7 +185,8 @@ func helpText() string {
 		"  /servers                     - 서버 목록\n" +
 		"  /servers remove <이름>        - 서버 삭제\n" +
 		"  /server [name|clear]         - 활성 서버 설정\n" +
-		"  /connectors                  - 커넥터 상태\n" +
+		"  /services [서버명]            - 서버→서비스→서브인스턴스 3계층 목록\n" +
+		"  /connectors                  - 현재 활성 커넥터 상태\n" +
 		"  /mcp                         - MCP 서버 상태\n" +
 		"  /mcp reconnect <name>        - MCP 재연결\n" +
 		"  /sessions                    - 최근 세션 목록\n" +
@@ -325,8 +332,8 @@ func (m AppModel) formatHistory() string {
 		if !l.Success {
 			result = "✗"
 		}
-		sb.WriteString(fmt.Sprintf("  %d. %s %-20s [%s] %s  %s\n",
-			i+1, result, l.ToolName, l.RiskLevel, l.TargetServer,
+		sb.WriteString(fmt.Sprintf("  %d. %s %-20s %s  %s\n",
+			i+1, result, l.ToolName, l.TargetServer,
 			l.Timestamp.Format(time.Kitchen)))
 	}
 	return sb.String()

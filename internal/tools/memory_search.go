@@ -22,7 +22,6 @@ type MemorySearchTool struct {
 }
 
 func (t *MemorySearchTool) Name() string         { return "memory_search" }
-func (t *MemorySearchTool) RiskLevel() RiskLevel { return RiskNone }
 func (t *MemorySearchTool) IsReadOnly() bool     { return true }
 func (t *MemorySearchTool) IsEnabled() bool      { return true }
 

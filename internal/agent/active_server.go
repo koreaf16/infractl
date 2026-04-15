@@ -21,6 +21,11 @@ func (a *Agent) applyActiveServer(next *store.Server) {
 		return
 	}
 
+	// 서버가 실제로 다른 서버로 전환될 때만 마커 삽입 (nil→server, server→nil은 제외)
+	if a.sessionSummary != nil && a.activeServer != nil && next != nil {
+		a.sessionSummary.MarkServerTransition(a.activeServer.Name, next.Name)
+	}
+
 	if next == nil {
 		a.activeServer = nil
 	} else {

@@ -1,7 +1,7 @@
 // Package agent
 // File: prompt.go
-// Description: 에이전트 시스템 프롬프트 최상위 조립 함수와 INFRACTL.md 로더
-// Responsibility: BuildContextual로 SectionSet 기반 동적 시스템 프롬프트를 조립하고 LoadInfractlMD로 사용자 지시를 로드
+// Description: ?먯씠?꾪듃 ?쒖뒪???꾨＼?꾪듃 理쒖긽??議곕┰ ?⑥닔? INFRACTL.md 濡쒕뜑
+// Responsibility: BuildContextual濡?SectionSet 湲곕컲 ?숈쟻 ?쒖뒪???꾨＼?꾪듃瑜?議곕┰?섍퀬 LoadInfractlMD濡??ъ슜??吏?쒕? 濡쒕뱶
 
 package agent
 
@@ -21,7 +21,7 @@ import (
 	"github.com/yourorg/infractl/internal/tools"
 )
 
-// BuildContextual은 SectionSet에 포함된 섹션만 골라 시스템 프롬프트를 조립한다.
+// BuildContextual? SectionSet???ы븿???뱀뀡留?怨⑤씪 ?쒖뒪???꾨＼?꾪듃瑜?議곕┰?쒕떎.
 func BuildContextual(
 	sections SectionSet,
 	toolList []tools.Tool,
@@ -33,17 +33,24 @@ func BuildContextual(
 	ragSources []store.RAGSource,
 	knowledgeStats *rag.KnowledgeStats,
 	modelName string,
-	knowledgeContext string, // 입력 기반 관련 지식 (비동기 프리페치 결과)
+	knowledgeContext string, // ?낅젰 湲곕컲 愿??吏??(鍮꾨룞湲??꾨━?섏튂 寃곌낵)
+	taskMemoryContext string,
 ) string {
 	var sb strings.Builder
 
 	isQwen := strings.Contains(strings.ToLower(modelName), "qwen")
 
-	// --- SectionCore: 항상 포함 ---
+	// --- SectionCore: ??긽 ?ы븿 ---
 	sb.WriteString("You are infractl, an AI infrastructure management agent.\n")
 	sb.WriteString("You help operators manage servers and infrastructure by executing shell commands and analyzing results.\n\n")
 
-	// Qwen 전용 가이드라인 주입
+	// --- Core Principles: ALWAYS INCLUDED ---
+	sb.WriteString("## Core Principles\n")
+	sb.WriteString("1. **Ask before acting if ambiguous:** If the user mentions a server name, DB name, or instance name that does NOT appear in the Known Servers Pool and does NOT match the active server, call `ask_user_question` FIRST to clarify.\n")
+	sb.WriteString("2. **Minimum necessary tools only:** Call only the tool(s) needed to directly answer the question. Once you have enough information, respond with text immediately — do NOT call additional tools 'to be thorough'.\n")
+	sb.WriteString("3. **Bounded DB Verification:** Treat database \"connect/login\" requests as bounded verification unless the user explicitly asks for an interactive session. Prefer server focus, connector activation, or one-shot commands such as `SELECT 1` plus `EXIT`; do NOT leave tools sitting at `SQL>`, `mysql>`, or `psql` prompts.\n\n")
+
+	// Qwen ?꾩슜 媛?대뱶?쇱씤 二쇱엯
 	if isQwen {
 		appendQwenToolGuideline(&sb)
 	}
@@ -54,7 +61,7 @@ func BuildContextual(
 		now.Format("-07:00"),
 	))
 
-	// --- SectionEnvironment: 항상 포함 ---
+	// --- SectionEnvironment: ??긽 ?ы븿 ---
 	if activeServer != nil {
 		appendActiveServerContext(&sb, activeServer)
 	} else {
@@ -62,30 +69,32 @@ func BuildContextual(
 		cwd, _ := os.Getwd()
 		appendLocalControllerContext(&sb, runtime.GOOS, runtime.GOARCH, hostname, cwd)
 	}
+	if strings.TrimSpace(taskMemoryContext) != "" {
+		sb.WriteString(taskMemoryContext)
+		sb.WriteString("\n\n")
+	}
 
 	// --- SectionTools ---
-	if sections.Has(SectionTools) && len(toolList) > 0 {
+	// Keep inline tool index only for Qwen prompt-based tool mode.
+	if sections.Has(SectionTools) && len(toolList) > 0 && isQwen {
 		sb.WriteString("## Available Tools\n")
-		sb.WriteString("You can use the following tools by following the Tool Calling Format above:\n\n")
+		sb.WriteString("Qwen inline-tool mode: minimal tool index.\n\n")
 		for _, t := range toolList {
-			risk := string(t.RiskLevel())
-			if risk != "" && risk != "none" {
-				sb.WriteString(fmt.Sprintf("- **%s** [risk:%s]: %s\n", t.Name(), risk, t.Description()))
-			} else {
-				sb.WriteString(fmt.Sprintf("- **%s**: %s\n", t.Name(), t.Description()))
-			}
-			// Qwen 모드일 경우 툴의 상세 스키마를 프롬프트에 직접 노출
-			if isQwen {
-				schemaBytes, _ := json.Marshal(t.Parameters())
-				sb.WriteString(fmt.Sprintf("  Args JSON Schema: %s\n", string(schemaBytes)))
-			}
+			sb.WriteString(fmt.Sprintf("- **%s**: %s\n", t.Name(), t.Description()))
+			schemaBytes, _ := json.Marshal(t.Parameters())
+			sb.WriteString(fmt.Sprintf("  Args JSON Schema: %s\n", string(schemaBytes)))
 		}
 		sb.WriteString("\n")
 	}
 
 	// --- SectionServers ---
 	if sections.Has(SectionServers) && len(servers) > 0 {
-		sb.WriteString("## Known Servers Pool\n")
+		sb.WriteString("## Known Servers Pool (SSH Targets)\n")
+		sb.WriteString("These are registered SSH servers ??i.e., machines you can connect to.\n")
+		sb.WriteString("**IMPORTANT:** A server name is NOT the same as a service or DB instance name.\n")
+		sb.WriteString("  - Server (SSH target): the machine itself, e.g. 'oracle-db', 'web-server'\n")
+		sb.WriteString("  - Service/Instance: a process running ON a server, e.g. Oracle SID 'ORCL', MySQL database name\n")
+		sb.WriteString("If the user mentions a name that does NOT match any server below, it is likely a service/instance name.\n\n")
 		for _, srv := range servers {
 			sb.WriteString(fmt.Sprintf("- **%s** (%s@%s:%d)\n", srv.Name, srv.User, srv.Host, srv.Port))
 		}
@@ -110,8 +119,8 @@ func BuildContextual(
 
 	// --- SectionRAG ---
 	if sections.Has(SectionRAG) {
-		// 입력과 관련된 지식이 프리페치된 경우 먼저 인라인으로 주입한다.
-		// LLM이 rag_search를 호출하기 전에 이미 관련 내용을 파악할 수 있게 된다.
+		// ?낅젰怨?愿?⑤맂 吏?앹씠 ?꾨━?섏튂??寃쎌슦 癒쇱? ?몃씪?몄쑝濡?二쇱엯?쒕떎.
+		// LLM??rag_search瑜??몄텧?섍린 ?꾩뿉 ?대? 愿???댁슜???뚯븙?????덇쾶 ?쒕떎.
 		if knowledgeContext != "" {
 			sb.WriteString(knowledgeContext)
 			sb.WriteString("\n\n")
@@ -129,7 +138,7 @@ func BuildContextual(
 		appendConnectorsSection(&sb, connectorStates)
 	}
 
-	// --- 의도 기반 섹션들 ---
+	// --- ?섎룄 湲곕컲 ?뱀뀡??---
 	if sections.Has(SectionToolPriority) {
 		appendDedicatedToolPriority(&sb)
 	}
@@ -148,10 +157,6 @@ func BuildContextual(
 
 	if sections.Has(SectionTaskCompletion) {
 		appendTaskCompletionRules(&sb)
-	}
-
-	if sections.Has(SectionSafety) {
-		appendSafetyRules(&sb)
 	}
 
 	if sections.Has(SectionGrounding) {
@@ -177,7 +182,7 @@ func BuildContextual(
 	return strings.TrimSpace(sb.String())
 }
 
-// appendActiveServerContext는 액티브 서버 컨텍스트를 프롬프트에 추가한다.
+// appendActiveServerContext???≫떚釉??쒕쾭 而⑦뀓?ㅽ듃瑜??꾨＼?꾪듃??異붽??쒕떎.
 func appendActiveServerContext(sb *strings.Builder, srv *store.Server) {
 	sb.WriteString("## [ACTIVE SESSION CONTEXT]\n")
 	sb.WriteString(fmt.Sprintf("You are currently focused on a specific target server: **%s**.\n", srv.Name))
@@ -216,7 +221,7 @@ func appendActiveServerContext(sb *strings.Builder, srv *store.Server) {
 	sb.WriteString("NEVER tell the user that local execution is impossible. Local execution is always available.\n\n")
 }
 
-// appendServerFocusSection은 서버 포커스 규칙 섹션을 추가한다.
+// appendServerFocusSection? ?쒕쾭 ?ъ빱??洹쒖튃 ?뱀뀡??異붽??쒕떎.
 func appendServerFocusSection(sb *strings.Builder, activeServer *store.Server, servers []store.Server) {
 	if activeServer != nil {
 		return // Already covered by [ACTIVE SESSION CONTEXT]
@@ -236,7 +241,7 @@ func appendServerFocusSection(sb *strings.Builder, activeServer *store.Server, s
 	sb.WriteString("\n")
 }
 
-// appendLearnedSystemsSection은 학습된 시스템 목록 섹션을 추가한다.
+// appendLearnedSystemsSection? ?숈뒿???쒖뒪??紐⑸줉 ?뱀뀡??異붽??쒕떎.
 func appendLearnedSystemsSection(sb *strings.Builder, learnedSystems []store.LearnedSystem) {
 	sb.WriteString("## Previously Learned Systems\n")
 	sb.WriteString("The following systems were previously discovered via adaptive learning:\n")
@@ -253,31 +258,37 @@ func appendLearnedSystemsSection(sb *strings.Builder, learnedSystems []store.Lea
 	sb.WriteString("Use these paths directly instead of searching again.\n\n")
 }
 
-// appendConnectorsSection은 활성 커넥터 목록 섹션을 추가한다.
+// appendConnectorsSection? ?쒖꽦 而ㅻ꽖??紐⑸줉 ?뱀뀡??異붽??쒕떎.
 func appendConnectorsSection(sb *strings.Builder, connectorStates []connector.ConnectorState) {
-	sb.WriteString("## Active Connectors\n")
+	sb.WriteString("## Active Connectors (Services/Instances)\n")
+	sb.WriteString("The following DB/app services are currently active. \n")
+	sb.WriteString("**NOTE:** These are NOT servers; they run ON the servers listed above. \n")
+	sb.WriteString("To interact with these, use the specific tools provided (e.g., `oracle_ORCL.tablespace`).\n\n")
 	for _, cs := range connectorStates {
 		icon := connectorIcon(string(cs.Status))
 		sb.WriteString(fmt.Sprintf("%s %s/%s/%s -> %s (%d tools)\n",
 			icon, cs.ServerName, cs.Type, cs.ServiceName, cs.Status, len(cs.Tools)))
 	}
-	sb.WriteString("\nConnected connectors have dedicated tools active (for example, oracle_ORCL.tablespace).\n")
-	sb.WriteString("Use connector-specific tools when available instead of raw shell_exec.\n\n")
+	sb.WriteString("\nUse connector-specific tools when available instead of raw shell_exec.\n\n")
 }
 
-// appendBehaviorRules는 기본 동작 규칙 섹션을 추가한다.
+// appendBehaviorRules??湲곕낯 ?숈옉 洹쒖튃 ?뱀뀡??異붽??쒕떎.
 func appendBehaviorRules(sb *strings.Builder) {
 	sb.WriteString("## Behavior Rules\n")
-	sb.WriteString("1. Present results in a clean, readable format.\n")
-	sb.WriteString("2. Always explain what you are doing and why.\n")
-	sb.WriteString("3. If a tool fails, analyze the error output and try an alternative command.\n")
-	sb.WriteString("4. Distinguish \"not found by the current pattern\" from \"does not exist\" in summaries.\n")
-	sb.WriteString("5. You must converse in the language the user is speaking.\n")
-	sb.WriteString("6. **Execute first, explain after.** Call tool(s) BEFORE writing explanatory text. Keep pre-tool text to one short sentence.\n")
-	sb.WriteString("7. After a tool failure, immediately retry with an alternative approach. Write at most one sentence before the next tool call.\n\n")
+	sb.WriteString("1. **Before executing any command:** verify the target is clear.\n")
+	sb.WriteString("   - If the active server is already set but the user's request references a DIFFERENT name (e.g. '26AI DB' when active server is 'oracle-db'), ask the user which server/instance they mean before executing.\n")
+	sb.WriteString("   - Do NOT silently assume ??unknown targets must be confirmed.\n")
+	sb.WriteString("2. Present results in a clean, readable format.\n")
+	sb.WriteString("3. Every tool call MUST include a short `description` argument in Korean explaining the reason for the step.\n")
+	sb.WriteString("4. If a tool fails, analyze the error output ??do NOT blindly retry the same approach.\n")
+	sb.WriteString("5. Distinguish \"not found by the current pattern\" from \"does not exist\" in summaries.\n")
+	sb.WriteString("6. You must converse in the language the user is speaking.\n")
+	sb.WriteString("7. **After a tool failure:** call `rag_search` with the error message FIRST. Only retry shell_exec if rag_search provides a new approach. If the same error repeats 3+ times with no progress, STOP and explain the situation to the user.\n")
+	sb.WriteString("8. Exploratory queries should use exactly one directory listing call unless the user explicitly asks to go deeper.\n")
+	sb.WriteString("9. Final answers must be concise: answer first, include only key evidence, and avoid re-listing every execution step.\n\n")
 }
 
-// LoadInfractlMD는 ~/.infractl/INFRACTL.md 파일을 로드한다.
+// LoadInfractlMD??~/.infractl/INFRACTL.md ?뚯씪??濡쒕뱶?쒕떎.
 func LoadInfractlMD() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -296,9 +307,9 @@ func LoadInfractlMD() string {
 	return processIncludes(string(data), baseDir, 0)
 }
 
-// BuildMinimalChat은 needs_tools=false(순수 대화)일 때 사용하는 최소 시스템 프롬프트를 반환한다.
-// 인프라 컨텍스트와 도구 목록을 일절 포함하지 않아 페이로드를 최소화하되,
-// 사용자 언어 감지와 에이전트 identity는 유지한다.
+// BuildMinimalChat? needs_tools=false(?쒖닔 ????????ъ슜?섎뒗 理쒖냼 ?쒖뒪???꾨＼?꾪듃瑜?諛섑솚?쒕떎.
+// ?명봽??而⑦뀓?ㅽ듃? ?꾧뎄 紐⑸줉???쇱젅 ?ы븿?섏? ?딆븘 ?섏씠濡쒕뱶瑜?理쒖냼?뷀븯??
+// ?ъ슜???몄뼱 媛먯?? ?먯씠?꾪듃 identity???좎??쒕떎.
 func BuildMinimalChat(infractlMD string) string {
 	now := time.Now()
 	var sb strings.Builder

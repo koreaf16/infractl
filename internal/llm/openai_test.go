@@ -2,10 +2,15 @@ package llm
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNormalizeLLMLogTextExtractsSSEContent(t *testing.T) {
@@ -111,6 +116,117 @@ func TestParseStreamWithoutThinkTagReturnsContentAndLogsReadableText(t *testing.
 	}
 }
 
+func TestSanitizeAssistantContentStripsPlainTextReasoningLeak(t *testing.T) {
+	raw := strings.TrimSpace(`
+Thinking Process:
+
+1. Analyze the Input:
+   - User: "하이?"
+
+2. Draft the response:
+   - Keep it short.
+
+Final Output Generation.
+
+안녕하세요!
+
+필요한 작업 말씀해 주세요.
+`)
+
+	got := sanitizeAssistantContent(raw)
+	want := "안녕하세요!\n\n필요한 작업 말씀해 주세요."
+	if got != want {
+		t.Fatalf("sanitizeAssistantContent() = %q, want %q", got, want)
+	}
+}
+
+func TestSanitizeAssistantContentWithOnlyLeakReturnsEmpty(t *testing.T) {
+	raw := strings.TrimSpace(`
+Thinking Process:
+
+1. Analyze the Input:
+   - User: "하이?"
+`)
+
+	if got := sanitizeAssistantContent(raw); got != "" {
+		t.Fatalf("sanitizeAssistantContent() = %q, want empty string", got)
+	}
+}
+
+func TestParseStreamSanitizesPlainTextReasoningLeak(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"Thinking Process:\n\n"}}]}`,
+		`data: {"choices":[{"delta":{"content":"1. Analyze the Input:\n- User: hi\n\n"}}]}`,
+		`data: {"choices":[{"delta":{"content":"Final Output Generation.\n\n안녕하세요.\n"}}]}`,
+		`data: {"choices":[{"delta":{"content":"필요한 작업 말씀해 주세요."}}]}`,
+		`data: [DONE]`,
+	}, "\n")
+
+	c := &OpenAIClient{}
+	resp, err := c.parseStream("test-model", strings.NewReader(stream), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "안녕하세요.\n필요한 작업 말씀해 주세요."
+	if resp.Content != want {
+		t.Fatalf("Content = %q, want %q", resp.Content, want)
+	}
+}
+
+func TestParseStreamDoesNotEmitLeakedReasoningTokens(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"Thinking Process:\n\n"}}]}`,
+		`data: {"choices":[{"delta":{"content":"1. Analyze the Input:\n- User: hi\n\n"}}]}`,
+		`data: {"choices":[{"delta":{"content":"Final Output Generation.\n\n안녕하세요.\n"}}]}`,
+		`data: {"choices":[{"delta":{"content":"필요한 작업 말씀해 주세요."}}]}`,
+		`data: [DONE]`,
+	}, "\n")
+
+	var emitted strings.Builder
+	c := &OpenAIClient{}
+	resp, err := c.parseStream("test-model", strings.NewReader(stream), nil, func(token string) {
+		emitted.WriteString(token)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := "안녕하세요.\n필요한 작업 말씀해 주세요."
+	if emitted.String() != want {
+		t.Fatalf("streamed content = %q, want %q", emitted.String(), want)
+	}
+	if resp.Content != want {
+		t.Fatalf("Content = %q, want %q", resp.Content, want)
+	}
+}
+
+func TestParseStreamDoesNotEmitThinkBlockWithoutOpenTag(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"The user is saying \"하이?\" which is a casual greeting in Korean.\n\n"}}]}`,
+		`data: {"choices":[{"delta":{"content":"This is a casual greeting, so according to my rules, I should not call any tools.\n\n"}}]}`,
+		`data: {"choices":[{"delta":{"content":"I'll respond in a friendly, casual manner in Korean.\n</think>\n"}}]}`,
+		`data: {"choices":[{"delta":{"content":"안녕하세요.\n필요한 작업 말씀해 주세요."}}]}`,
+		`data: [DONE]`,
+	}, "\n")
+
+	var emitted strings.Builder
+	c := &OpenAIClient{}
+	resp, err := c.parseStream("test-model", strings.NewReader(stream), nil, func(token string) {
+		emitted.WriteString(token)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := "안녕하세요.\n필요한 작업 말씀해 주세요."
+	if emitted.String() != want {
+		t.Fatalf("streamed content = %q, want %q", emitted.String(), want)
+	}
+	if resp.Content != want {
+		t.Fatalf("Content = %q, want %q", resp.Content, want)
+	}
+}
+
 func TestExtractInlineToolCallsParsesJSONFormat(t *testing.T) {
 	input := `text before<tool_call>{"name":"server_command","arguments":{"server":"test","command":"ls"}}</tool_call>text after`
 	calls, cleaned := extractInlineToolCalls(input)
@@ -157,6 +273,179 @@ func TestExtractInlineToolCallsMultipleQwenXMLBlocks(t *testing.T) {
 	}
 	if calls[0].Function.Name != "cmd_a" || calls[1].Function.Name != "cmd_b" {
 		t.Errorf("names = %q %q, want cmd_a cmd_b", calls[0].Function.Name, calls[1].Function.Name)
+	}
+}
+
+// --- doRequestWith HTTP 상태 체크 테스트 ---
+
+func TestDoRequestWith_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"hello"}}]}`)
+	}))
+	defer srv.Close()
+
+	c := NewOpenAIClient(srv.URL, "test", "", 0)
+	resp, err := c.doRequestWith(t.Context(), []byte(`{}`), c.httpClient)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestDoRequestWith_429ReturnsAPIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(429)
+		fmt.Fprint(w, `{"error":{"type":"rate_limit","message":"too many requests"}}`)
+	}))
+	defer srv.Close()
+
+	c := NewOpenAIClient(srv.URL, "test", "", 0)
+	_, err := c.doRequestWith(t.Context(), []byte(`{}`), c.httpClient)
+	if err == nil {
+		t.Fatal("expected error for 429 response")
+	}
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T: %v", err, err)
+	}
+	if apiErr.StatusCode != 429 {
+		t.Errorf("StatusCode = %d, want 429", apiErr.StatusCode)
+	}
+	if apiErr.RetryAfter != 30_000_000_000 { // 30 seconds in nanoseconds
+		t.Errorf("RetryAfter = %v, want 30s", apiErr.RetryAfter)
+	}
+	if !IsTransient(err) {
+		t.Error("429 should be transient")
+	}
+	if !IsRateLimited(err) {
+		t.Error("429 should be rate limited")
+	}
+}
+
+func TestDoRequestWith_503ReturnsTransientError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(503)
+		fmt.Fprint(w, `service unavailable`)
+	}))
+	defer srv.Close()
+
+	c := NewOpenAIClient(srv.URL, "test", "", 0)
+	_, err := c.doRequestWith(t.Context(), []byte(`{}`), c.httpClient)
+	if err == nil {
+		t.Fatal("expected error for 503 response")
+	}
+
+	if !IsTransient(err) {
+		t.Error("503 should be transient")
+	}
+	if !IsOverloaded(err) {
+		t.Error("503 should be overloaded")
+	}
+}
+
+func TestDoRequestWith_400ReturnsNonTransientError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(400)
+		fmt.Fprint(w, `{"error":"bad request"}`)
+	}))
+	defer srv.Close()
+
+	c := NewOpenAIClient(srv.URL, "test", "", 0)
+	_, err := c.doRequestWith(t.Context(), []byte(`{}`), c.httpClient)
+	if err == nil {
+		t.Fatal("expected error for 400 response")
+	}
+
+	if IsTransient(err) {
+		t.Error("400 should NOT be transient")
+	}
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != 400 {
+		t.Errorf("StatusCode = %d, want 400", apiErr.StatusCode)
+	}
+}
+
+func TestDoRequestWith_500ReturnsTransientError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+		fmt.Fprint(w, `internal server error`)
+	}))
+	defer srv.Close()
+
+	c := NewOpenAIClient(srv.URL, "test", "", 0)
+	_, err := c.doRequestWith(t.Context(), []byte(`{}`), c.httpClient)
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+
+	if !IsTransient(err) {
+		t.Error("500 should be transient")
+	}
+}
+
+func TestAdaptiveIdleTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		bytes   int
+		wantMin time.Duration
+		wantMax time.Duration
+	}{
+		{"small request", 1024, 90 * time.Second, 91 * time.Second},
+		{"medium request 50KB", 50 * 1024, 90*time.Second + 25*time.Second, 116 * time.Second},
+		{"large request 200KB", 200 * 1024, maxStreamIdleTimeout, maxStreamIdleTimeout},
+		{"zero bytes", 0, defaultStreamIdleTimeout, defaultStreamIdleTimeout},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := adaptiveIdleTimeout(tt.bytes)
+			if got < tt.wantMin {
+				t.Errorf("adaptiveIdleTimeout(%d) = %v, want >= %v", tt.bytes, got, tt.wantMin)
+			}
+			if got > tt.wantMax {
+				t.Errorf("adaptiveIdleTimeout(%d) = %v, want <= %v", tt.bytes, got, tt.wantMax)
+			}
+		})
+	}
+}
+
+func TestAdaptiveIdleTimeout_NeverExceedsMax(t *testing.T) {
+	// 매우 큰 요청도 maxStreamIdleTimeout을 넘지 않아야 한다
+	got := adaptiveIdleTimeout(10 * 1024 * 1024) // 10MB
+	if got != maxStreamIdleTimeout {
+		t.Errorf("expected max cap %v, got %v", maxStreamIdleTimeout, got)
+	}
+}
+
+func TestDoRequestWith_SetsAuthorizationHeader(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+		fmt.Fprint(w, `{"choices":[]}`)
+	}))
+	defer srv.Close()
+
+	c := NewOpenAIClient(srv.URL, "test", "my-api-key", 0)
+	resp, err := c.doRequestWith(t.Context(), []byte(`{}`), c.httpClient)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if gotAuth != "Bearer my-api-key" {
+		t.Errorf("Authorization = %q, want 'Bearer my-api-key'", gotAuth)
 	}
 }
 

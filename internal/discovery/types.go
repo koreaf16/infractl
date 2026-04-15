@@ -20,6 +20,14 @@ const (
 	ServiceKubeAPI    ServiceType = "kube-apiserver"
 	ServiceKubelet    ServiceType = "kubelet"
 	ServicePrometheus ServiceType = "prometheus"
+	ServiceSystemd    ServiceType = "systemd"
+	ServiceDocker     ServiceType = "docker"
+	ServiceNginx      ServiceType = "nginx"
+	ServiceApache     ServiceType = "apache"
+	ServiceHAProxy    ServiceType = "haproxy"
+	ServiceTraefik    ServiceType = "traefik"
+	ServiceSSL        ServiceType = "ssl"
+	ServiceVHost      ServiceType = "vhost"
 	ServiceUnknown    ServiceType = "unknown"
 )
 

@@ -11,7 +11,6 @@ import (
 	"log/slog"
 
 	"github.com/yourorg/infractl/internal/store"
-	"github.com/yourorg/infractl/internal/tools"
 )
 
 // Manager는 체크포인트 생명주기를 관리한다.
@@ -59,12 +58,12 @@ func (m *Manager) BuildRollbackCommand(cp store.Checkpoint) string {
 	return cp.Snapshot.RollbackCommand
 }
 
-// CreateMandatory는 RiskMedium 이상 모든 mutation 도구에 무조건 체크포인트를 생성한다.
+// CreateMandatory는 모든 mutation 도구에 무조건 체크포인트를 생성한다.
 // args에 rollback_command/checkpoint_description이 없어도 생성한다.
-func (m *Manager) CreateMandatory(ctx context.Context, server, toolName string, args map[string]interface{}, riskLevel tools.RiskLevel) {
+func (m *Manager) CreateMandatory(ctx context.Context, serverName, toolName string, args map[string]interface{}) error {
 	desc, _ := args["checkpoint_description"].(string)
 	if desc == "" {
-		desc = fmt.Sprintf("[%s] %s 실행 전 자동 체크포인트", riskLevel, toolName)
+		desc = fmt.Sprintf("%s 실행 전 자동 체크포인트", toolName)
 	}
 	rollback, _ := args["rollback_command"].(string)
 	snap := store.CheckpointSnapshot{RollbackCommand: rollback}
@@ -73,9 +72,10 @@ func (m *Manager) CreateMandatory(ctx context.Context, server, toolName string, 
 	} else if sql, ok := args["sql"].(string); ok {
 		snap.CommandUsed = sql
 	}
-	if _, err := m.Create(ctx, server, desc, toolName, snap); err != nil {
+	if _, err := m.Create(ctx, serverName, desc, toolName, snap); err != nil {
 		slog.Warn("mandatory checkpoint failed", "tool", toolName, "err", err)
 	}
+	return nil
 }
 
 // CreateFromArgs는 도구 호출 인자에서 체크포인트를 자동 생성한다.

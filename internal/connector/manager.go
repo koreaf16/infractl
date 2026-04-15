@@ -60,9 +60,9 @@ func (m *Manager) RegisterFactory(serviceType string, factory ConnectorFactory) 
 	m.factories[serviceType] = factory
 }
 
-// ProbeAndActivate??OS ?�증??먼�? ?�도?�고 ?�공?�면 커넥?��? ?�성?�한??
-// 커넥?��? OSAuthProber�?구현?��? ?�거??OS ?�증???�패?�면 non-nil error�?반환?�다.
-// 반환 값�? ?�성?�된 ?�구 ?�이??
+// ProbeAndActivate는 OS 인증을 먼저 시도하고 성공하면 커넥터를 활성화한다.
+// 커넥터가 OSAuthProber를 구현하지 않거나 OS 인증이 실패하면 non-nil error를 반환한다.
+// 반환 값은 활성화된 도구 개수이다.
 func (m *Manager) ProbeAndActivate(ctx context.Context, info ServiceInfo, exec executor.Executor, saveMode SaveMode) (int, error) {
 	conn, err := m.createConnector(info.ServiceType)
 	if err != nil {
@@ -71,7 +71,7 @@ func (m *Manager) ProbeAndActivate(ctx context.Context, info ServiceInfo, exec e
 
 	prober, ok := conn.(OSAuthProber)
 	if !ok {
-		return 0, fmt.Errorf("?�비??%s??OS ?�증??지?�하지 ?�습?�다", info.ServiceType)
+		return 0, fmt.Errorf("서비스 %s는 OS 인증을 지원하지 않습니다", info.ServiceType)
 	}
 
 	creds, err := prober.ProbeOSAuth(ctx, info, exec)
@@ -84,7 +84,7 @@ func (m *Manager) ProbeAndActivate(ctx context.Context, info ServiceInfo, exec e
 	}
 
 	m.mu.RLock()
-	key := connectorKey(info.ServerName, info.ServiceType, info.Name)
+	key := connectorKey(info.ServerName, info.ServiceType, info.Name, info.SubInstance)
 	entry, exists := m.entries[key]
 	m.mu.RUnlock()
 	if exists {
@@ -95,7 +95,7 @@ func (m *Manager) ProbeAndActivate(ctx context.Context, info ServiceInfo, exec e
 
 // Activate creates a connector instance and registers its tools.
 func (m *Manager) Activate(ctx context.Context, info ServiceInfo, creds Credentials, saveMode SaveMode) error {
-	key := connectorKey(info.ServerName, info.ServiceType, info.Name)
+	key := connectorKey(info.ServerName, info.ServiceType, info.Name, info.SubInstance)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -126,6 +126,7 @@ func (m *Manager) Activate(ctx context.Context, info ServiceInfo, creds Credenti
 		ServerName:  info.ServerName,
 		Type:        info.ServiceType,
 		ServiceName: info.Name,
+		SubInstance: info.SubInstance,
 		Status:      StatusConnected,
 		Tools:       toolNames,
 	}
@@ -147,8 +148,10 @@ func (m *Manager) Activate(ctx context.Context, info ServiceInfo, creds Credenti
 }
 
 // Deactivate removes an active connector.
+// serviceName은 "name" 또는 "name/subInstance" 형식을 모두 지원한다.
 func (m *Manager) Deactivate(serverName, serviceType, serviceName string) error {
-	key := connectorKey(serverName, serviceType, serviceName)
+	name, sub := splitServiceName(serviceName)
+	key := connectorKey(serverName, serviceType, name, sub)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.deactivateLocked(key)
@@ -193,10 +196,13 @@ func (m *Manager) LoadSaved(ctx context.Context) error {
 			details = make(map[string]string)
 		}
 
+		// "name/subInstance" 형식으로 저장된 ServiceName을 복원
+		parsedName, parsedSub := splitServiceName(e.ServiceName)
 		info := ServiceInfo{
 			ServerName:  e.ServerName,
 			ServiceType: e.ServiceType,
-			Name:        e.ServiceName,
+			Name:        parsedName,
+			SubInstance: parsedSub,
 			Details:     details,
 		}
 
@@ -292,15 +298,75 @@ func (m *Manager) persistConnector(ctx context.Context, info ServiceInfo, creds 
 
 	toolsJSON, _ := json.Marshal(toolNames)
 
+	// SubInstance가 있으면 "name/subInstance" 형식으로 저장
+	serviceName := info.Name
+	if info.SubInstance != "" {
+		serviceName = info.Name + "/" + info.SubInstance
+	}
+
 	return m.store.SaveConnector(ctx, store.ConnectorEntry{
 		ServerName:  info.ServerName,
 		ServiceType: info.ServiceType,
-		ServiceName: info.Name,
+		ServiceName: serviceName,
 		Config:      string(configJSON),
 		Credentials: encryptedCreds,
 		Tools:       string(toolsJSON),
 		SaveMode:    string(saveMode),
 	})
+}
+
+// splitServiceName은 "name/sub" 또는 "name" 형식의 serviceName을 분리한다.
+func splitServiceName(s string) (name, sub string) {
+	if idx := strings.Index(s, "/"); idx >= 0 {
+		return s[:idx], s[idx+1:]
+	}
+	return s, ""
+}
+
+// GetSavedConnector는 저장된 커넥터의 ServiceInfo와 Credentials를 반환한다.
+// 저장된 커넥터가 없거나 복호화에 실패하면 false를 반환한다.
+func (m *Manager) GetSavedConnector(ctx context.Context, serverName, serviceType, name, subInstance string) (ServiceInfo, Credentials, bool) {
+	if m.store == nil {
+		return ServiceInfo{}, Credentials{}, false
+	}
+	lookupName := name
+	if subInstance != "" {
+		lookupName = name + "/" + subInstance
+	}
+	entry, err := m.store.GetConnector(ctx, serverName, serviceType, lookupName)
+	if err != nil {
+		return ServiceInfo{}, Credentials{}, false
+	}
+	creds, err := m.decryptCreds(entry.Credentials)
+	if err != nil {
+		slog.Warn("decrypt saved connector creds", "server", serverName, "err", err)
+		return ServiceInfo{}, Credentials{}, false
+	}
+	var details map[string]string
+	if entry.Config != "" {
+		if jsonErr := json.Unmarshal([]byte(entry.Config), &details); jsonErr != nil {
+			details = make(map[string]string)
+		}
+	}
+	if details == nil {
+		details = make(map[string]string)
+	}
+	parsedName, parsedSub := splitServiceName(entry.ServiceName)
+	return ServiceInfo{
+		ServerName:  entry.ServerName,
+		ServiceType: entry.ServiceType,
+		Name:        parsedName,
+		SubInstance: parsedSub,
+		Details:     details,
+	}, creds, true
+}
+
+// ListSavedConnectors는 저장된 모든 커넥터 엔트리를 반환한다.
+func (m *Manager) ListSavedConnectors(ctx context.Context) ([]store.ConnectorEntry, error) {
+	if m.store == nil {
+		return nil, nil
+	}
+	return m.store.ListConnectors(ctx)
 }
 
 func (m *Manager) decryptCreds(encrypted string) (Credentials, error) {
@@ -331,4 +397,4 @@ func (m *Manager) createConnector(serviceType string) (Connector, error) {
 	}
 	return factory(), nil
 }
-
+

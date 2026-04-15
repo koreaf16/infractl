@@ -45,7 +45,7 @@ func (r *ansiRenderer) renderString(_ util.BufWriter, source []byte, n ast.Node,
 func (r *ansiRenderer) renderCodeSpan(_ util.BufWriter, source []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
 		code := string(n.Text(source))
-		styled := lipgloss.NewStyle().Background(ColorSubtle).Render(code)
+		styled := lipgloss.NewStyle().Foreground(ColorPermission).Render(code)
 		r.writeStr(styled)
 		return ast.WalkSkipChildren, nil
 	}

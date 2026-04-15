@@ -54,8 +54,9 @@ func IsInternetAvailable() bool {
 type WebSearchTool struct{}
 
 func (t *WebSearchTool) Name() string         { return "web_search" }
-func (t *WebSearchTool) RiskLevel() RiskLevel { return RiskNone }
-func (t *WebSearchTool) IsReadOnly() bool     { return true }
+func (t *WebSearchTool) IsReadOnly() bool {
+	return true
+}
 
 func (t *WebSearchTool) Description() string {
 	return "Search the web using SearXNG. Returns URLs and snippets for the query. Use this to find solutions for unknown errors, documentation for unfamiliar systems, or any information not available locally."

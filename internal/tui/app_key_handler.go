@@ -20,6 +20,33 @@ func (m AppModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		if m.form.active {
+			switch msg.Type {
+			case tea.KeyTab:
+				m.form.NextField()
+				m.input.Reset()
+				m.input.ti.Placeholder = m.form.CurrentPlaceholder()
+				return m, nil
+			case tea.KeyShiftTab:
+				m.form.PrevField()
+				m.input.Reset()
+				m.input.ti.Placeholder = m.form.CurrentPlaceholder()
+				return m, nil
+			case tea.KeyEsc:
+				if m.form.phase == formPhaseReview {
+					m.form.phase = formPhaseEdit
+					m.input.Reset()
+					m.input.ti.Placeholder = m.form.CurrentPlaceholder()
+					return m, nil
+				}
+				return m.Update(FormResponseMsg{
+					Result:  FormResult{Cancelled: true},
+					ReplyCh: m.form.replyCh,
+				})
+			}
+			// 나머지 키는 inputBar로 fall-through (일반 타이핑/Enter)
+		}
+
 		if m.privilege.active {
 			handled, respMsg := m.privilege.handleKey(msg)
 			if handled {

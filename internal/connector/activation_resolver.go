@@ -359,6 +359,14 @@ func synthesizeCommands(req ActivationRequest, _ map[string]bool, evidence []Act
 		return synthesizeTomcatCommands(req, evidence), "tomcat"
 	case "weblogic":
 		return synthesizeWebLogicCommands(req, evidence), "weblogic"
+	case "mssql", "sqlserver":
+		return synthesizeMSSQLCommands(req, evidence), "generic"
+	case "db2", "ibmdb2":
+		return synthesizeDB2Commands(req, evidence), "generic"
+	case "hana", "saphana":
+		return synthesizeHANACommands(req, evidence), "generic"
+	case "sybase", "ase":
+		return synthesizeSybaseCommands(req, evidence), "generic"
 	default:
 		return synthesizeGenericCommands(req, evidence), "generic"
 	}
@@ -664,17 +672,176 @@ func synthesizeGenericCommands(req ActivationRequest, evidence []ActivationEvide
 			Description: "Inspect the target system",
 			Command:     `uname -a && ps -ef | head -20`,
 			ReadOnly:    true,
-			Parameters:  map[string]interface{}{"target": targetParam()},
+			Parameters:  map[string]any{"target": targetParam()},
 		},
 		"logs": {
 			Name:        "logs",
 			Description: "Inspect likely log files",
 			Command:     `if [ -n "{{log_path}}" ] && [ -d "{{log_path}}" ]; then find "{{log_path}}" -maxdepth 1 -type f | head -5 | xargs -r tail -n {{lines}}; else ps -ef | head -20; fi`,
 			ReadOnly:    true,
-			Parameters: map[string]interface{}{
-				"lines":  map[string]interface{}{"type": "integer", "default": 50},
+			Parameters: map[string]any{
+				"lines":  map[string]any{"type": "integer", "default": 50},
 				"target": targetParam(),
 			},
+		},
+	}
+}
+
+func synthesizeMSSQLCommands(req ActivationRequest, _ []ActivationEvidence) map[string]LearnedCommand {
+	host := defaultIfEmpty(req.Host, "{{host}}")
+	port := req.Port
+	if port == 0 {
+		port = 1433
+	}
+	portStr := fmt.Sprintf("%d", port)
+	schemaCheck := fmt.Sprintf(
+		`sqlcmd -S %s,%s -U {{username}} -P {{password}} -Q "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='{{table_name}}' ORDER BY ORDINAL_POSITION" -W 2>&1`,
+		host, portStr,
+	)
+	return map[string]LearnedCommand{
+		"query": {
+			Name:               "query",
+			Description:        "MSSQL SQL 실행 (sqlcmd). SELECT/DML 모두 가능.",
+			Command:            fmt.Sprintf(`sqlcmd -S %s,%s -U {{username}} -P {{password}} -d {{database}} -Q "{{raw:sql}}" -W -s "|" 2>&1`, host, portStr),
+			ReadOnly:           false,
+			IsSQLQuery:         true,
+			SchemaCheckCommand: schemaCheck,
+			Parameters: map[string]any{
+				"sql":      map[string]any{"type": "string", "description": "실행할 SQL 문"},
+				"database": map[string]any{"type": "string", "description": "대상 데이터베이스 이름"},
+				"target":   targetParam(),
+			},
+			Required: []string{"sql"},
+		},
+		"status": {
+			Name:        "status",
+			Description: "MSSQL 서버 버전 및 상태 확인.",
+			Command:     fmt.Sprintf(`sqlcmd -S %s,%s -U {{username}} -P {{password}} -Q "SELECT @@VERSION; SELECT name, state_desc FROM sys.databases ORDER BY name;" -W 2>&1`, host, portStr),
+			ReadOnly:    true,
+			Parameters:  map[string]any{"target": targetParam()},
+		},
+		"processlist": {
+			Name:        "processlist",
+			Description: "MSSQL 활성 세션 목록 조회 (sys.dm_exec_sessions).",
+			Command:     fmt.Sprintf(`sqlcmd -S %s,%s -U {{username}} -P {{password}} -Q "SELECT session_id, login_name, status, host_name, program_name, LEFT(text,80) AS query FROM sys.dm_exec_sessions s OUTER APPLY sys.dm_exec_sql_text(s.most_recent_sql_handle) WHERE is_user_process=1 ORDER BY session_id;" -W 2>&1`, host, portStr),
+			ReadOnly:    true,
+			Parameters:  map[string]any{"target": targetParam()},
+		},
+	}
+}
+
+func synthesizeDB2Commands(req ActivationRequest, _ []ActivationEvidence) map[string]LearnedCommand {
+	dbName := defaultIfEmpty(req.ServiceName, "SAMPLE")
+	schemaCheck := fmt.Sprintf(
+		`db2 "CONNECT TO %s USER {{username}} USING '{{raw:password}}'" && db2 "SELECT COLNAME, TYPENAME FROM SYSCAT.COLUMNS WHERE TABNAME=UPPER('{{table_name}}') ORDER BY COLNO" && db2 TERMINATE 2>&1`,
+		dbName,
+	)
+	return map[string]LearnedCommand{
+		"query": {
+			Name:               "query",
+			Description:        "DB2 SQL 실행. SELECT/DML 모두 가능.",
+			Command:            fmt.Sprintf(`db2 "CONNECT TO %s USER {{username}} USING '{{raw:password}}'" && db2 "{{raw:sql}}" && db2 TERMINATE 2>&1`, dbName),
+			ReadOnly:           false,
+			IsSQLQuery:         true,
+			SchemaCheckCommand: schemaCheck,
+			Parameters: map[string]any{
+				"sql":    map[string]any{"type": "string", "description": "실행할 SQL 문"},
+				"target": targetParam(),
+			},
+			Required: []string{"sql"},
+		},
+		"status": {
+			Name:        "status",
+			Description: "DB2 인스턴스 상태 및 버전 확인.",
+			Command:     `db2 get dbm cfg | grep -E "^(DB2|Instance)" | head -10 && db2level 2>&1`,
+			ReadOnly:    true,
+			Parameters:  map[string]any{"target": targetParam()},
+		},
+		"tablespaces": {
+			Name:        "tablespaces",
+			Description: "DB2 테이블스페이스 사용량 조회.",
+			Command:     fmt.Sprintf(`db2 "CONNECT TO %s USER {{username}} USING '{{raw:password}}'" && db2 "SELECT TBSPACE, TBSPACETYPE, DATASIZE/1024 AS SIZE_MB, USEDSIZE/1024 AS USED_MB FROM SYSCAT.TABLESPACES ORDER BY SIZE_MB DESC" && db2 TERMINATE 2>&1`, dbName),
+			ReadOnly:    true,
+			Parameters:  map[string]any{"target": targetParam()},
+		},
+	}
+}
+
+func synthesizeHANACommands(req ActivationRequest, _ []ActivationEvidence) map[string]LearnedCommand {
+	host := defaultIfEmpty(req.Host, "{{host}}")
+	port := req.Port
+	if port == 0 {
+		port = 30015
+	}
+	addr := fmt.Sprintf("%s:%d", host, port)
+	schemaCheck := fmt.Sprintf(
+		`hdbsql -n %s -u {{username}} -p {{password}} "SELECT COLUMN_NAME, DATA_TYPE_NAME FROM SYS.TABLE_COLUMNS WHERE TABLE_NAME='{{table_name}}' ORDER BY POSITION" 2>&1`,
+		addr,
+	)
+	return map[string]LearnedCommand{
+		"query": {
+			Name:               "query",
+			Description:        "SAP HANA SQL 실행 (hdbsql). SELECT/DML 모두 가능.",
+			Command:            fmt.Sprintf(`hdbsql -n %s -u {{username}} -p {{password}} "{{raw:sql}}" 2>&1`, addr),
+			ReadOnly:           false,
+			IsSQLQuery:         true,
+			SchemaCheckCommand: schemaCheck,
+			Parameters: map[string]any{
+				"sql":    map[string]any{"type": "string", "description": "실행할 SQL 문"},
+				"target": targetParam(),
+			},
+			Required: []string{"sql"},
+		},
+		"status": {
+			Name:        "status",
+			Description: "SAP HANA 서버 버전 및 서비스 상태 확인.",
+			Command:     fmt.Sprintf(`hdbsql -n %s -u {{username}} -p {{password}} "SELECT VERSION FROM SYS.M_DATABASE; SELECT HOST, SERVICE_NAME, PORT, ACTIVE_STATUS FROM SYS.M_SERVICES ORDER BY SERVICE_NAME;" 2>&1`, addr),
+			ReadOnly:    true,
+			Parameters:  map[string]any{"target": targetParam()},
+		},
+		"services": {
+			Name:        "services",
+			Description: "SAP HANA 메모리 및 CPU 사용량 조회.",
+			Command:     fmt.Sprintf(`hdbsql -n %s -u {{username}} -p {{password}} "SELECT SERVICE_NAME, ROUND(PROCESS_MEMORY_USED/1024/1024,0) AS MEM_MB, ROUND(PROCESS_CPU/100.0,1) AS CPU_PCT FROM SYS.M_SERVICE_RESOURCE_UTILIZATION ORDER BY MEM_MB DESC;" 2>&1`, addr),
+			ReadOnly:    true,
+			Parameters:  map[string]any{"target": targetParam()},
+		},
+	}
+}
+
+func synthesizeSybaseCommands(req ActivationRequest, _ []ActivationEvidence) map[string]LearnedCommand {
+	server := defaultIfEmpty(req.Host, req.ServerName)
+	schemaCheck := fmt.Sprintf(
+		"isql -S %s -U {{username}} -P {{password}} -w 512 -e <<'EOSQL'\nSELECT c.name, t.name FROM syscolumns c JOIN systypes t ON c.usertype=t.usertype JOIN sysobjects o ON c.id=o.id WHERE o.name='{{table_name}}' ORDER BY c.colid\ngo\nEOSQL",
+		server,
+	)
+	return map[string]LearnedCommand{
+		"query": {
+			Name:               "query",
+			Description:        "Sybase ASE SQL 실행 (isql). SELECT/DML 모두 가능.",
+			Command:            fmt.Sprintf("isql -S %s -U {{username}} -P {{password}} -w 512 -e <<'EOSQL'\n{{raw:sql}}\ngo\nEOSQL", server),
+			ReadOnly:           false,
+			IsSQLQuery:         true,
+			SchemaCheckCommand: schemaCheck,
+			Parameters: map[string]any{
+				"sql":    map[string]any{"type": "string", "description": "실행할 SQL 문"},
+				"target": targetParam(),
+			},
+			Required: []string{"sql"},
+		},
+		"status": {
+			Name:        "status",
+			Description: "Sybase ASE 버전 및 서버 상태 확인.",
+			Command:     fmt.Sprintf("isql -S %s -U {{username}} -P {{password}} -w 512 -e <<'EOSQL'\nselect @@version\ngo\nselect name, dbid from sysdatabases order by name\ngo\nEOSQL", server),
+			ReadOnly:    true,
+			Parameters:  map[string]any{"target": targetParam()},
+		},
+		"processlist": {
+			Name:        "processlist",
+			Description: "Sybase ASE 활성 프로세스 목록 조회 (sp_who).",
+			Command:     fmt.Sprintf("isql -S %s -U {{username}} -P {{password}} -w 512 -e <<'EOSQL'\nexec sp_who\ngo\nEOSQL", server),
+			ReadOnly:    true,
+			Parameters:  map[string]any{"target": targetParam()},
 		},
 	}
 }

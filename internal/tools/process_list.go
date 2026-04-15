@@ -42,8 +42,6 @@ func (t *ProcessListTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *ProcessListTool) RiskLevel() RiskLevel { return RiskNone }
-
 func (t *ProcessListTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 	filter, _ := argString(args, "filter", false)
 

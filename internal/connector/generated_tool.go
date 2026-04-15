@@ -1,7 +1,7 @@
 // Package connector
 // File: generated_tool.go
-// Description: 구조화된 결과를 반환하는 synthesized tool 구현
-// Responsibility: profile synthesis 결과를 ToolResult까지 보존
+// Description: 자동 생성된 커넥터 도구 래퍼
+// Responsibility: LLM이 생성하거나 가공한 도구를 커넥터 상태와 연동하여 래핑
 
 package connector
 
@@ -9,34 +9,30 @@ import (
 	"context"
 
 	"github.com/yourorg/infractl/internal/executor"
-	"github.com/yourorg/infractl/internal/tools"
 )
 
-// GeneratedTool은 profile synthesis가 만든 tool이다.
+// GeneratedTool은 커넥터에서 생성된 도구를 래핑한다.
 type GeneratedTool struct {
 	name        string
 	description string
 	params      map[string]interface{}
-	riskLevel   tools.RiskLevel
 	readOnly    bool
 	status      *ConnectorStatus
-	executeFn   func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (tools.ToolResult, error)
+	executeFn   func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error)
 }
 
-// NewGeneratedTool은 structured result를 반환하는 tool을 생성한다.
+// NewGeneratedTool은 GeneratedTool을 생성한다.
 func NewGeneratedTool(
 	name, description string,
 	params map[string]interface{},
-	riskLevel tools.RiskLevel,
 	readOnly bool,
 	status *ConnectorStatus,
-	executeFn func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (tools.ToolResult, error),
+	executeFn func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error),
 ) *GeneratedTool {
 	return &GeneratedTool{
 		name:        name,
 		description: description,
 		params:      params,
-		riskLevel:   riskLevel,
 		readOnly:    readOnly,
 		status:      status,
 		executeFn:   executeFn,
@@ -46,7 +42,6 @@ func NewGeneratedTool(
 func (t *GeneratedTool) Name() string                       { return t.name }
 func (t *GeneratedTool) Description() string                { return t.description }
 func (t *GeneratedTool) Parameters() map[string]interface{} { return t.params }
-func (t *GeneratedTool) RiskLevel() tools.RiskLevel         { return t.riskLevel }
 func (t *GeneratedTool) IsReadOnly() bool                   { return t.readOnly }
 
 func (t *GeneratedTool) IsEnabled() bool {
@@ -57,13 +52,5 @@ func (t *GeneratedTool) IsEnabled() bool {
 }
 
 func (t *GeneratedTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
-	result, err := t.ExecuteResult(ctx, args, exec)
-	if err != nil {
-		return "", err
-	}
-	return result.DisplayString(), nil
-}
-
-func (t *GeneratedTool) ExecuteResult(ctx context.Context, args map[string]interface{}, exec executor.Executor) (tools.ToolResult, error) {
 	return t.executeFn(ctx, args, exec)
 }

@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yourorg/infractl/internal/executor"
@@ -28,21 +29,96 @@ func NewScanner() *Scanner {
 	return &Scanner{patterns: BuiltinPatterns}
 }
 
-// Scan runs discovery on the supplied executor target.
+// Scan runs discovery on the supplied executor target in parallel.
 func (s *Scanner) Scan(ctx context.Context, exec executor.Executor) (*ScanResult, error) {
 	serverName := exec.Target()
-	slog.Info("starting service scan", "server", serverName)
+	slog.Info("starting parallel service scan", "server", serverName)
 
-	processes, err := s.scanProcesses(ctx, exec)
-	if err != nil {
-		slog.Warn("process scan failed", "server", serverName, "err", err)
-		processes = nil
+	var (
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		processes []processInfo
+		ports     []portInfo
+		others    []DiscoveredService
+		errs      []error
+	)
+
+	// Task 1: Processes
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		slog.Info("task_start", "task", "processes")
+		start := time.Now()
+		p, err := s.scanProcesses(ctx, exec)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("process scan: %w", err))
+			slog.Info("task_fail", "task", "processes", "dur", time.Since(start))
+		} else {
+			processes = p
+			slog.Info("task_done", "task", "processes", "dur", time.Since(start), "count", len(p))
+		}
+	}()
+
+	// Task 2: Ports
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		slog.Info("task_start", "task", "ports")
+		start := time.Now()
+		p, err := s.scanPorts(ctx, exec)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("port scan: %w", err))
+			slog.Info("task_fail", "task", "ports", "dur", time.Since(start))
+		} else {
+			ports = p
+			slog.Info("task_done", "task", "ports", "dur", time.Since(start), "count", len(p))
+		}
+	}()
+
+	// Task 3: Systemd (Unix only)
+	if executor.CommandPlatform(exec) != executor.PlatformWindows {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			slog.Info("task_start", "task", "systemd")
+			start := time.Now()
+			svc, err := s.scanSystemd(ctx, exec)
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil && len(svc) > 0 {
+				others = append(others, svc...)
+				slog.Info("task_done", "task", "systemd", "dur", time.Since(start), "count", len(svc))
+			} else {
+				slog.Info("task_done", "task", "systemd", "dur", time.Since(start), "count", 0)
+			}
+		}()
+
+		// Task 4: Docker (Unix only)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			slog.Info("task_start", "task", "docker")
+			start := time.Now()
+			svc, err := s.scanDocker(ctx, exec)
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil && len(svc) > 0 {
+				others = append(others, svc...)
+				slog.Info("task_done", "task", "docker", "dur", time.Since(start), "count", len(svc))
+			} else {
+				slog.Info("task_done", "task", "docker", "dur", time.Since(start), "count", 0)
+			}
+		}()
 	}
 
-	ports, err := s.scanPorts(ctx, exec)
-	if err != nil {
-		slog.Warn("port scan failed", "server", serverName, "err", err)
-		ports = nil
+	wg.Wait()
+
+	if len(errs) > 0 {
+		slog.Warn("some scan tasks failed", "server", serverName, "errors", errs)
 	}
 
 	result := &ScanResult{
@@ -50,6 +126,7 @@ func (s *Scanner) Scan(ctx context.Context, exec executor.Executor) (*ScanResult
 		ScannedAt:  time.Now(),
 	}
 
+	// Pattern matching from processes & ports
 	for _, pattern := range s.patterns {
 		svc := s.matchPattern(ctx, exec, pattern, processes, ports)
 		if svc == nil {
@@ -59,11 +136,77 @@ func (s *Scanner) Scan(ctx context.Context, exec executor.Executor) (*ScanResult
 		result.Services = append(result.Services, *svc)
 	}
 
+	// Add services found via other methods (systemd, docker)
+	for i := range others {
+		others[i].ServerName = serverName
+		result.Services = append(result.Services, others[i])
+	}
+
 	unknowns := s.findUnknown(processes, result.Services)
 	result.Services = append(result.Services, unknowns...)
 
 	slog.Info("scan complete", "server", serverName, "found", len(result.Services))
 	return result, nil
+}
+
+func (s *Scanner) scanSystemd(ctx context.Context, exec executor.Executor) ([]DiscoveredService, error) {
+	// Only list running services to avoid noise
+	res, err := exec.Execute(ctx, "systemctl list-units --type=service --state=running --no-pager --no-legend 2>/dev/null")
+	if err != nil || res.ExitCode != 0 {
+		return nil, err
+	}
+
+	var services []DiscoveredService
+	lines := strings.Split(res.Stdout, "\n")
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		// fields: [UNIT, LOAD, ACTIVE, SUB, DESCRIPTION...]
+		name := strings.TrimSuffix(fields[0], ".service")
+		services = append(services, DiscoveredService{
+			Type:       ServiceSystemd,
+			Name:       name,
+			Confidence: 0.8,
+			Level:      ConfidenceHigh,
+			Details: map[string]string{
+				"status":      fields[3],
+				"description": strings.Join(fields[4:], " "),
+			},
+		})
+	}
+	return services, nil
+}
+
+func (s *Scanner) scanDocker(ctx context.Context, exec executor.Executor) ([]DiscoveredService, error) {
+	// List running containers
+	res, err := exec.Execute(ctx, "docker ps --format '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null")
+	if err != nil || res.ExitCode != 0 {
+		return nil, err
+	}
+
+	var services []DiscoveredService
+	lines := strings.Split(res.Stdout, "\n")
+	for _, line := range lines {
+		fields := strings.Split(line, "\t")
+		if len(fields) < 4 {
+			continue
+		}
+		services = append(services, DiscoveredService{
+			Type:       ServiceDocker,
+			Name:       fields[1],
+			Confidence: 0.9,
+			Level:      ConfidenceHigh,
+			Details: map[string]string{
+				"container_id": fields[0],
+				"image":        fields[2],
+				"status":       fields[3],
+				"ports":        fields[4],
+			},
+		})
+	}
+	return services, nil
 }
 
 type processInfo struct {
@@ -320,6 +463,172 @@ func (s *Scanner) findUnknown(procs []processInfo, known []DiscoveredService) []
 		})
 	}
 	return unknowns
+}
+
+// ScanWeb runs web-specific discovery (servers, SSL, vhosts) in parallel.
+func (s *Scanner) ScanWeb(ctx context.Context, exec executor.Executor) (*ScanResult, error) {
+	serverName := exec.Target()
+	slog.Info("starting parallel web server scan", "server", serverName)
+
+	var (
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		processes []processInfo
+		ports     []portInfo
+		others    []DiscoveredService
+		errs      []error
+	)
+
+	// Task 1: Web Processes (Shared logic)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		slog.Info("task_start", "task", "web_servers")
+		start := time.Now()
+		p, err := s.scanProcesses(ctx, exec)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			errs = append(errs, err)
+			slog.Info("task_fail", "task", "web_servers", "dur", time.Since(start))
+		} else {
+			processes = p
+			slog.Info("task_done", "task", "web_servers", "dur", time.Since(start), "count", len(p))
+		}
+	}()
+
+	// Task 2: Web Ports
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		slog.Info("task_start", "task", "web_ports")
+		start := time.Now()
+		p, err := s.scanPorts(ctx, exec)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			errs = append(errs, err)
+			slog.Info("task_fail", "task", "web_ports", "dur", time.Since(start))
+		} else {
+			ports = p
+			slog.Info("task_done", "task", "web_ports", "dur", time.Since(start), "count", len(p))
+		}
+	}()
+
+	// Task 3: SSL Certificates
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		slog.Info("task_start", "task", "ssl_certs")
+		start := time.Now()
+		svc, err := s.scanSSL(ctx, exec)
+		mu.Lock()
+		defer mu.Unlock()
+		if err == nil && len(svc) > 0 {
+			others = append(others, svc...)
+		}
+		slog.Info("task_done", "task", "ssl_certs", "dur", time.Since(start), "count", len(svc))
+	}()
+
+	// Task 4: Virtual Hosts
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		slog.Info("task_start", "task", "vhosts")
+		start := time.Now()
+		svc, err := s.scanVHosts(ctx, exec)
+		mu.Lock()
+		defer mu.Unlock()
+		if err == nil && len(svc) > 0 {
+			others = append(others, svc...)
+		}
+		slog.Info("task_done", "task", "vhosts", "dur", time.Since(start), "count", len(svc))
+	}()
+
+	wg.Wait()
+
+	result := &ScanResult{
+		ServerName: serverName,
+		ScannedAt:  time.Now(),
+	}
+
+	// Match web patterns
+	webPatterns := []ServiceType{ServiceNginx, ServiceApache, ServiceHAProxy, ServiceTraefik}
+	for _, pattern := range s.patterns {
+		isWeb := false
+		for _, wt := range webPatterns {
+			if pattern.Type == wt {
+				isWeb = true
+				break
+			}
+		}
+		if !isWeb {
+			continue
+		}
+
+		svc := s.matchPattern(ctx, exec, pattern, processes, ports)
+		if svc != nil {
+			svc.ServerName = serverName
+			result.Services = append(result.Services, *svc)
+		}
+	}
+
+	// Add SSL & VHosts
+	for i := range others {
+		others[i].ServerName = serverName
+		result.Services = append(result.Services, others[i])
+	}
+
+	return result, nil
+}
+
+func (s *Scanner) scanSSL(ctx context.Context, exec executor.Executor) ([]DiscoveredService, error) {
+	// Look for common SSL certificate paths and certbot artifacts
+	res, err := exec.Execute(ctx, "ls /etc/letsencrypt/live/ 2>/dev/null || find /etc/ssl/certs -maxdepth 1 -type f 2>/dev/null | head -n 5")
+	if err != nil || res.ExitCode != 0 {
+		return nil, nil
+	}
+
+	var svcs []DiscoveredService
+	lines := strings.Split(res.Stdout, "\n")
+	for _, line := range lines {
+		name := strings.TrimSpace(line)
+		if name == "" {
+			continue
+		}
+		svcs = append(svcs, DiscoveredService{
+			Type:       ServiceSSL,
+			Name:       name,
+			Confidence: 0.7,
+			Level:      ConfidenceMedium,
+			Details:    map[string]string{"path": "/etc/letsencrypt/live/" + name},
+		})
+	}
+	return svcs, nil
+}
+
+func (s *Scanner) scanVHosts(ctx context.Context, exec executor.Executor) ([]DiscoveredService, error) {
+	// Check for nginx sites-enabled or apache conf-enabled
+	res, err := exec.Execute(ctx, "ls /etc/nginx/sites-enabled/ 2>/dev/null || ls /etc/httpd/conf.d/ 2>/dev/null")
+	if err != nil || res.ExitCode != 0 {
+		return nil, nil
+	}
+
+	var svcs []DiscoveredService
+	lines := strings.Split(res.Stdout, "\n")
+	for _, line := range lines {
+		name := strings.TrimSpace(line)
+		if name == "" || name == "default" {
+			continue
+		}
+		svcs = append(svcs, DiscoveredService{
+			Type:       ServiceVHost,
+			Name:       name,
+			Confidence: 0.6,
+			Level:      ConfidenceMedium,
+		})
+	}
+	return svcs, nil
 }
 
 func truncate(s string, maxLen int) string {

@@ -9,7 +9,6 @@ import (
 	"context"
 
 	"github.com/yourorg/infractl/internal/executor"
-	"github.com/yourorg/infractl/internal/tools"
 )
 
 // ConnectorTool은 커넥터가 생성하는 도구의 공통 구현체이다.
@@ -18,9 +17,9 @@ type ConnectorTool struct {
 	name        string
 	description string
 	params      map[string]interface{}
-	riskLevel   tools.RiskLevel
 	readOnly    bool
 	status      *ConnectorStatus
+	OutputCb    func(string)
 	executeFn   func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error)
 }
 
@@ -29,7 +28,6 @@ type ConnectorTool struct {
 func NewConnectorTool(
 	name, description string,
 	params map[string]interface{},
-	riskLevel tools.RiskLevel,
 	readOnly bool,
 	status *ConnectorStatus,
 	executeFn func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error),
@@ -38,7 +36,6 @@ func NewConnectorTool(
 		name:        name,
 		description: description,
 		params:      params,
-		riskLevel:   riskLevel,
 		readOnly:    readOnly,
 		status:      status,
 		executeFn:   executeFn,
@@ -48,7 +45,6 @@ func NewConnectorTool(
 func (t *ConnectorTool) Name() string                       { return t.name }
 func (t *ConnectorTool) Description() string                { return t.description }
 func (t *ConnectorTool) Parameters() map[string]interface{} { return t.params }
-func (t *ConnectorTool) RiskLevel() tools.RiskLevel         { return t.riskLevel }
 func (t *ConnectorTool) IsReadOnly() bool                   { return t.readOnly }
 
 // IsEnabled는 커넥터가 connected 상태일 때만 true를 반환한다.
@@ -59,8 +55,15 @@ func (t *ConnectorTool) IsEnabled() bool {
 	return *t.status == StatusConnected
 }
 
+// SetOutputCb는 실시간 출력을 위한 콜백을 설정한다.
+func (t *ConnectorTool) SetOutputCb(cb func(string)) {
+	t.OutputCb = cb
+}
+
 // Execute는 executeFn을 호출한다.
 func (t *ConnectorTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
+	// executeFn 내부에서 t.OutputCb 등에 접근할 수 있도록 컨텍스트에 주입
+	ctx = context.WithValue(ctx, "tool", t)
 	return t.executeFn(ctx, args, exec)
 }
 

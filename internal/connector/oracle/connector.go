@@ -1,6 +1,6 @@
 // Package oracle
 // File: connector.go
-// Description: Oracle DB 커넥터 — sqlplus 기반 6개 도구 세트 생성
+// Description: Oracle DB 커넥터 — sqlplus 기반 도구 세트 생성
 // Responsibility: Oracle 접속 테스트 및 query/tablespace/sessions/locks/alert_log/top_sql 도구 생성
 
 package oracle
@@ -13,7 +13,6 @@ import (
 	conn "github.com/yourorg/infractl/internal/connector"
 	"github.com/yourorg/infractl/internal/executor"
 	"github.com/yourorg/infractl/internal/pipeline"
-	"github.com/yourorg/infractl/internal/safety"
 	"github.com/yourorg/infractl/internal/tools"
 )
 
@@ -35,6 +34,7 @@ func (c *OracleConnector) Status() conn.ConnectorStatus { return c.status }
 func (c *OracleConnector) ToolNames() []string          { return c.names }
 
 // GenerateTools는 Oracle 접속 정보로 6개 도구를 생성한다.
+// info.SubInstance가 있으면 PDB 전용 커넥터로 동작한다.
 func (c *OracleConnector) GenerateTools(info conn.ServiceInfo, creds conn.Credentials) []tools.Tool {
 	c.info = info
 	c.creds = creds
@@ -44,10 +44,16 @@ func (c *OracleConnector) GenerateTools(info conn.ServiceInfo, creds conn.Creden
 	if sid == "" {
 		sid = "ORCL"
 	}
+	pdb := info.SubInstance
+
+	// PDB가 있으면 도구 이름에 PDB명 포함 (예: oracle_cdbprod_hrpdb)
 	prefix := fmt.Sprintf("oracle_%s", strings.ToLower(sid))
+	if pdb != "" {
+		prefix = fmt.Sprintf("oracle_%s_%s", strings.ToLower(sid), strings.ToLower(pdb))
+	}
 
 	connStr := buildConnStr(creds.Username, creds.Password, creds.Role,
-		info.Details["host"], info.Port, sid, creds.OSAuth)
+		info.Details["host"], info.Port, sid, pdb, creds.OSAuth)
 
 	oracleHome := info.Details["oracle_home"]
 
@@ -67,68 +73,45 @@ func (c *OracleConnector) GenerateTools(info conn.ServiceInfo, creds conn.Creden
 	return toolList
 }
 
+// execWithStream은 컨텍스트에서 ConnectorTool을 찾아 실시간 출력을 지원하며 명령을 실행한다.
+func execWithStream(ctx context.Context, exec executor.Executor, cmd string) (executor.ExecResult, error) {
+	if ct, ok := ctx.Value("tool").(*conn.ConnectorTool); ok && ct.OutputCb != nil {
+		if se, ok := exec.(executor.StreamExecutor); ok {
+			return se.ExecuteStream(ctx, cmd, ct.OutputCb)
+		}
+	}
+	return exec.Execute(ctx, cmd)
+}
+
 func (c *OracleConnector) makeQueryTool(prefix, connStr string) tools.Tool {
 	return conn.NewConnectorTool(
 		prefix+".query",
-		fmt.Sprintf("Oracle(%s) SQL 실행. SELECT/DML 모두 가능. 결과를 텍스트로 반환.", prefix),
+		fmt.Sprintf("Oracle(%s) SQL 실행. SELECT/DML 모두 가능. 결과를 텍스트로 반환.\n"+
+			"주의: v$pdbs, v$containers, CON_ID, CON_NAME 컬럼은 12c+ CDB 환경에서만 존재함.\n"+
+			"버전/CDB 여부 확인: SELECT version FROM v$instance; SELECT cdb FROM v$database;\n"+
+			"non-CDB에서 PDB 조회 시도 금지 — ORA-00904 발생함.", prefix),
 		map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"sql":    map[string]interface{}{"type": "string", "description": "실행할 SQL 문"},
 				"target": targetParam(),
-				"skip_backup": map[string]interface{}{
-					"type":        "boolean",
-					"description": "true이면 사전 백업을 건너뜁니다. 공간 부족 등 백업 불가 확인 후에만 사용.",
-				},
 			},
 			"required": []string{"sql"},
 		},
-		tools.RiskLow, false, &c.status,
+		false, &c.status,
 		func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 			sql, _ := args["sql"].(string)
 			if sql == "" {
 				return "sql 인자가 필요합니다", nil
 			}
-			skipBackup, _ := args["skip_backup"].(bool)
-
-			classification := safety.ClassifySQL(sql)
-
-			if classification.RequiresBackup && !skipBackup && classification.TableName != "" {
-				// 1. 공간 사전 확인
-				spaceSQL := safety.SpaceCheckSQL("oracle", classification.TableName)
-				if spaceSQL != "" {
-					spaceRes, spaceErr := exec.Execute(ctx, buildSQLPlusCmd(connStr, spaceSQL))
-					if spaceErr == nil {
-						if tableSize, freeSize, ok := safety.ParseSpaceCheckResult(spaceRes.Stdout); ok {
-							if freeSize < tableSize*1.2 {
-								return fmt.Sprintf(
-									"⚠️ 백업 공간 부족 (테이블: %.0fMB, 가용: %.0fMB).\n"+
-										"백업 없이 진행하려면 skip_backup=true 로 재요청하세요.", tableSize, freeSize), nil
-							}
-						}
-					}
-				}
-				// 2. 백업 실행
-				bakRes, bakErr := exec.Execute(ctx, buildSQLPlusCmd(connStr, classification.BackupSQL))
-				if bakErr != nil || bakRes.ExitCode != 0 {
-					errOut := bakRes.Stderr
-					if bakErr != nil {
-						errOut = bakErr.Error()
-					}
-					return fmt.Sprintf("백업 실패 → 작업 중단:\n%s", errOut), nil
-				}
-			}
 
 			cmd := buildSQLPlusCmd(connStr, sql)
-			res, err := exec.Execute(ctx, cmd)
+			res, err := execWithStream(ctx, exec, cmd)
 			if err != nil {
 				return fmt.Sprintf("실행 오류: %s", err), nil
 			}
-			result := formatOutput(res.Stdout, res.Stderr, res.ExitCode)
-			if classification.RequiresBackup && !skipBackup && classification.BackupTable != "" {
-				result = fmt.Sprintf("[백업: %s]\n%s", classification.BackupTable, result)
-			}
-			return result, nil
+			output := formatOutput(res.Stdout, res.Stderr, res.ExitCode)
+			return validateAndEnrich(ctx, connStr, sql, output, exec), nil
 		},
 	)
 }
@@ -141,10 +124,10 @@ func (c *OracleConnector) makeTablespaceTool(prefix, connStr string) tools.Tool 
 			"type":       "object",
 			"properties": map[string]interface{}{"target": targetParam()},
 		},
-		tools.RiskNone, true, &c.status,
+		true, &c.status,
 		func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 			cmd := buildSQLPlusCmd(connStr, tablespaceQuery)
-			res, err := exec.Execute(ctx, cmd)
+			res, err := execWithStream(ctx, exec, cmd)
 			if err != nil {
 				return fmt.Sprintf("실행 오류: %s", err), nil
 			}
@@ -161,10 +144,10 @@ func (c *OracleConnector) makeSessionsTool(prefix, connStr string) tools.Tool {
 			"type":       "object",
 			"properties": map[string]interface{}{"target": targetParam()},
 		},
-		tools.RiskNone, true, &c.status,
+		true, &c.status,
 		func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 			cmd := buildSQLPlusCmd(connStr, sessionsQuery)
-			res, err := exec.Execute(ctx, cmd)
+			res, err := execWithStream(ctx, exec, cmd)
 			if err != nil {
 				return fmt.Sprintf("실행 오류: %s", err), nil
 			}
@@ -181,10 +164,10 @@ func (c *OracleConnector) makeLocksTool(prefix, connStr string) tools.Tool {
 			"type":       "object",
 			"properties": map[string]interface{}{"target": targetParam()},
 		},
-		tools.RiskNone, true, &c.status,
+		true, &c.status,
 		func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 			cmd := buildSQLPlusCmd(connStr, locksQuery)
-			res, err := exec.Execute(ctx, cmd)
+			res, err := execWithStream(ctx, exec, cmd)
 			if err != nil {
 				return fmt.Sprintf("실행 오류: %s", err), nil
 			}
@@ -204,7 +187,7 @@ func (c *OracleConnector) makeAlertLogTool(prefix, oracleHome, sid string) tools
 				"target": targetParam(),
 			},
 		},
-		tools.RiskNone, true, &c.status,
+		true, &c.status,
 		func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 			lines := 50
 			if v, ok := args["lines"].(float64); ok {
@@ -215,7 +198,7 @@ func (c *OracleConnector) makeAlertLogTool(prefix, oracleHome, sid string) tools
 				home = "/u01/app/oracle/product"
 			}
 			cmd := alertLogCmd(home, sid, lines)
-			res, err := exec.Execute(ctx, cmd)
+			res, err := execWithStream(ctx, exec, cmd)
 			if err != nil {
 				return fmt.Sprintf("실행 오류: %s", err), nil
 			}
@@ -232,10 +215,10 @@ func (c *OracleConnector) makeTopSQLTool(prefix, connStr string) tools.Tool {
 			"type":       "object",
 			"properties": map[string]interface{}{"target": targetParam()},
 		},
-		tools.RiskNone, true, &c.status,
+		true, &c.status,
 		func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 			cmd := buildSQLPlusCmd(connStr, topSQLQuery)
-			res, err := exec.Execute(ctx, cmd)
+			res, err := execWithStream(ctx, exec, cmd)
 			if err != nil {
 				return fmt.Sprintf("실행 오류: %s", err), nil
 			}
@@ -257,7 +240,11 @@ func (c *OracleConnector) ProbeOSAuth(ctx context.Context, info conn.ServiceInfo
 		return conn.Credentials{}, fmt.Errorf("os auth probe: %w", err)
 	}
 	if !strings.Contains(res.Stdout, "OS_AUTH_OK") {
-		return conn.Credentials{}, fmt.Errorf("OS 인증 실패 (SID=%s): sqlplus 접속 불가", sid)
+		detail := strings.TrimSpace(res.Stdout + "\n" + res.Stderr)
+		if detail == "" {
+			detail = "(출력 없음)"
+		}
+		return conn.Credentials{}, fmt.Errorf("OS 인증 실패 (SID=%s, exit=%d): %s", sid, res.ExitCode, detail)
 	}
 	return conn.Credentials{Username: "/", Role: "sysdba", OSAuth: true}, nil
 }

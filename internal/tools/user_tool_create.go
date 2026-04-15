@@ -18,10 +18,9 @@ type UserToolCreateTool struct {
 	Manager *UserToolManager
 }
 
-func (t *UserToolCreateTool) Name() string         { return "user_tool_create" }
-func (t *UserToolCreateTool) RiskLevel() RiskLevel { return RiskLow }
-func (t *UserToolCreateTool) IsReadOnly() bool     { return false }
-func (t *UserToolCreateTool) IsEnabled() bool      { return t.Manager != nil }
+func (t *UserToolCreateTool) Name() string     { return "user_tool_create" }
+func (t *UserToolCreateTool) IsReadOnly() bool { return false }
+func (t *UserToolCreateTool) IsEnabled() bool  { return t.Manager != nil }
 
 func (t *UserToolCreateTool) Description() string {
 	return "Create a custom reusable tool from a bash script. " +
@@ -45,11 +44,6 @@ func (t *UserToolCreateTool) Parameters() map[string]interface{} {
 				"type":        "string",
 				"description": "Bash script content. Read INFRACTL_ARGS_B64 env var for base64-encoded JSON args.",
 			},
-			"risk_level": map[string]interface{}{
-				"type":        "string",
-				"enum":        []string{"none", "low", "medium", "high"},
-				"description": "Risk level: none=read-only, low=modification, medium=deletion, high=destructive",
-			},
 			"parameters": map[string]interface{}{
 				"type":        "string",
 				"description": "Optional JSON Schema for tool parameters",
@@ -72,10 +66,6 @@ func (t *UserToolCreateTool) Execute(ctx context.Context, args map[string]interf
 	if err != nil {
 		return "", err
 	}
-	riskLevel, _ := argString(args, "risk_level", false)
-	if riskLevel == "" {
-		riskLevel = "low"
-	}
 	parameters, _ := argString(args, "parameters", false)
 	if parameters == "" {
 		parameters = "{}"
@@ -84,7 +74,6 @@ func (t *UserToolCreateTool) Execute(ctx context.Context, args map[string]interf
 	entry := store.UserToolEntry{
 		Name:        name,
 		Description: desc,
-		RiskLevel:   riskLevel,
 		Parameters:  parameters,
 	}
 
@@ -93,6 +82,6 @@ func (t *UserToolCreateTool) Execute(ctx context.Context, args map[string]interf
 		return "", fmt.Errorf("create tool: %w", err)
 	}
 
-	return fmt.Sprintf("✓ 도구 '%s' 생성 완료 (ID: %d)\n설명: %s\n위험도: %s\n\n이제 이 도구를 바로 사용할 수 있습니다.",
-		name, id, desc, riskLevel), nil
+	return fmt.Sprintf("✓ 도구 '%s' 생성 완료 (ID: %d)\n설명: %s\n\n이제 이 도구를 바로 사용할 수 있습니다.",
+		name, id, desc), nil
 }

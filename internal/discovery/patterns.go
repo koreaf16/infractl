@@ -62,6 +62,30 @@ var BuiltinPatterns = []ServicePattern{
 		DefaultPorts: []int{9090, 9099},
 		ConfigFiles:  []string{"/etc/prometheus/prometheus.yml"},
 	},
+	{
+		Type:         ServiceNginx,
+		ProcessRegex: `nginx:\s+master`,
+		DefaultPorts: []int{80, 443},
+		ConfigFiles:  []string{"/etc/nginx/nginx.conf", "/usr/local/nginx/conf/nginx.conf"},
+	},
+	{
+		Type:         ServiceApache,
+		ProcessRegex: `(?i)httpd|apache2`,
+		DefaultPorts: []int{80, 443},
+		ConfigFiles:  []string{"/etc/httpd/conf/httpd.conf", "/etc/apache2/apache2.conf"},
+	},
+	{
+		Type:         ServiceHAProxy,
+		ProcessRegex: `haproxy\b`,
+		DefaultPorts: []int{80, 443, 1080, 1936},
+		ConfigFiles:  []string{"/etc/haproxy/haproxy.cfg"},
+	},
+	{
+		Type:         ServiceTraefik,
+		ProcessRegex: `traefik\b`,
+		DefaultPorts: []int{80, 443, 8080},
+		ConfigFiles:  []string{"/etc/traefik/traefik.yml", "/etc/traefik/traefik.toml"},
+	},
 }
 
 // ConfidenceWeights는 각 증거 유형의 확신도 가중치이다.

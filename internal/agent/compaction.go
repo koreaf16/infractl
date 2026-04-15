@@ -92,23 +92,31 @@ func (a *Agent) checkTokenState() TokenState {
 	}
 }
 
-// compactIfNeeded는 토큰 상태가 critical 이상이면 히스토리를 압축한다.
-// circuit breaker로 연속 실패를 방지하고, partial compaction으로 최근 맥락을 보존한다.
+// compactIfNeeded는 토큰 상태 및 라운드 수에 따라 히스토리를 압축한다.
+//
+// 2단계 압축 전략:
+//   - Mild (라운드 > mildCompactionThreshold): SessionSummaryManager가 증분 요약 수행
+//   - Aggressive (토큰 87%+): 기존 전체 재요약 compaction 실행
 func (a *Agent) compactIfNeeded(ctx context.Context) {
+	// Mild compaction: 라운드 수 기반 프로그레시브 요약
+	if a.sessionSummary != nil {
+		a.sessionSummary.UpdateIfNeeded(ctx, a.history)
+	}
+
 	state := a.checkTokenState()
 	if state != TokenCritical && state != TokenOverflow {
 		if state == TokenWarning {
-			slog.Warn("context token usage above 80%, compaction may be needed soon",
+			slog.Warn("context token usage above 75%, mild compaction may have helped",
 				"history_tokens", estimateTokens(a.history),
 				"system_tokens", a.lastSystemPromptLen/avgCharsPerToken)
 		}
 		return
 	}
 
-	// Circuit breaker: 연속 실패가 임계값 이상이면 compaction 중단
-	if a.compactFailures >= maxConsecutiveCompactFailures {
+	// Circuit breaker: 연속 실패가 임계값 이상이면 compaction 중단 (자동 리셋 포함)
+	if a.compactBreaker.IsOpen() {
 		slog.Warn("compaction circuit breaker active: falling back to trimHistory",
-			"consecutive_failures", a.compactFailures)
+			"consecutive_failures", a.compactBreaker.Failures())
 		a.trimHistory()
 		return
 	}
@@ -116,22 +124,22 @@ func (a *Agent) compactIfNeeded(ctx context.Context) {
 	slog.Info("compacting conversation history",
 		"state", string(state),
 		"history_len", len(a.history),
-		"consecutive_failures", a.compactFailures)
+		"consecutive_failures", a.compactBreaker.Failures())
 
 	toCompact, toKeep := partitionHistoryForCompaction(a.history)
 
 	summary, err := a.requestCompactionSummaryFor(ctx, toCompact)
 	if err != nil {
-		a.compactFailures++
+		a.compactBreaker.RecordFailure()
 		slog.Warn("compaction failed",
 			"err", err,
-			"consecutive_failures", a.compactFailures)
+			"consecutive_failures", a.compactBreaker.Failures())
 		a.trimHistory()
 		return
 	}
 
 	// 성공: circuit breaker 리셋
-	a.compactFailures = 0
+	a.compactBreaker.RecordSuccess()
 
 	// [요약 user][ack assistant] + [최근 N라운드 원문]
 	summaryMsg := llm.Message{
@@ -186,7 +194,7 @@ func (a *Agent) requestCompactionSummaryFor(ctx context.Context, messages []llm.
 			return summary, nil
 		}
 
-		if !isPTLError(err) {
+		if !llm.IsPTLError(err) {
 			return "", fmt.Errorf("compaction request: %w", err)
 		}
 
@@ -220,7 +228,7 @@ func (a *Agent) doCompactionRequest(ctx context.Context, messages []llm.Message)
 	}
 	apiMessages := append([]llm.Message{systemMsg}, summaryMessages...)
 
-	resp, err := a.llmClient.ChatStream(ctx, apiMessages, nil,
+	resp, err := a.llmClient.ChatStream(ctx, apiMessages, nil, nil,
 		func(string) {}, // thinking 무시
 		func(string) {}, // 스트리밍 무시 (최종 결과만 사용)
 	)
@@ -234,14 +242,7 @@ func (a *Agent) doCompactionRequest(ctx context.Context, messages []llm.Message)
 	return formatCompactSummary(resp.Content), nil
 }
 
-// isPTLError는 에러가 prompt-too-long(컨텍스트 길이 초과) 에러인지 판별한다.
-func isPTLError(err error) bool {
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "prompt_too_long") ||
-		strings.Contains(msg, "context_length_exceeded") ||
-		strings.Contains(msg, "maximum context length") ||
-		strings.Contains(msg, "too many tokens")
-}
+// isPTLError는 llm.IsPTLError로 대체됨 — 호환성을 위한 래퍼는 제거됨
 
 // estimateTokens는 메시지 목록의 토큰 수를 문자 수 기반으로 추정한다.
 func estimateTokens(messages []llm.Message) int {

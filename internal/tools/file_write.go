@@ -58,8 +58,6 @@ func (t *FileWriteTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *FileWriteTool) RiskLevel() RiskLevel { return RiskLow }
-
 func (t *FileWriteTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 	path, err := argString(args, "path", true)
 	if err != nil {

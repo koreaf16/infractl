@@ -13,6 +13,7 @@ const (
 	footerBusy
 	footerSelection
 	footerSecretPrompt
+	footerForm
 )
 
 func renderFooter(state footerState, width int) string {
@@ -37,6 +38,13 @@ func footerHints(state footerState) []string {
 	case footerSecretPrompt:
 		return []string{
 			hintKey("Enter") + " submit password",
+			hintKey("Esc") + " cancel",
+		}
+	case footerForm:
+		return []string{
+			hintKey("Tab") + " next field",
+			hintKey("Shift+Tab") + " prev field",
+			hintKey("Enter") + " submit",
 			hintKey("Esc") + " cancel",
 		}
 	default:

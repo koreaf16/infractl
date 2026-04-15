@@ -200,6 +200,15 @@ func (w WrappedExecutor) InjectStdin(line string) error {
 	return inj.InjectStdin(line)
 }
 
+// SendEOF forwards EOF/EOT signaling when supported.
+func (w WrappedExecutor) SendEOF() error {
+	sender, ok := w.Executor.(executor.StdinEOFSender)
+	if !ok {
+		return fmt.Errorf("stdin EOF is not supported on %s", executor.ExecutionContextLabel(w.Executor))
+	}
+	return sender.SendEOF()
+}
+
 // ExecuteInteractive forwards interactive execution when supported.
 func (w WrappedExecutor) ExecuteInteractive(ctx context.Context, spec executor.InteractiveSpec, onChunk func(string)) (executor.ExecResult, error) {
 	ie, ok := w.Executor.(executor.InteractiveExecutor)

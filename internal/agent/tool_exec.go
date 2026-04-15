@@ -1,7 +1,7 @@
 // Package agent
 // File: tool_exec.go
-// Description: [TODO: Add description]
-// Responsibility: [TODO: Add responsibility]
+// Description: 도구 호출 실행 라우터 — LLM 툴콜을 실제 도구로 디스패치
+// Responsibility: tool call 파싱, 실행기 선택, 병렬/직렬 실행, 결과 변환
 
 package agent
 
@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yourorg/infractl/internal/executor"
 	"github.com/yourorg/infractl/internal/hooks"
 	"github.com/yourorg/infractl/internal/llm"
 	"github.com/yourorg/infractl/internal/pipeline"
@@ -55,7 +56,13 @@ func (a *Agent) partitionToolCalls(toolCalls []llm.ToolCall) (readOnly []indexed
 	for i, tc := range toolCalls {
 		item := indexedToolCall{call: tc, originalIndex: i}
 		tool, ok := a.registry.Get(tc.Function.Name)
+
+		isReadOnly := false
 		if ok && tool.IsReadOnly() {
+			isReadOnly = true
+		}
+
+		if isReadOnly {
 			readOnly = append(readOnly, item)
 		} else {
 			mutation = append(mutation, item)
@@ -99,35 +106,74 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 	exec, err := a.manager.Get(target)
 	if err != nil {
 		slog.Warn("executor not found", "target", target, "err", err)
+
+		// Claude CLI의 validateInput() 패턴:
+		// 타깃이 서버인지 서비스인지 LLM이 구분할 수 있도록
+		// 등록된 서버 목록 + 활성 서비스 목록 + 학습된 서비스 목록을 함께 반환.
+		// LLM이 이 정보를 바탕으로 ask_user_question을 호출하게 된다.
+
+		// 1) 등록된 SSH 서버 목록
+		var knownServers []string
+		if a.store != nil {
+			if servers, listErr := a.store.List(ctx); listErr == nil {
+				for _, srv := range servers {
+					knownServers = append(knownServers, srv.Name)
+				}
+			}
+		}
+
+		// 2) 활성 커넥터(서비스) 목록 — Oracle SID, MySQL DB명 등
+		type svcEntry struct{ desc, server string }
+		var knownServices []svcEntry
+		if a.connectorMgr != nil {
+			for _, cs := range a.connectorMgr.States() {
+				knownServices = append(knownServices, svcEntry{
+					desc:   fmt.Sprintf("%s/%s", cs.Type, cs.ServiceName),
+					server: cs.ServerName,
+				})
+			}
+		}
+
+		// 3) 학습된 서비스 목록 (adaptiveLearner)
+		if a.adaptiveLearner != nil {
+			for _, sys := range a.adaptiveLearner.ListSystems(ctx) {
+				knownServices = append(knownServices, svcEntry{
+					desc:   sys.ServiceType,
+					server: sys.ServerName,
+				})
+			}
+		}
+
+		var sb strings.Builder
+		if target == "" {
+			sb.WriteString("Error: no target server is set. Use server_focus or specify a target.")
+		} else {
+			sb.WriteString(fmt.Sprintf("Error: '%s' is not a registered server name.\n", target))
+			if len(knownServers) > 0 {
+				sb.WriteString(fmt.Sprintf("  Registered servers (SSH targets): %s\n", strings.Join(knownServers, ", ")))
+			} else {
+				sb.WriteString("  No servers are registered.\n")
+			}
+			if len(knownServices) > 0 {
+				sb.WriteString("  Active/known services on those servers:\n")
+				for _, svc := range knownServices {
+					sb.WriteString(fmt.Sprintf("    - %s  (on server: %s)\n", svc.desc, svc.server))
+				}
+				sb.WriteString("  NOTE: If the user mentioned a service/DB instance name (e.g. Oracle SID, MySQL database),\n")
+				sb.WriteString("        it is NOT a server — it runs ON a registered server above.\n")
+			}
+			sb.WriteString("Call ask_user_question to clarify:\n")
+			sb.WriteString("  (a) which registered SERVER the user wants to connect to, OR\n")
+			sb.WriteString("  (b) which SERVICE/INSTANCE on an existing server they meant.\n")
+		}
 		return llm.Message{
 			Role:       llm.RoleTool,
 			ToolCallID: tc.ID,
-			Content:    fmt.Sprintf("Error: %s", err),
+			Content:    sb.String(),
 		}
 	}
 	if normalizedTarget := exec.Target(); normalizedTarget != "" {
 		target = normalizedTarget
-	}
-	safetyDecision := evaluateToolSafety(tool, args)
-
-	riskLevel := safetyDecision.RiskLevel
-	if riskLevel != tools.RiskNone {
-		if a.yoroMode {
-			slog.Warn("YORO mode: skipping confirmation",
-				"tool", tc.Function.Name, "risk", riskLevel, "target", target)
-		} else {
-			confirmed, confirmErr := runConfirmationFlow(ctx, a.questionHandler, tool, target, args, riskLevel)
-			if confirmErr != nil {
-				slog.Warn("confirmation flow error", "tool", tc.Function.Name, "err", confirmErr)
-			}
-			if !confirmed {
-				return llm.Message{
-					Role:       llm.RoleTool,
-					ToolCallID: tc.ID,
-					Content:    "????�? ?묒뾽???�⑥???�뒿??�떎.",
-				}
-			}
-		}
 	}
 	if a.hooksMgr != nil {
 		a.hooksMgr.Fire(ctx, hooks.HookContext{
@@ -138,11 +184,7 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 		})
 	}
 	if a.checkpointMgr != nil && !tool.IsReadOnly() {
-		if tools.RiskOrd(riskLevel) >= tools.RiskOrd(tools.RiskMedium) {
-			a.checkpointMgr.CreateMandatory(ctx, target, tc.Function.Name, args, riskLevel)
-		} else {
-			a.checkpointMgr.CreateFromArgs(ctx, target, tc.Function.Name, args)
-		}
+		a.checkpointMgr.CreateFromArgs(ctx, target, tc.Function.Name, args)
 	}
 	if a.idleHandler != nil {
 		exec = wrapWithIdleDetect(exec, a.idleHandler, tc.Function.Name, target)
@@ -165,6 +207,11 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 			}
 		}
 	}
+	if ct, ok := tool.(interface{ SetOutputCb(func(string)) }); ok {
+		ct.SetOutputCb(func(line string) {
+			a.handler.OnToolOutput(tc.ID, line)
+		})
+	}
 	if ft, ok := tool.(*tools.FileTransferTool); ok {
 		toolID := tc.ID
 		ft.OutputCb = func(line string) {
@@ -181,12 +228,15 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 		aq.QuestionCb = func(ctx context.Context, req tools.QuestionRequest) (tools.QuestionResponse, error) {
 			return a.questionHandler.RequestQuestion(ctx, req)
 		}
+		aq.FormCb = func(ctx context.Context, req tools.FormRequest) (tools.FormResponse, error) {
+			return a.questionHandler.RequestForm(ctx, req)
+		}
 	}
 
 	a.handler.OnToolStart(tc.ID, tc.Function.Name, target, args)
 	start := time.Now()
 
-	resultStr, err := tool.Execute(ctx, args, exec)
+	outcome, err := executeToolWithOutcome(ctx, tool, args, exec)
 	duration := time.Since(start)
 
 	if err != nil {
@@ -199,15 +249,18 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 			})
 		}
 		a.handler.OnToolEnd(tc.ID, tc.Function.Name, err.Error(), duration, false)
-		a.recordExecLog(ctx, execContext{
-			toolName:  tc.Function.Name,
-			target:    target,
-			args:      args,
-			errMsg:    err.Error(),
-			duration:  duration,
-			riskLevel: riskLevel,
-			success:   false,
+		logID := a.recordExecLog(ctx, execContext{
+			toolName: tc.Function.Name,
+			target:   target,
+			args:     args,
+			errMsg:   err.Error(),
+			exitCode: 1,
+			duration: duration,
+			success:  false,
 		})
+		if a.taskMemoryLearner != nil && logID > 0 {
+			a.taskMemoryLearner.TriggerRecord(ctx, logID)
+		}
 		content := fmt.Sprintf("Error: %s", err)
 		return llm.Message{
 			Role:       llm.RoleTool,
@@ -216,18 +269,43 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 		}
 	}
 
-	a.handler.OnToolEnd(tc.ID, tc.Function.Name, resultStr, duration, true)
-	logID := a.recordExecLog(ctx, execContext{
-		toolName:  tc.Function.Name,
-		target:    target,
-		args:      args,
-		output:    resultStr,
-		duration:  duration,
-		riskLevel: riskLevel,
-		success:   true,
-	})
-	if a.knowledgeLearner != nil && logID > 0 {
-		a.knowledgeLearner.TriggerLearn(ctx, logID)
+	resultStr := outcome.Content
+	if !outcome.Success {
+		failMsg := outcome.ErrorMessage
+		if strings.TrimSpace(failMsg) == "" {
+			failMsg = fmt.Sprintf("tool %s reported failure", tc.Function.Name)
+		}
+		a.handler.OnToolEnd(tc.ID, tc.Function.Name, resultStr, duration, false)
+		logID := a.recordExecLog(ctx, execContext{
+			toolName: tc.Function.Name,
+			target:   target,
+			args:     args,
+			output:   resultStr,
+			errMsg:   failMsg,
+			exitCode: outcome.ExitCode,
+			duration: duration,
+			success:  false,
+		})
+		if a.taskMemoryLearner != nil && logID > 0 {
+			a.taskMemoryLearner.TriggerRecord(ctx, logID)
+		}
+	} else {
+		a.handler.OnToolEnd(tc.ID, tc.Function.Name, resultStr, duration, true)
+		logID := a.recordExecLog(ctx, execContext{
+			toolName: tc.Function.Name,
+			target:   target,
+			args:     args,
+			output:   resultStr,
+			exitCode: outcome.ExitCode,
+			duration: duration,
+			success:  true,
+		})
+		if a.knowledgeLearner != nil && logID > 0 {
+			a.knowledgeLearner.TriggerLearn(ctx, logID)
+		}
+		if a.taskMemoryLearner != nil && logID > 0 {
+			a.taskMemoryLearner.TriggerRecord(ctx, logID)
+		}
 	}
 	if a.hooksMgr != nil {
 		a.hooksMgr.Fire(ctx, hooks.HookContext{
@@ -258,4 +336,24 @@ func argsToStrings(args map[string]interface{}) map[string]string {
 		result[k] = fmt.Sprintf("%v", v)
 	}
 	return result
+}
+
+func executeToolWithOutcome(
+	ctx context.Context,
+	tool tools.Tool,
+	args map[string]interface{},
+	exec executor.Executor,
+) (tools.ToolOutcome, error) {
+	if dt, ok := tool.(tools.DetailedTool); ok {
+		return dt.ExecuteDetailed(ctx, args, exec)
+	}
+	content, err := tool.Execute(ctx, args, exec)
+	if err != nil {
+		return tools.ToolOutcome{}, err
+	}
+	return tools.ToolOutcome{
+		Content:  content,
+		Success:  true,
+		ExitCode: 0,
+	}, nil
 }

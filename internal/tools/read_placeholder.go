@@ -18,7 +18,6 @@ import (
 type ReadPlaceholderTool struct{}
 
 func (t *ReadPlaceholderTool) Name() string         { return "read_placeholder" }
-func (t *ReadPlaceholderTool) RiskLevel() RiskLevel { return RiskNone }
 func (t *ReadPlaceholderTool) IsReadOnly() bool     { return true }
 func (t *ReadPlaceholderTool) IsEnabled() bool      { return true }
 

@@ -56,8 +56,7 @@ func (t *ServerFocusTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *ServerFocusTool) RiskLevel() RiskLevel { return RiskNone }
-func (t *ServerFocusTool) IsReadOnly() bool     { return false }
+func (t *ServerFocusTool) IsReadOnly() bool { return true }
 func (t *ServerFocusTool) IsEnabled() bool      { return true }
 
 // Execute는 활성 서버를 설정한다.

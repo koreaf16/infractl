@@ -350,22 +350,7 @@ func normalizeLLMLogText(text string) string {
 }
 
 func stripThinkingText(text string) string {
-	if idx := strings.Index(text, "</think>"); idx >= 0 {
-		return strings.TrimSpace(text[idx+len("</think>"):])
-	}
-	// Case for <thought> or <thinking> tags
-	if idx := strings.Index(text, "</thought>"); idx >= 0 {
-		return strings.TrimSpace(text[idx+len("</thought>"):])
-	}
-	if idx := strings.Index(text, "</thinking>"); idx >= 0 {
-		return strings.TrimSpace(text[idx+len("</thinking>"):])
-	}
-	
-	text = strings.TrimSpace(text)
-	if strings.HasPrefix(text, "<think>") || strings.HasPrefix(text, "<thought>") || strings.HasPrefix(text, "<thinking>") {
-		return ""
-	}
-	return text
+	return sanitizeAssistantContent(text)
 }
 
 func extractThinkingText(text string) string {

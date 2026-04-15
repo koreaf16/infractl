@@ -35,7 +35,8 @@ const (
 type ServiceInfo struct {
 	ServerName  string
 	ServiceType string            // "oracle", "mysql" 등
-	Name        string            // Oracle SID, MySQL DB명 등
+	Name        string            // Oracle CDB SID, MySQL DB명 등
+	SubInstance string            // Oracle PDB명, K8s namespace 등 (선택적 하위 단위)
 	Port        int
 	Details     map[string]string // 서비스별 추가 정보
 }
@@ -58,13 +59,14 @@ type OSAuthProber interface {
 
 // ConnectorState는 커넥터 인스턴스의 런타임 상태이다.
 type ConnectorState struct {
-	Name       string          // 예: "oracle/db-server/ORCL"
-	ServerName string
-	Type       string
+	Name        string          // 예: "server/oracle/CDB/PDB" 또는 "server/oracle/ORCL"
+	ServerName  string
+	Type        string
 	ServiceName string
-	Status     ConnectorStatus
-	Error      string
-	Tools      []string // 활성화된 도구 이름 목록
+	SubInstance string          // PDB명, namespace 등 하위 단위 (없으면 빈 문자열)
+	Status      ConnectorStatus
+	Error       string
+	Tools       []string // 활성화된 도구 이름 목록
 }
 
 // Connector는 서비스별 커넥터가 구현해야 하는 인터페이스이다.
@@ -86,6 +88,11 @@ type Connector interface {
 }
 
 // connectorKey는 커넥터를 고유하게 식별하는 복합 키를 생성한다.
-func connectorKey(serverName, serviceType, serviceName string) string {
-	return serverName + "/" + serviceType + "/" + serviceName
+// subInstance가 비어있지 않으면 키에 포함한다 (예: "server/oracle/CDB/PDB").
+func connectorKey(serverName, serviceType, name, subInstance string) string {
+	key := serverName + "/" + serviceType + "/" + name
+	if subInstance != "" {
+		key += "/" + subInstance
+	}
+	return key
 }

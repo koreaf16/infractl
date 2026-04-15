@@ -1,16 +1,25 @@
 package llm
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
+)
+
+const (
+	// defaultStreamIdleTimeout은 스트림에서 새 데이터가 올 때까지 기다리는 최대 시간이다.
+	defaultStreamIdleTimeout = 90 * time.Second
+
+	// maxStreamIdleTimeout은 동적 조절 시 허용하는 idle timeout 상한이다.
+	maxStreamIdleTimeout = 180 * time.Second
+
+	// idleTimeoutPerKB는 요청 크기 1KB당 추가되는 idle timeout이다.
+	idleTimeoutPerKB = 500 * time.Millisecond
 )
 
 type OpenAIClient struct {
@@ -19,7 +28,8 @@ type OpenAIClient struct {
 	apiKey             string
 	httpClient         *http.Client
 	streamClient       *http.Client
-	useInlineToolCalls bool // true면 본문 내 <tool_call> 태그를 가로채서 파싱함 (Qwen 27B 등 특정 모델용)
+	useInlineToolCalls bool          // true면 본문 내 <tool_call> 태그를 가로채서 파싱함 (Qwen 27B 등 특정 모델용)
+	streamIdleTimeout  time.Duration // SSE 스트림 청크 간 최대 유휴 시간 (0이면 defaultStreamIdleTimeout 사용)
 }
 
 func NewOpenAIClient(endpoint, model, apiKey string, timeout time.Duration) *OpenAIClient {
@@ -31,42 +41,14 @@ func NewOpenAIClient(endpoint, model, apiKey string, timeout time.Duration) *Ope
 			Timeout: timeout,
 		},
 		streamClient: &http.Client{
-			Timeout: 0,
+			Timeout: 0, // 전체 스트림 타임아웃은 context로 제어
 			Transport: &http.Transport{
 				ResponseHeaderTimeout: timeout,
+				IdleConnTimeout:       90 * time.Second,
 			},
 		},
+		streamIdleTimeout: defaultStreamIdleTimeout,
 	}
-}
-
-// SetUseInlineToolCalls는 본문 내 XML 기반 툴 호출 처리 여부를 설정한다.
-func (c *OpenAIClient) SetUseInlineToolCalls(v bool) { c.useInlineToolCalls = v }
-
-// transformMessagesForInlineTools는 useInlineToolCalls 모드일 때 
-// vLLM의 내부 tool 파서를 우회하기 위해 메시지 이력을 조작한다.
-func (c *OpenAIClient) transformMessagesForInlineTools(messages []Message) []Message {
-	if !c.useInlineToolCalls {
-		return messages
-	}
-	var transformed []Message
-	for _, m := range messages {
-		if m.Role == RoleAssistant && len(m.ToolCalls) > 0 {
-			content := m.Content
-			for _, tc := range m.ToolCalls {
-				tag := fmt.Sprintf("\n<tool_call>\n{\"name\": %q, \"arguments\": %s}\n</tool_call>\n", tc.Function.Name, tc.Function.Arguments)
-				content += tag
-			}
-			m.Content = strings.TrimSpace(content)
-			m.ToolCalls = nil // API 스키마 검증 시 vLLM 파서 개입 방지
-		} else if m.Role == RoleTool {
-			// RoleTool을 RoleUser로 변경하고 <tool_response> 태그로 감싼다
-			m.Role = RoleUser
-			m.Content = fmt.Sprintf("<tool_response>\n%s\n</tool_response>", m.Content)
-			m.ToolCallID = ""
-		}
-		transformed = append(transformed, m)
-	}
-	return transformed
 }
 
 func (c *OpenAIClient) Chat(ctx context.Context, messages []Message, tools []ToolDef, toolChoice interface{}) (Response, error) {
@@ -124,7 +106,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, messages []Message, tools []Too
 	}
 
 	msg := raw.Choices[0].Message
-	content := stripThinking(msg.Content)
+	content := sanitizeAssistantContent(msg.Content)
 	toolCalls := msg.ToolCalls
 
 	// Fallback: qwen3_xml parser가 스트리밍에서 tool call을 유실하는 vLLM 버그(#39056) 우회.
@@ -153,7 +135,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, messages []Message, tools []Too
 	return result, nil
 }
 
-func (c *OpenAIClient) ChatStream(ctx context.Context, messages []Message, tools []ToolDef, onThinkingToken func(string), onToken func(string)) (Response, error) {
+func (c *OpenAIClient) ChatStream(ctx context.Context, messages []Message, tools []ToolDef, toolChoice interface{}, onThinkingToken func(string), onToken func(string)) (Response, error) {
 	reqMessages := messages
 	reqTools := tools
 
@@ -163,10 +145,11 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, messages []Message, tools
 	}
 
 	reqBody := chatRequest{
-		Model:    c.model,
-		Messages: reqMessages,
-		Tools:    reqTools,
-		Stream:   true,
+		Model:      c.model,
+		Messages:   reqMessages,
+		Tools:      reqTools,
+		ToolChoice: toolChoice,
+		Stream:     true,
 	}
 
 	data, err := json.Marshal(reqBody)
@@ -176,221 +159,41 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, messages []Message, tools
 
 	logRequestJSON(c.model, data)
 
-	resp, err := c.doRequestWith(ctx, data, c.streamClient)
+	// idle timeout: 서버가 스트림 중간에 멈춰도 무한 블록되지 않도록 ctx 래핑
+	// 요청 크기에 따라 동적 조절: 큰 프롬프트는 LLM 응답 생성이 느릴 수 있다
+	idleTimeout := c.streamIdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = adaptiveIdleTimeout(len(data))
+	}
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+
+	resp, err := c.doRequestWith(streamCtx, data, c.streamClient)
 	if err != nil {
 		logToFile(c.model, "ERROR", err.Error())
 		return Response{}, err
 	}
 	defer resp.Body.Close()
 
-	return c.parseStream(c.model, resp.Body, onThinkingToken, onToken)
+	// 청크 수신마다 타이머를 리셋하는 idle reader로 Body를 래핑한다.
+	ir := newIdleReader(resp.Body, idleTimeout, cancelStream)
+	defer ir.stop()
+
+	return c.parseStream(c.model, ir, onThinkingToken, onToken)
 }
 
-func (c *OpenAIClient) parseStream(model string, body io.Reader, onThinkingToken func(string), onToken func(string)) (Response, error) {
-	var thinkBuf strings.Builder
-	var contentBuf strings.Builder
-	var inlineToolBuf strings.Builder // <tool_call> 태그 내용을 담을 버퍼
-	toolCallBuf := make(map[int]*ToolCall)
-	var inputTokens, outputTokens int
 
-	const (
-		tagThinkStart = "<think>"
-		tagThinkEnd   = "</think>"
-		tagToolStart  = "<tool_call>"
-		tagToolEnd    = "</tool_call>"
-	)
-
-	// 상태 정의
-	const (
-		stateContent = iota
-		stateThinking
-		stateToolCalling
-	)
-
-	state := stateContent
-	pendingBuf := ""
-
-	flushPending := func(text string) {
-		if text == "" {
-			return
-		}
-		switch state {
-		case stateThinking:
-			thinkBuf.WriteString(text)
-			if onThinkingToken != nil {
-				onThinkingToken(text)
-			}
-		case stateToolCalling:
-			inlineToolBuf.WriteString(text)
-		default:
-			contentBuf.WriteString(text)
-			if onToken != nil {
-				onToken(text)
-			}
-		}
+// adaptiveIdleTimeout은 요청 본문 크기에 비례하여 idle timeout을 계산한다.
+// 큰 프롬프트(히스토리가 긴 경우)는 LLM이 첫 토큰을 생성하는 데 시간이 더 걸리므로
+// timeout을 늘려 불필요한 stream 중단을 방지한다.
+func adaptiveIdleTimeout(requestBodyBytes int) time.Duration {
+	base := defaultStreamIdleTimeout
+	extra := time.Duration(requestBodyBytes/1024) * idleTimeoutPerKB
+	total := base + extra
+	if total > maxStreamIdleTimeout {
+		return maxStreamIdleTimeout
 	}
-
-	processContent := func(incoming string) {
-		pendingBuf += incoming
-		for {
-			switch state {
-			case stateThinking:
-				idx := strings.Index(pendingBuf, tagThinkEnd)
-				if idx >= 0 {
-					flushPending(pendingBuf[:idx])
-					state = stateContent
-					pendingBuf = strings.TrimLeft(pendingBuf[idx+len(tagThinkEnd):], "\n")
-				} else {
-					safeLen := len(pendingBuf) - (len(tagThinkEnd) - 1)
-					if safeLen > 0 {
-						flushPending(pendingBuf[:safeLen])
-						pendingBuf = pendingBuf[safeLen:]
-					}
-					return
-				}
-
-			case stateToolCalling:
-				idx := strings.Index(pendingBuf, tagToolEnd)
-				if idx >= 0 {
-					flushPending(pendingBuf[:idx])
-					inlineToolBuf.WriteString(tagToolEnd)
-					state = stateContent
-					pendingBuf = pendingBuf[idx+len(tagToolEnd):]
-				} else {
-					safeLen := len(pendingBuf) - (len(tagToolEnd) - 1)
-					if safeLen > 0 {
-						flushPending(pendingBuf[:safeLen])
-						pendingBuf = pendingBuf[safeLen:]
-					}
-					return
-				}
-
-			default: // stateContent
-				thinkIdx := strings.Index(pendingBuf, tagThinkStart)
-				toolIdx := -1
-				if c.useInlineToolCalls {
-					toolIdx = strings.Index(pendingBuf, tagToolStart)
-				}
-
-				if thinkIdx >= 0 && (toolIdx < 0 || thinkIdx < toolIdx) {
-					flushPending(pendingBuf[:thinkIdx])
-					state = stateThinking
-					pendingBuf = pendingBuf[thinkIdx+len(tagThinkStart):]
-				} else if toolIdx >= 0 {
-					flushPending(pendingBuf[:toolIdx])
-					state = stateToolCalling
-					inlineToolBuf.WriteString(tagToolStart)
-					pendingBuf = pendingBuf[toolIdx+len(tagToolStart):]
-				} else {
-					maxTagLen := 8 // len("<tool_call>") or len("<think>")
-					safeLen := len(pendingBuf) - (maxTagLen - 1)
-					if safeLen > 0 {
-						flushPending(pendingBuf[:safeLen])
-						pendingBuf = pendingBuf[safeLen:]
-					}
-					return
-				}
-			}
-		}
-	}
-
-	scanner := bufio.NewScanner(body)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "[DONE]" {
-			break
-		}
-		if payload == "" {
-			continue
-		}
-
-		var chunk streamChunk
-		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			continue
-		}
-		if chunk.Usage != nil {
-			inputTokens = chunk.Usage.PromptTokens
-			outputTokens = chunk.Usage.CompletionTokens
-		}
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-		delta := chunk.Choices[0].Delta
-		if delta.Reasoning != "" {
-			thinkBuf.WriteString(delta.Reasoning)
-			if onThinkingToken != nil {
-				onThinkingToken(delta.Reasoning)
-			}
-		}
-		if delta.Content != "" {
-			processContent(delta.Content)
-		}
-		for _, tc := range delta.ToolCalls {
-			accumulateToolCall(toolCallBuf, tc)
-		}
-	}
-
-	flushPending(pendingBuf)
-	if err := scanner.Err(); err != nil {
-		return Response{}, fmt.Errorf("read stream: %w", err)
-	}
-
-	toolCalls := assembleToolCalls(toolCallBuf)
-	finalContent := contentBuf.String()
-
-	// 1. API(tool_calls)로부터 받은 것 필터링
-	filtered := toolCalls[:0]
-	for _, tc := range toolCalls {
-		if tc.Function.Name != "" {
-			filtered = append(filtered, tc)
-		}
-	}
-	toolCalls = filtered
-
-	// 2. 본문 내 인라인 추출 병합
-	if inlineStr := inlineToolBuf.String(); inlineStr != "" {
-		slog.Debug("parseStream: inlineToolBuf found", "content", inlineStr)
-		if parsed, _ := extractInlineToolCalls(inlineStr); len(parsed) > 0 {
-			slog.Debug("parseStream: inline tool calls extracted", "count", len(parsed))
-			toolCalls = append(toolCalls, parsed...)
-		}
-	}
-
-	// 3. Fallback: 상태 머신이 놓친 경우 대비
-	if len(toolCalls) == 0 {
-		if strings.Contains(finalContent, tagToolStart) {
-			slog.Debug("parseStream: fallback content check", "found", true)
-			if parsed, cleaned := extractInlineToolCalls(finalContent); len(parsed) > 0 {
-				toolCalls = parsed
-				finalContent = cleaned
-			}
-		}
-		// thinking 영역에 포함된 경우도 체크 (일부 모델은 thought 내에 툴 호출을 생성하기도 함)
-		thinkContent := thinkBuf.String()
-		if len(toolCalls) == 0 && strings.Contains(thinkContent, tagToolStart) {
-			slog.Debug("parseStream: fallback think check", "found", true)
-			if parsed, _ := extractInlineToolCalls(thinkContent); len(parsed) > 0 {
-				toolCalls = parsed
-			}
-		}
-	}
-
-	if len(toolCalls) > 0 {
-		slog.Info("parseStream: tool calls detected", "count", len(toolCalls))
-	}
-
-	logToFile(model, "RESPONSE", finalContent)
-	logToolCalls(model, toolCalls, inlineToolBuf.String())
-	return Response{
-		Content:      finalContent,
-		ToolCalls:    toolCalls,
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
-	}, nil
+	return total
 }
 
 func (c *OpenAIClient) doRequest(ctx context.Context, body []byte) (*http.Response, error) {
@@ -407,5 +210,14 @@ func (c *OpenAIClient) doRequestWith(ctx context.Context, body []byte, client *h
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
-	return client.Do(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http request: %w", err)
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return resp, nil
+	}
+	// 2xx가 아닌 응답: 구조화된 APIError로 변환하여 재시도 판단을 가능하게 한다
+	defer resp.Body.Close()
+	return nil, parseHTTPError(resp)
 }

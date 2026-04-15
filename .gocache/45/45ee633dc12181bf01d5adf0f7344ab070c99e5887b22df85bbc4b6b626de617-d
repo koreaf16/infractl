@@ -1,0 +1,9 @@
+./client.go
+./config.go
+./executor.go
+./persistent_shell.go
+./persistent_shell_marker.go
+./scp.go
+./session_manager.go
+./sftp.go
+./shellcat.go

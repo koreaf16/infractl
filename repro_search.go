@@ -1,3 +1,6 @@
+﻿//go:build tools
+// +build tools
+
 package main
 
 import (
@@ -20,3 +23,4 @@ func main() {
 		fmt.Printf("%d. %s (Len: %d, URL: %s)\n", i+1, r.Title, len(r.Title), r.URL)
 	}
 }
+

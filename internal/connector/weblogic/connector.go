@@ -67,7 +67,7 @@ func (c *WebLogicConnector) makeStatusTool(prefix, pid string) tools.Tool {
 			"type":       "object",
 			"properties": map[string]interface{}{"target": targetParam()},
 		},
-		tools.RiskNone, true, &c.status,
+		true, &c.status,
 		func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 			var cmd string
 			if pid != "" {
@@ -95,7 +95,7 @@ func (c *WebLogicConnector) makeLogsTool(prefix, domainHome string) tools.Tool {
 				"target": targetParam(),
 			},
 		},
-		tools.RiskNone, true, &c.status,
+		true, &c.status,
 		func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 			lines := 100
 			if v, ok := args["lines"].(float64); ok {
@@ -124,7 +124,7 @@ func (c *WebLogicConnector) makeThreadDumpTool(prefix, pid string) tools.Tool {
 			"type":       "object",
 			"properties": map[string]interface{}{"target": targetParam()},
 		},
-		tools.RiskNone, true, &c.status,
+		true, &c.status,
 		func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 			var cmd string
 			if pid != "" {
@@ -149,7 +149,7 @@ func (c *WebLogicConnector) makeRestartTool(prefix, pid, domainHome string) tool
 			"type":       "object",
 			"properties": map[string]interface{}{"target": targetParam()},
 		},
-		tools.RiskLow, false, &c.status,
+		false, &c.status,
 		func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 			// 재시작 전 상태 캡처
 			var statusCmd string

@@ -1,0 +1,142 @@
+﻿// Package tools
+// File: ask_user_question.go
+// Description: Ask a question to the user and receive structured feedback.
+// Responsibility: Allow the LLM to clarify ambiguous targets or requests via the TUI.
+
+package tools
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/yourorg/infractl/internal/executor"
+)
+
+type AskUserQuestionTool struct {
+	QuestionCb func(ctx context.Context, req QuestionRequest) (QuestionResponse, error)
+}
+
+func (t *AskUserQuestionTool) Name() string {
+	return "ask_user_question"
+}
+
+func (t *AskUserQuestionTool) Description() string {
+	return "사용자에게 지금 당장 필요한 단일 질문 하나를 던집니다. 선택형이면 서로 배타적인 실제 답변 후보만 options에 넣고, 자유응답이면 options를 생략하세요. 확인 항목 목록이나 후속 작업 목록을 선택지처럼 나열하지 마세요."
+}
+
+func (t *AskUserQuestionTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"question": map[string]interface{}{
+				"type":        "string",
+				"description": "사용자에게 보여줄 단일 질문 내용. 여러 확인 항목을 나열하지 말고 지금 필요한 1개의 질문만 작성하세요.",
+			},
+			"options": map[string]interface{}{
+				"type": "array",
+				"items": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"label":       map[string]interface{}{"type": "string", "description": "선택지 라벨 (1-5단어)"},
+						"description": map[string]interface{}{"type": "string", "description": "선택지에 대한 구체적인 설명"},
+					},
+					"required": []string{"label", "description"},
+				},
+				"minItems": 2,
+				"maxItems": 5,
+				"description": "서로 배타적인 실제 답변 후보 리스트 (2-5개). 체크리스트나 확인 필요 항목 목록을 넣지 마세요. 자유응답 질문이면 생략하세요.",
+			},
+			"allow_custom_input": map[string]interface{}{
+				"type":        "boolean",
+				"description": "선택지 외에 자유 입력도 허용할지 여부. options를 생략하면 자동으로 자유입력 모드가 됩니다.",
+			},
+			"header": map[string]interface{}{
+				"type":        "string",
+				"description": "질문 UI 상단 헤더. 비워두면 기본 헤더를 사용합니다.",
+			},
+		},
+		"required": []string{"question"},
+	}
+}
+
+func (t *AskUserQuestionTool) IsReadOnly() bool {
+	return true
+}
+
+func (t *AskUserQuestionTool) IsEnabled() bool {
+	return true
+}
+
+func (t *AskUserQuestionTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
+	if t.QuestionCb == nil {
+		return "Error: question handler not initialized", nil
+	}
+
+	question, ok := args["question"].(string)
+	if !ok || strings.TrimSpace(question) == "" {
+		return "Error: missing or invalid question", nil
+	}
+
+	var optsRaw []interface{}
+	if raw, exists := args["options"]; exists && raw != nil {
+		var ok bool
+		optsRaw, ok = raw.([]interface{})
+		if !ok {
+			return "Error: missing or invalid options", nil
+		}
+		if len(optsRaw) < 2 || len(optsRaw) > 5 {
+			return "Error: options must contain 2-5 items when provided", nil
+		}
+	}
+
+	options := make([]QuestionOption, len(optsRaw))
+	for i, o := range optsRaw {
+		m, ok := o.(map[string]interface{})
+		if !ok {
+			return fmt.Sprintf("Error: invalid option at index %d", i), nil
+		}
+		label, _ := m["label"].(string)
+		desc, _ := m["description"].(string)
+		label = strings.TrimSpace(label)
+		desc = strings.TrimSpace(desc)
+		if label == "" {
+			return fmt.Sprintf("Error: missing label at index %d", i), nil
+		}
+		options[i] = QuestionOption{Label: label, Description: desc}
+	}
+
+	allowCustomInput, _ := args["allow_custom_input"].(bool)
+	if len(options) == 0 {
+		allowCustomInput = true
+	}
+
+	header, _ := args["header"].(string)
+	header = strings.TrimSpace(header)
+	if header == "" {
+		header = "Clarification Needed"
+	}
+
+	resp, err := t.QuestionCb(ctx, QuestionRequest{
+		Question:         strings.TrimSpace(question),
+		Options:          options,
+		AllowCustomInput: allowCustomInput,
+		Header:           header,
+	})
+	if err != nil {
+		return fmt.Sprintf("Error: user interaction failed: %s", err), nil
+	}
+
+	if resp.IsOther {
+		if strings.TrimSpace(resp.UserInput) == "" {
+			return "User chose custom input but did not provide a value.", nil
+		}
+		return fmt.Sprintf("User provided input: %s", resp.UserInput), nil
+	}
+
+	if resp.SelectedIndex < 0 {
+		return "User canceled the question without choice.", nil
+	}
+
+	return fmt.Sprintf("User selected option %d: %s (%s)", resp.SelectedIndex+1, resp.SelectedLabel, resp.UserInput), nil
+}

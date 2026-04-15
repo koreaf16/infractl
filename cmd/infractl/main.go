@@ -193,7 +193,6 @@ func buildDeps(ctx context.Context) (*deps, error) {
 		llmReg.Register(llm.TierFast, fastClient, fc.Model)
 	}
 
-
 	// general ?????곷섧?紐? llmClient嚥?????(??륁맄?紐낆넎 ??疫꿸퀣???꾨뗀諭?癰궰野?筌ㅼ뮇???
 	llmClient := generalClient
 
@@ -328,8 +327,10 @@ func runTUI() error {
 	ag.SetConnectorManager(d.connectorMgr)
 	ag.SetSessionStore(d.sessionStore)
 	ag.SetExecLogStore(d.execLogStore)
+	ag.SetKnowledgeStore(d.knowledgeStore)
 	// Phase 6: ?癒???덈뮸 ?뚮똾猷??곕뱜 雅뚯눘??
 	ag.SetKnowledgeLearner(agent.NewKnowledgeLearner(d.knowledgeStore, d.execLogStore, d.llmClient, d.memoryService))
+	ag.SetTaskMemoryLearner(agent.NewTaskMemoryLearner(d.knowledgeStore, d.execLogStore, d.memoryService))
 	ag.SetAdaptiveLearner(agent.NewAdaptiveLearner(d.learnedSysStore))
 	// Phase 7: RAG 筌띲끇??? 雅뚯눘??
 	ag.SetRAGManager(d.ragManager)
@@ -340,6 +341,8 @@ func runTUI() error {
 	ag.SetModelName(d.cfg.GeneralLLM().Model)
 	ag.SetCheckpointManager(d.checkpointMgr)
 	ag.SetHooksManager(d.hooksMgr)
+	// 프로그레시브 컨텍스트 요약 관리자 주입
+	ag.SetSessionSummary(agent.NewSessionSummaryManager(d.llmClient))
 	d.memoryService.SubmitBackfill(ctx)
 	if ct, ok := d.registry.Get("session_context"); ok {
 		if tool, ok2 := ct.(*tools.SessionContextTool); ok2 {
@@ -366,6 +369,7 @@ func runTUI() error {
 
 	// /server 클래시 명령 핸들러 p 생성 후 SetProgram으로 초기화
 	slashSelectHandler := &tui.TUISelectHandler{}
+	formHandler := &tui.TUIFormHandler{}
 	privCache := privilege.NewCache()
 	app := tui.NewAppWithOptions(ag, d.cfg, d.serverStore, d.execMgr, tui.AppOptions{
 		InitialSessionID: ag.CurrentSessionID(),
@@ -377,8 +381,10 @@ func runTUI() error {
 		CursorParker:     parker,
 		ProgramBox:       box,
 		SelectHandler:    slashSelectHandler,
+		FormHandler:      formHandler,
 		KnowledgeStore:   d.knowledgeStore,
 		RAGSourceStore:   d.ragSourceStore,
+		DiscoveryStore:   d.discoveryStore,
 		CostTracker:      d.costTracker,
 		CheckpointMgr:    d.checkpointMgr,
 		HooksMgr:         d.hooksMgr,
@@ -397,6 +403,7 @@ func runTUI() error {
 	// connector ?꾧뎄???대쫫 異⑸룎 disambiguation UI ?곌껐
 	selectHandler := tui.NewTUISelectHandler(p)
 	slashSelectHandler.SetProgram(p) // 직접 초기화, p 생성 후 /server 슬래시 핸들러에 p 주입
+	formHandler.SetProgram(p)
 	disambig := &tuiDisambiguateAdapter{h: selectHandler}
 	if at, ok := d.registry.Get("connector_activate"); ok {
 		if tool, ok2 := at.(*connector.ActivateTool); ok2 {

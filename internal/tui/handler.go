@@ -58,7 +58,7 @@ func (h *TUIHandler) OnToolOutput(toolID string, line string) {
 
 // OnToolStart는 도구 실행이 시작될 때 호출된다.
 func (h *TUIHandler) OnToolStart(toolID string, toolName string, target string, args map[string]interface{}) {
-	h.send(ToolStartMsg{ToolID: toolID, Name: toolName, Target: target, Args: args})
+	h.send(ToolStartMsg{ToolID: toolID, Name: toolName, Target: target, Args: cloneToolArgs(args)})
 }
 
 // OnToolEnd는 도구 실행이 완료되었을 때 호출된다.
@@ -75,6 +75,17 @@ func (h *TUIHandler) OnToolEnd(toolID string, toolName string, result string, du
 // OnResponse는 LLM의 최종 텍스트 응답이 완성되었을 때 호출된다.
 func (h *TUIHandler) OnResponse(content string) {
 	h.send(ResponseDoneMsg(content))
+}
+
+func cloneToolArgs(in map[string]interface{}) map[string]interface{} {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // OnError는 에이전트 루프에서 에러가 발생했을 때 호출된다.

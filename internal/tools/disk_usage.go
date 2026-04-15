@@ -26,7 +26,6 @@ func (t *DiskUsageTool) Description() string {
 
 func (t *DiskUsageTool) IsReadOnly() bool     { return true }
 func (t *DiskUsageTool) IsEnabled() bool      { return true }
-func (t *DiskUsageTool) RiskLevel() RiskLevel { return RiskNone }
 
 func (t *DiskUsageTool) Parameters() map[string]interface{} {
 	return map[string]interface{}{
@@ -83,7 +82,8 @@ func (t *DiskUsageTool) Execute(ctx context.Context, args map[string]interface{}
 func buildDiskUsageCommand(path, mode string, depth int, platform executor.Platform) string {
 	if path == "mounts" {
 		if platform == executor.PlatformWindows {
-			return "wmic logicaldisk get DeviceID,Size,FreeSpace /format:list"
+			// wmic is removed in Windows 11 22H2+; use Get-Volume via PowerShell instead.
+			return `Get-Volume | Where-Object {$_.DriveType -eq 'Fixed'} | Select-Object DriveLetter,FileSystemLabel,SizeRemaining,Size,@{N='UsedPercent';E={if($_.Size -gt 0){[math]::Round(100-($_.SizeRemaining/$_.Size*100),2)}else{0}}} | Format-Table -AutoSize`
 		}
 		return "df -h"
 	}
@@ -109,6 +109,12 @@ func buildDiskUsageLinux(path, mode string, depth int) string {
 }
 
 func buildDiskUsageWindows(path, mode string) string {
+	// If path is a root-like path, show volume information instead of recursing files
+	isRoot := path == "/" || path == "\\" || (len(path) == 3 && path[1:] == ":\\") || (len(path) == 2 && path[1:] == ":")
+	if isRoot && mode == "summary" {
+		return `Get-Volume | Where-Object {$_.DriveType -eq 'Fixed'} | Select-Object DriveLetter,FileSystemLabel,@{N='TotalGB';E={[math]::Round($_.Size/1GB,2)}},@{N='FreeGB';E={[math]::Round($_.SizeRemaining/1GB,2)}},@{N='UsedPercent';E={if($_.Size -gt 0){[math]::Round(100-($_.SizeRemaining/$_.Size*100),2)}else{0}}} | Format-Table -AutoSize`
+	}
+
 	switch mode {
 	case "detail", "top":
 		return fmt.Sprintf("Get-ChildItem -Path %q -Directory | ForEach-Object { $size = (Get-ChildItem $_.FullName -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum; [PSCustomObject]@{Name=$_.Name; SizeMB=[math]::Round($size/1MB,1)} } | Sort-Object SizeMB -Descending | Format-Table -AutoSize", path)

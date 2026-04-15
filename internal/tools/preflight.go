@@ -9,9 +9,43 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/yourorg/infractl/internal/executor"
 )
+
+// RunPreflightChecks runs writable and disk space checks in parallel.
+func RunPreflightChecks(ctx context.Context, exec executor.Executor, dir string, requiredBytes int64) error {
+	var (
+		wg   sync.WaitGroup
+		errs = make(chan error, 2)
+	)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := checkRemoteWritable(ctx, exec, dir); err != nil {
+			errs <- err
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		if err := checkRemoteDiskSpace(ctx, exec, dir, requiredBytes); err != nil {
+			errs <- err
+		}
+	}()
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // checkRemoteWritable verifies the remote directory at dir is writable by the current user.
 // Uses `test -w <dir>` via the executor and returns a descriptive error on failure.

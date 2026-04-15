@@ -1,8 +1,3 @@
-// Package tui
-// File: shell_box.go
-// Description: Shell 실행 결과를 RoundedBorder 박스로 렌더링한다.
-// Responsibility: 실행 중(→)/완료(√)/실패(✗) 상태의 Shell stdout 박스 렌더링
-
 package tui
 
 import (
@@ -14,11 +9,10 @@ import (
 )
 
 const (
-	shellBoxMaxLines     = 12
+	shellBoxMaxLines     = 10
 	shellBoxDisplayLines = 10
 )
 
-// boxIcon은 Shell 박스 헤더의 상태 아이콘이다.
 type boxIcon int
 
 const (
@@ -27,72 +21,44 @@ const (
 	boxIconFailed
 )
 
-// isShellBoxTool은 Shell 박스 렌더링 대상 도구인지 반환한다.
 func isShellBoxTool(name string) bool {
 	return name == "shell_exec" || name == "file_transfer"
 }
 
-// renderShellBoxCompleted는 완료된 Shell 명령을 박스로 렌더링한다 (scrollback용).
-//
-//	╭──────────────────────────────────────────────╮
-//	│ √ Shell powershell -Command "Get-PSDrive..." │
-//	│                                              │
-//	│ Used   : 125214920704                        │
-//	│ FreeGB : 182.43                              │
-//	╰──────────────────────────────────────────────╯
-func renderShellBoxCompleted(name string, args map[string]any, lines []string, duration time.Duration, success bool, width int) string {
+func renderShellBoxCompleted(name string, args map[string]any, lines []string, totalLines int, duration time.Duration, success bool, width int) string {
 	icon := boxIconDone
 	if !success {
 		icon = boxIconFailed
 	}
-	return renderShellBoxContent(name, args, lines, icon, duration, width)
+	return renderShellBoxContent(name, args, lines, totalLines, icon, duration, width)
 }
 
-// renderShellBoxRunning는 실행 중인 Shell 명령을 박스로 렌더링한다 (live view용).
-//
-//	╭──────────────────────────────────────────────╮
-//	│ → Shell powershell -Command "Get-CimInst..." │
-//	│                                              │
-//	│ TotalMemoryGB FreeMemoryGB                   │
-//	│      19.53         8.66                      │
-//	╰──────────────────────────────────────────────╯
-func renderShellBoxRunning(name string, args map[string]any, lines []string, elapsed time.Duration, width int) string {
-	return renderShellBoxContent(name, args, lines, boxIconRunning, elapsed, width)
+func renderShellBoxRunning(name string, args map[string]any, lines []string, totalLines int, elapsed time.Duration, width int) string {
+	return renderShellBoxContent(name, args, lines, totalLines, boxIconRunning, elapsed, width)
 }
 
-// renderShellBoxContent는 Shell 박스의 공통 렌더링 로직이다.
-func renderShellBoxContent(name string, args map[string]any, outputLines []string, icon boxIcon, dur time.Duration, width int) string {
+func renderShellBoxContent(name string, args map[string]any, outputLines []string, totalLines int, icon boxIcon, dur time.Duration, width int) string {
+	if name == "discover_services" || name == "system_info" || name == "network_info" {
+		return renderParallelTaskBox(name, args, outputLines, icon, dur, width)
+	}
+	if name == "discover_web_servers" {
+		return renderDiscoverWebBox(name, args, outputLines, icon, dur, width)
+	}
+
 	boxW := width - 4
 	if boxW < 30 {
 		boxW = 30
 	}
-	innerW := boxW - 4 // border(2) + padding(2)
-
-	header := shellBoxHeaderLine(name, args, icon, dur, innerW)
+	innerW := boxW - 4
 
 	var content strings.Builder
-	content.WriteString(header)
+	content.WriteString(shellBoxStatusLine(name, args, totalLines, icon, dur))
 
-	if len(outputLines) > 0 {
-		content.WriteString("\n") // 헤더와 출력 사이 빈 줄
-
-		display := outputLines
-		overflow := 0
-		if len(display) > shellBoxDisplayLines {
-			overflow = len(display) - shellBoxDisplayLines
-			display = display[len(display)-shellBoxDisplayLines:]
-		}
-		// 잘린 오래된 줄은 상단에 표시 — 최신 줄이 항상 하단에 보인다
-		if overflow > 0 {
-			content.WriteString("\n" + StyleCmdBoxDim.Render(fmt.Sprintf("... +%d lines", overflow)))
-		}
-		for _, line := range display {
-			runes := []rune(line)
-			if len(runes) > innerW {
-				line = string(runes[:innerW-3]) + "..."
-			}
-			content.WriteString("\n" + line)
-		}
+	if len(outputLines) > shellBoxDisplayLines {
+		outputLines = outputLines[len(outputLines)-shellBoxDisplayLines:]
+	}
+	for _, line := range outputLines {
+		content.WriteString("\n" + truncateShellLine(line, innerW))
 	}
 
 	return lipgloss.NewStyle().
@@ -104,80 +70,134 @@ func renderShellBoxContent(name string, args map[string]any, outputLines []strin
 		Render(content.String())
 }
 
-// shellBoxHeaderLine은 박스 헤더 한 줄을 생성한다.
-// 형식: √ Shell powershell -Command "..." (1.2s)
-func shellBoxHeaderLine(name string, args map[string]any, icon boxIcon, dur time.Duration, maxW int) string {
-	var iconStr string
-	switch icon {
-	case boxIconRunning:
-		iconStr = StyleClaude().Render("→")
-	case boxIconDone:
-		iconStr = StyleSuccess.Render("√")
-	case boxIconFailed:
-		iconStr = StyleError.Render("✗")
+func renderDiscoverServicesBox(name string, args map[string]any, lines []string, icon boxIcon, dur time.Duration, width int) string {
+	boxW := width - 4
+	if boxW < 30 {
+		boxW = 30
+	}
+	innerW := boxW - 4
+
+	var content strings.Builder
+	content.WriteString(shellBoxStatusLine(name, args, 0, icon, dur))
+	content.WriteString("\n")
+
+	// Task status tracking
+	type taskState struct {
+		status string // "running", "done", "fail"
+		info   string
+	}
+	tasks := make(map[string]*taskState)
+	taskOrder := []string{"processes", "ports", "systemd", "docker"}
+	for _, t := range taskOrder {
+		tasks[t] = &taskState{status: "pending"}
 	}
 
-	displayName := StyleCmdBoxToolName.Render(toolDisplayName(name))
-
-	// 실제 명령어 미리보기 (shell_exec → command, 그 외 → description)
-	cmdPreview := shellBoxCmdPreview(name, args)
-
-	header := iconStr + " " + displayName
-	if cmdPreview != "" {
-		used := lipgloss.Width(iconStr) + 1 + lipgloss.Width(displayName) + 1
-		remaining := maxW - used - 8 // 시간 표시용 여유
-		if remaining > 15 {
-			header += " " + StyleCmdBoxDim.Render(truncateStr(cmdPreview, remaining))
+	// Parse lines for task updates
+	for _, line := range lines {
+		if strings.Contains(line, "task_start") {
+			if t := extractField(line, "task"); t != "" {
+				tasks[t].status = "running"
+			}
+		} else if strings.Contains(line, "task_done") {
+			if t := extractField(line, "task"); t != "" {
+				tasks[t].status = "done"
+				count := extractField(line, "count")
+				dur := extractField(line, "dur")
+				tasks[t].info = fmt.Sprintf("Found %s items (%s)", count, dur)
+			}
+		} else if strings.Contains(line, "task_fail") {
+			if t := extractField(line, "task"); t != "" {
+				tasks[t].status = "fail"
+				tasks[t].info = "Failed to scan"
+			}
 		}
 	}
 
-	if dur > 0 && icon != boxIconRunning {
-		header += " " + StyleCmdBoxDim.Render("("+formatElapsedShort(dur)+")")
+	for _, t := range taskOrder {
+		ts := tasks[t]
+		if ts.status == "pending" && (t == "systemd" || t == "docker") {
+			continue // Skip if not applicable
+		}
+
+		var iconStr string
+		var labelStyle lipgloss.Style
+		switch ts.status {
+		case "running":
+			iconStr = StyleClaude().Render("●")
+			labelStyle = StyleThinking
+		case "done":
+			iconStr = StyleSuccess.Render("\u221a")
+			labelStyle = StyleCmdBoxDim
+		case "fail":
+			iconStr = StyleError.Render("x")
+			labelStyle = StyleError
+		default:
+			iconStr = StyleCmdBoxDim.Render("○")
+			labelStyle = StyleCmdBoxDim
+		}
+
+		line := fmt.Sprintf("  %s %-10s", iconStr, t)
+		if ts.info != "" {
+			line += " " + labelStyle.Render(ts.info)
+		}
+		content.WriteString("\n" + truncateShellLine(line, innerW))
 	}
 
-	return header
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorSubtle).
+		PaddingLeft(1).
+		PaddingRight(1).
+		Width(boxW).
+		Render(content.String())
 }
 
-// shellBoxCmdPreview는 박스 헤더에 표시할 명령어/인자 미리보기를 반환한다.
-// shell_exec / file_transfer는 전용 포맷을 사용하고, 나머지는 toolDisplayArg로 폴백한다.
-func shellBoxCmdPreview(name string, args map[string]any) string {
-	if args == nil {
-		return ""
-	}
-	switch name {
-	case "shell_exec":
-		if cmd, ok := args["command"].(string); ok {
-			return cmd
+func extractField(line, key string) string {
+	parts := strings.Split(line, " ")
+	for _, p := range parts {
+		if strings.HasPrefix(p, key+"=") {
+			return strings.Trim(strings.TrimPrefix(p, key+"="), "\"")
 		}
-	case "file_transfer":
-		if desc, ok := args["description"].(string); ok && desc != "" {
-			return desc
-		}
-		action, _ := args["action"].(string)
-		local, _ := args["local_path"].(string)
-		remote, _ := args["remote_path"].(string)
-		if action != "" {
-			return action + " " + local + " → " + remote
-		}
-	default:
-		return toolDisplayArg(name, args)
 	}
 	return ""
 }
 
-// buildRoundedBorderTitleLine은 RoundedBorder 상단 줄에 제목을 안전하게 끼워 넣는다.
+func shellBoxStatusLine(name string, args map[string]any, totalLines int, icon boxIcon, dur time.Duration) string {
+	var iconStr string
+	switch icon {
+	case boxIconRunning:
+		iconStr = StyleClaude().Render("●")
+	case boxIconDone:
+		iconStr = StyleSuccess.Render("\u221a")
+	case boxIconFailed:
+		iconStr = StyleError.Render("x")
+	}
+
+	line := iconStr + " " + StyleCmdBoxToolName.Render(toolDisplayName(name))
+	if desc := shellBoxDescLine(name, args); desc != "" {
+		line += StyleCmdBoxDim.Render(" -> ") + StyleClaude().Render(desc)
+	}
+	if isShellBoxTool(name) {
+		line += StyleCmdBoxDim.Render(" -> ") + StyleCmdBoxDim.Render(fmt.Sprintf("%d lines", totalLines))
+	}
+	if dur > 0 && icon != boxIconRunning {
+		line += " " + StyleCmdBoxDim.Render("("+formatElapsedShort(dur)+")")
+	}
+	return line
+}
+
+func shellBoxDescLine(name string, args map[string]any) string {
+	return shellTaskLabel(name, args)
+}
+
 func buildRoundedBorderTitleLine(totalWidth int, title string) string {
 	if totalWidth < 4 || title == "" {
 		return ""
 	}
 
 	titleStr := StyleCmdBoxToolName.Render(title)
-	titleWidth := lipgloss.Width(titleStr)
 	innerWidth := totalWidth - 2
-	if innerWidth < 2 {
-		return ""
-	}
-
+	titleWidth := lipgloss.Width(titleStr)
 	if titleWidth >= innerWidth {
 		plain := truncateStr(title, max(1, innerWidth-2))
 		titleStr = StyleCmdBoxToolName.Render(plain)
@@ -195,16 +215,209 @@ func buildRoundedBorderTitleLine(totalWidth int, title string) string {
 	}
 
 	borderStyle := lipgloss.NewStyle().Foreground(ColorSubtle)
-	left := borderStyle.Render("╭" + strings.Repeat("─", leftFill))
-	right := borderStyle.Render(strings.Repeat("─", max(0, rightFill)) + "╮")
+	left := borderStyle.Render("?" + strings.Repeat("-", leftFill))
+	right := borderStyle.Render(strings.Repeat("-", max(0, rightFill)) + "?")
 	return left + titleStr + right
 }
 
-// appendShellLine은 shell stdout 링 버퍼에 한 줄을 추가한다.
 func appendShellLine(lines []string, line string, max int) []string {
 	lines = append(lines, line)
 	if len(lines) > max {
 		lines = lines[len(lines)-max:]
 	}
 	return lines
+}
+
+func renderDiscoverWebBox(name string, args map[string]any, lines []string, icon boxIcon, dur time.Duration, width int) string {
+	boxW := width - 4
+	if boxW < 30 {
+		boxW = 30
+	}
+	innerW := boxW - 4
+
+	var content strings.Builder
+	content.WriteString(shellBoxStatusLine(name, args, 0, icon, dur))
+	content.WriteString("\n")
+
+	type taskState struct {
+		status string
+		info   string
+	}
+	tasks := make(map[string]*taskState)
+	taskOrder := []string{"web_servers", "web_ports", "ssl_certs", "vhosts"}
+	for _, t := range taskOrder {
+		tasks[t] = &taskState{status: "pending"}
+	}
+
+	for _, line := range lines {
+		if strings.Contains(line, "task_start") {
+			if t := extractField(line, "task"); t != "" {
+				tasks[t].status = "running"
+			}
+		} else if strings.Contains(line, "task_done") {
+			if t := extractField(line, "task"); t != "" {
+				tasks[t].status = "done"
+				count := extractField(line, "count")
+				dur := extractField(line, "dur")
+				tasks[t].info = fmt.Sprintf("Found %s items (%s)", count, dur)
+			}
+		} else if strings.Contains(line, "task_fail") {
+			if t := extractField(line, "task"); t != "" {
+				tasks[t].status = "fail"
+				tasks[t].info = "Scan failed"
+			}
+		}
+	}
+
+	for _, t := range taskOrder {
+		ts := tasks[t]
+		var iconStr string
+		var labelStyle lipgloss.Style
+		switch ts.status {
+		case "running":
+			iconStr = StyleClaude().Render("●")
+			labelStyle = StyleThinking
+		case "done":
+			iconStr = StyleSuccess.Render("\u221a")
+			labelStyle = StyleCmdBoxDim
+		case "fail":
+			iconStr = StyleError.Render("x")
+			labelStyle = StyleError
+		default:
+			iconStr = StyleCmdBoxDim.Render("○")
+			labelStyle = StyleCmdBoxDim
+		}
+
+		displayName := strings.Title(strings.Replace(t, "_", " ", -1))
+		line := fmt.Sprintf("  %s %-14s", iconStr, displayName)
+		if ts.info != "" {
+			line += " " + labelStyle.Render(ts.info)
+		}
+		content.WriteString("\n" + truncateShellLine(line, innerW))
+	}
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorSubtle).
+		PaddingLeft(1).
+		PaddingRight(1).
+		Width(boxW).
+		Render(content.String())
+}
+
+func renderParallelTaskBox(name string, args map[string]any, lines []string, icon boxIcon, dur time.Duration, width int) string {
+	boxW := width - 4
+	if boxW < 30 {
+		boxW = 30
+	}
+	innerW := boxW - 4
+
+	var content strings.Builder
+	content.WriteString(shellBoxStatusLine(name, args, 0, icon, dur))
+	content.WriteString("\n")
+
+	// Determine tasks for this tool
+	var taskOrder []string
+	switch name {
+	case "discover_services":
+		taskOrder = []string{"processes", "ports", "systemd", "docker"}
+	case "system_info":
+		taskOrder = []string{"os", "cpu", "memory", "disk", "uptime"}
+	case "network_info":
+		taskOrder = []string{"interfaces", "routing", "arp"}
+	}
+
+	type taskState struct {
+		status string // "running", "done", "fail"
+		info   string
+	}
+	tasks := make(map[string]*taskState)
+	for _, t := range taskOrder {
+		tasks[t] = &taskState{status: "pending"}
+	}
+
+	// Parse lines for task updates
+	for _, line := range lines {
+		if strings.Contains(line, "task_start") {
+			if t := extractField(line, "task"); t != "" {
+				if _, ok := tasks[t]; ok {
+					tasks[t].status = "running"
+				}
+			}
+		} else if strings.Contains(line, "task_done") {
+			if t := extractField(line, "task"); t != "" {
+				if _, ok := tasks[t]; ok {
+					tasks[t].status = "done"
+					count := extractField(line, "count")
+					dur := extractField(line, "dur")
+					if count != "" {
+						tasks[t].info = fmt.Sprintf("%s items found (%s)", count, dur)
+					} else {
+						tasks[t].info = fmt.Sprintf("Completed (%s)", dur)
+					}
+				}
+			}
+		} else if strings.Contains(line, "task_fail") {
+			if t := extractField(line, "task"); t != "" {
+				if _, ok := tasks[t]; ok {
+					tasks[t].status = "fail"
+					tasks[t].info = "Failed"
+				}
+			}
+		}
+	}
+
+	for _, t := range taskOrder {
+		ts := tasks[t]
+		// Skip optional tasks that didn't run
+		if ts.status == "pending" && (t == "systemd" || t == "docker") {
+			continue
+		}
+
+		var iconStr string
+		var labelStyle lipgloss.Style
+		switch ts.status {
+		case "running":
+			iconStr = StyleClaude().Render("●")
+			labelStyle = StyleThinking
+		case "done":
+			iconStr = StyleSuccess.Render("\u221a")
+			labelStyle = StyleCmdBoxDim
+		case "fail":
+			iconStr = StyleError.Render("x")
+			labelStyle = StyleError
+		default:
+			iconStr = StyleCmdBoxDim.Render("○")
+			labelStyle = StyleCmdBoxDim
+		}
+
+		displayName := strings.Title(t)
+		line := fmt.Sprintf("  %s %-12s", iconStr, displayName)
+		if ts.info != "" {
+			line += " " + labelStyle.Render(ts.info)
+		}
+		content.WriteString("\n" + truncateShellLine(line, innerW))
+	}
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorSubtle).
+		PaddingLeft(1).
+		PaddingRight(1).
+		Width(boxW).
+		Render(content.String())
+}
+
+func truncateShellLine(line string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	runes := []rune(line)
+	if len(runes) <= maxWidth {
+		return line
+	}
+	if maxWidth <= 3 {
+		return string(runes[:maxWidth])
+	}
+	return string(runes[:maxWidth-3]) + "..."
 }

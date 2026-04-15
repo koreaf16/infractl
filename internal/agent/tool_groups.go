@@ -69,7 +69,9 @@ var toolGroupMembers = map[ToolGroup][]string{
 }
 
 // baseToolNames는 needs_tools=true일 때 항상 포함하는 기반 도구이다.
-var baseToolNames = []string{"session_context", "read_placeholder"}
+// ask_user_question은 어떤 그룹에도 속하지 않으므로 항상 포함시켜야
+// Qwen 모델이 올바른 스키마(question + options)를 참조할 수 있다.
+var baseToolNames = []string{"session_context", "read_placeholder", "ask_user_question"}
 
 func ResolveAllToolGroups(
 	reg *tools.Registry,

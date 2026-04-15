@@ -15,9 +15,10 @@ import (
 func (m AppModel) runAgent(input string) tea.Cmd {
 	ag := m.ag
 	ctx := m.ctx
+	reqID := m.reqID // 현재 세대 캡처 — 완료 시 stale 여부 판별에 사용
 	return func() tea.Msg {
 		_ = ag.Run(ctx, input)
-		return AgentDoneMsg{}
+		return AgentDoneMsg{ReqID: reqID}
 	}
 }
 

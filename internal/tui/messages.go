@@ -6,11 +6,13 @@
 package tui
 
 import (
+	"fmt"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/yourorg/infractl/internal/store"
 	"github.com/yourorg/infractl/internal/subagent"
+	"github.com/yourorg/infractl/internal/tools"
 )
 
 // TokenMsg는 LLM 스트리밍 응답 토큰 하나를 나타낸다.
@@ -50,7 +52,11 @@ type ResponseDoneMsg string
 type ErrorMsg struct{ Err error }
 
 // AgentDoneMsg는 에이전트 루프가 종료되었음을 나타낸다.
-type AgentDoneMsg struct{}
+// ReqID는 이 완료가 어느 요청 세대에 속하는지 식별한다.
+// 현재 활성 reqID와 다르면 stale 메시지로 간주하여 무시한다.
+type AgentDoneMsg struct {
+	ReqID int
+}
 
 // ShellOutputMsg는 shell_exec 실행 중 수신된 stdout 라인을 나타낸다.
 type ShellOutputMsg struct {
@@ -98,6 +104,7 @@ type ProgramRefMsg struct {
 // SelectOption / SelectResult 타입은 select_ui.go에 정의되어 있다.
 type SelectRequestMsg struct {
 	Question string
+	Header   string
 	Options  []SelectOption
 	ReplyCh  chan SelectResult
 }
@@ -106,6 +113,20 @@ type SelectRequestMsg struct {
 type SelectResponseMsg struct {
 	Result  SelectResult
 	ReplyCh chan SelectResult
+}
+
+// FormRequestMsg는 TUI에 다중 필드 폼 입력 UI 표시를 요청한다.
+type FormRequestMsg struct {
+	Title   string
+	Header  string
+	Fields  []tools.FormFieldDef
+	ReplyCh chan FormResult
+}
+
+// FormResponseMsg는 사용자의 폼 입력 결과를 에이전트 goroutine으로 전달한다.
+type FormResponseMsg struct {
+	Result  FormResult
+	ReplyCh chan FormResult
 }
 
 // ActiveServerMsg는 활성 서버가 변경되었을 때 TUI AppModel에 전달된다.
@@ -119,4 +140,16 @@ type SubagentEventMsg struct {
 	Event subagent.Event
 }
 
+// NewSubmitCmd는 SubmitMsg를 tea.Cmd로 래핑한다.
+func NewSubmitCmd(displayInput, expandedInput string) tea.Cmd {
+	return func() tea.Msg {
+		return SubmitMsg{DisplayInput: displayInput, ExpandedInput: expandedInput}
+	}
+}
 
+// NewSystemCmd는 SystemMsg를 tea.Cmd로 래핑한다.
+func NewSystemCmd(format string, args ...interface{}) tea.Cmd {
+	return func() tea.Msg {
+		return SystemMsg(fmt.Sprintf(format, args...))
+	}
+}

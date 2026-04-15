@@ -64,8 +64,6 @@ func (t *FileTransferTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *FileTransferTool) RiskLevel() RiskLevel { return RiskLow }
-
 func (t *FileTransferTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 	action, err := argString(args, "action", true)
 	if err != nil {

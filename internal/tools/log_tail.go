@@ -25,9 +25,8 @@ func (t *LogTailTool) Description() string {
 		"Supports systemd journal (by unit name), log files (by path), and Windows Event Log."
 }
 
-func (t *LogTailTool) IsReadOnly() bool     { return true }
-func (t *LogTailTool) IsEnabled() bool      { return true }
-func (t *LogTailTool) RiskLevel() RiskLevel { return RiskNone }
+func (t *LogTailTool) IsReadOnly() bool { return true }
+func (t *LogTailTool) IsEnabled() bool  { return true }
 
 func (t *LogTailTool) Parameters() map[string]interface{} {
 	return map[string]interface{}{

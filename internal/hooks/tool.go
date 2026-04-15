@@ -10,7 +10,6 @@ import (
 	"fmt"
 
 	"github.com/yourorg/infractl/internal/executor"
-	"github.com/yourorg/infractl/internal/tools"
 )
 
 // RegisterTool은 라이프사이클 훅을 등록하는 LLM 도구이다.
@@ -46,9 +45,8 @@ func (t *RegisterTool) Parameters() map[string]interface{} {
 		"required": []string{"event", "script_path"},
 	}
 }
-func (t *RegisterTool) RiskLevel() tools.RiskLevel { return tools.RiskLow }
-func (t *RegisterTool) IsReadOnly() bool            { return false }
-func (t *RegisterTool) IsEnabled() bool             { return true }
+func (t *RegisterTool) IsReadOnly() bool { return false }
+func (t *RegisterTool) IsEnabled() bool  { return true }
 
 func (t *RegisterTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
 	event, _ := args["event"].(string)

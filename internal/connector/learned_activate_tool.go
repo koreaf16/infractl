@@ -11,7 +11,6 @@ import (
 
 	"github.com/yourorg/infractl/internal/executor"
 	"github.com/yourorg/infractl/internal/store"
-	"github.com/yourorg/infractl/internal/tools"
 )
 
 // LearnedActivateTool recreates a generic connector from a learned system entry.
@@ -52,9 +51,8 @@ func (t *LearnedActivateTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *LearnedActivateTool) RiskLevel() tools.RiskLevel { return tools.RiskLow }
-func (t *LearnedActivateTool) IsReadOnly() bool           { return false }
-func (t *LearnedActivateTool) IsEnabled() bool            { return true }
+func (t *LearnedActivateTool) IsReadOnly() bool { return false }
+func (t *LearnedActivateTool) IsEnabled() bool  { return true }
 
 func (t *LearnedActivateTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
 	serviceType, _ := args["service_type"].(string)

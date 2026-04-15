@@ -117,6 +117,11 @@ func (e *SSHExecutor) InjectStdin(line string) error {
 	return e.client.InjectStdin(line)
 }
 
+// SendEOF forwards EOF/EOT signaling to the active SSH session.
+func (e *SSHExecutor) SendEOF() error {
+	return e.client.SendEOF()
+}
+
 // Target returns the server alias.
 func (e *SSHExecutor) Target() string {
 	return e.name

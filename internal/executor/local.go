@@ -26,8 +26,8 @@ const defaultTimeout = 30 * time.Second
 type LocalExecutor struct {
 	timeout time.Duration
 
-	sessionMu     sync.Mutex
-	activeStdin   io.Writer
+	sessionMu       sync.Mutex
+	activeStdin     io.WriteCloser
 	activeStdinMode stdinMode
 }
 
@@ -94,7 +94,6 @@ func (e *LocalExecutor) Platform() Platform {
 func (e *LocalExecutor) ShellName() string {
 	return LocalShellName()
 }
-
 
 // ExecuteStream runs a command while streaming stdout and stderr line-by-line via onLine.
 // stderr는 password: 같은 프롬프트 감지를 위해 stdout과 동일한 partial-line 파이프라인으로 처리된다.
@@ -212,15 +211,38 @@ func (e *LocalExecutor) InjectStdin(line string) error {
 	return nil
 }
 
+// SendEOF closes plain stdin pipes or injects Ctrl-D into PTY-backed sessions.
+func (e *LocalExecutor) SendEOF() error {
+	e.sessionMu.Lock()
+	pipe := e.activeStdin
+	mode := e.activeStdinMode
+	e.sessionMu.Unlock()
+
+	if pipe == nil {
+		return fmt.Errorf("send EOF: no active local stdin pipe")
+	}
+	if mode == stdinModePTY {
+		if _, err := pipe.Write([]byte{0x04}); err != nil {
+			return fmt.Errorf("send EOF: %w", err)
+		}
+		return nil
+	}
+	if err := pipe.Close(); err != nil {
+		return fmt.Errorf("send EOF: %w", err)
+	}
+	e.clearActiveStdin(pipe)
+	return nil
+}
+
 // setActivePTY registers a PTY master as the active stdin (uses PTY line-ending mode).
-func (e *LocalExecutor) setActivePTY(ptmx io.Writer) {
+func (e *LocalExecutor) setActivePTY(ptmx io.WriteCloser) {
 	e.sessionMu.Lock()
 	defer e.sessionMu.Unlock()
 	e.activeStdin = ptmx
 	e.activeStdinMode = stdinModePTY
 }
 
-func (e *LocalExecutor) clearActiveStdin(key io.Writer) {
+func (e *LocalExecutor) clearActiveStdin(key io.WriteCloser) {
 	e.sessionMu.Lock()
 	defer e.sessionMu.Unlock()
 	if e.activeStdin == key {
@@ -260,4 +282,3 @@ func buildCommand(ctx context.Context, command string) (*exec.Cmd, error) {
 	}
 	return exec.CommandContext(ctx, sh, "-c", command), nil
 }
-

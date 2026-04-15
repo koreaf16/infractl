@@ -8,6 +8,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/yourorg/infractl/internal/executor"
 )
@@ -40,13 +41,7 @@ func (t *VerifyCompleteTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *VerifyCompleteTool) RiskLevel() RiskLevel {
-	return RiskNone
-}
-
-func (t *VerifyCompleteTool) IsReadOnly() bool {
-	return true
-}
+func (t *VerifyCompleteTool) IsReadOnly() bool { return true }
 
 func (t *VerifyCompleteTool) IsEnabled() bool {
 	return true
@@ -56,5 +51,11 @@ func (t *VerifyCompleteTool) Execute(ctx context.Context, args map[string]interf
 	summary, _ := args["summary"].(string)
 	evidence, _ := args["verification_evidence"].(string)
 
-	return fmt.Sprintf("작업 완료가 시스템에 공식 접수되었습니다.\n요약: %s\n증거: %s\n\n[SYSTEM] 이제 사용자에게 최종 응답을 제공하고 대화를 마무리하십시오.", summary, evidence), nil
+	if strings.TrimSpace(summary) == "" || strings.TrimSpace(evidence) == "" {
+		return "Error: 'summary' 및 'verification_evidence' 인자가 비어 있습니다. " +
+			"수행한 작업 내용과 그 결과(명령어 출력 등)를 상세히 포함하여 다시 호출해 주십시오. " +
+			"이 정보 없이는 작업을 마무리할 수 없습니다.", nil
+	}
+
+	return fmt.Sprintf("작업 완료가 시스템에 공식 접수되었습니다.\n요약: %s\n증거: %s\n\n[SYSTEM] 검증이 완료되었습니다. 이제 사용자에게 최종 응답을 제공하고 대화를 마무리하십시오.", summary, evidence), nil
 }

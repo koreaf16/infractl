@@ -9,14 +9,23 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/yourorg/infractl/internal/llm"
 	"github.com/yourorg/infractl/internal/store"
-	"github.com/yourorg/infractl/internal/tools"
 )
 
 const maxOutputLen = 10000
+
+var (
+	secretPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)(password|passwd|token|secret|apikey|api_key)\s*[=:]\s*['"]?[^'"\s]+`),
+		regexp.MustCompile(`(?i)authorization:\s*bearer\s+[^\s]+`),
+		regexp.MustCompile(`(?i)pgpassword=[^\s]+`),
+	}
+)
 
 // execContext는 단일 도구 실행에 필요한 컨텍스트 정보를 담는다.
 type execContext struct {
@@ -28,7 +37,6 @@ type execContext struct {
 	errMsg     string
 	exitCode   int
 	duration   time.Duration
-	riskLevel  tools.RiskLevel
 	success    bool
 	userPrompt string
 }
@@ -68,14 +76,17 @@ func (a *Agent) recordExecLog(ctx context.Context, ec execContext) int64 {
 		ToolName:     ec.toolName,
 		TargetServer: target,
 		InputParams:  paramsJSON,
-		Output:       output,
-		ErrorMessage: ec.errMsg,
+		Output:       sanitizeSensitiveText(output),
+		ErrorMessage: sanitizeSensitiveText(ec.errMsg),
 		ExitCode:     ec.exitCode,
 		DurationMs:   ec.duration.Milliseconds(),
-		RiskLevel:    string(ec.riskLevel),
 		Success:      ec.success,
 		RetryOf:      retryOf,
 		UserPrompt:   a.lastUserPrompt,
+		TaskKey:      buildTaskKey(a.lastUserPrompt),
+		CommandKey:   buildCommandKey(ec.toolName, ec.args),
+		FailureSig:   buildFailureSignature(ec.errMsg, output, ec.exitCode),
+		MetadataJSON: buildExecMetadataJSON(ec),
 	}
 
 	id, err := a.execLogStore.SaveExecutionLog(ctx, log)
@@ -93,6 +104,33 @@ func (a *Agent) recordExecLog(ctx context.Context, ec execContext) int64 {
 	return id
 }
 
+func sanitizeSensitiveText(s string) string {
+	out := s
+	for _, re := range secretPatterns {
+		out = re.ReplaceAllStringFunc(out, func(m string) string {
+			if idx := strings.IndexAny(m, "=:"); idx > 0 {
+				return m[:idx+1] + " [REDACTED]"
+			}
+			return "[REDACTED]"
+		})
+	}
+	return out
+}
+
+func buildExecMetadataJSON(ec execContext) string {
+	meta := map[string]interface{}{
+		"tool":      ec.toolName,
+		"target":    ec.target,
+		"success":   ec.success,
+		"exit_code": ec.exitCode,
+	}
+	b, err := json.Marshal(meta)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
 // sessionMessageFromLLM은 llm.Message를 store.SessionMessage로 변환한다.
 func sessionMessageFromLLM(msg llm.Message, convID int64) store.SessionMessage {
 	toolCallsJSON := "[]"
@@ -107,6 +145,8 @@ func sessionMessageFromLLM(msg llm.Message, convID int64) store.SessionMessage {
 		Content:        msg.Content,
 		ToolCalls:      toolCallsJSON,
 		ToolCallID:     msg.ToolCallID,
+		Kind:           "message",
+		MetadataJSON:   "{}",
 	}
 }
 

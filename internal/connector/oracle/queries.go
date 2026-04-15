@@ -5,25 +5,34 @@
 
 package oracle
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // buildConnStr은 sqlplus 접속 문자열을 생성한다.
 // host가 있으면 Easy Connect 방식, 없으면 TNSNAMES 방식이다.
-// creds.OSAuth가 true이면 "/ as sysdba" OS 인증 문자열을 반환한다.
-func buildConnStr(user, pass, role, host string, port int, sid string, osAuth bool) string {
+// pdb가 지정되면 CDB 대신 PDB 서비스명으로 연결한다.
+// osAuth가 true이면 "/ as sysdba" OS 인증 문자열을 반환한다.
+func buildConnStr(user, pass, role, host string, port int, cdb, pdb string, osAuth bool) string {
 	if osAuth {
 		// OS 인증: 사용자 이름/패스워드 없이 sysdba로 접속
 		return "/ as sysdba"
 	}
+	// PDB 서비스명이 있으면 PDB로 직접 연결, 없으면 CDB/SID 사용
+	serviceName := cdb
+	if pdb != "" {
+		serviceName = pdb
+	}
 	connStr := user + "/" + pass
 	if host != "" {
 		if port > 0 {
-			connStr += fmt.Sprintf("@%s:%d/%s", host, port, sid)
+			connStr += fmt.Sprintf("@%s:%d/%s", host, port, serviceName)
 		} else {
-			connStr += fmt.Sprintf("@%s/%s", host, sid)
+			connStr += fmt.Sprintf("@%s/%s", host, serviceName)
 		}
-	} else if sid != "" {
-		connStr += "@" + sid
+	} else if serviceName != "" {
+		connStr += "@" + serviceName
 	}
 	if role == "sysdba" {
 		connStr += " as sysdba"
@@ -43,14 +52,20 @@ SQLEOF`, sid)
 }
 
 // buildSQLPlusCmd은 SQL을 실행하는 sqlplus 명령을 생성한다.
+// LLM이 세미콜론 없이 SQL을 전달해도 EXIT;가 SQL로 파싱되지 않도록
+// 세미콜론이 없으면 자동으로 추가한다.
 func buildSQLPlusCmd(connStr, sql string) string {
+	trimmed := strings.TrimSpace(sql)
+	if !strings.HasSuffix(trimmed, ";") {
+		trimmed += ";"
+	}
 	return fmt.Sprintf(`sqlplus -S '%s' <<'SQLEOF'
 SET LINESIZE 200
 SET PAGESIZE 50
 SET FEEDBACK OFF
 %s
 EXIT;
-SQLEOF`, connStr, sql)
+SQLEOF`, connStr, trimmed)
 }
 
 // tablespaceQuery는 테이블스페이스 사용량 조회 쿼리이다.

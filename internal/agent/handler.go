@@ -58,7 +58,6 @@ type EventHandler interface {
 	OnRAGContext(count int)
 }
 
-
 // IdleInputRequest는 명령 실행 중 유휴 상태가 감지되었을 때의 요청 정보이다.
 type IdleInputRequest struct {
 	ToolName  string   // 실행 중인 도구 이름
@@ -69,10 +68,10 @@ type IdleInputRequest struct {
 
 // IdleInputResponse는 인터랙티브 프롬프트에 대한 응답이다.
 type IdleInputResponse struct {
-	Input string // stdin에 쓸 내용. 빈 문자열이면 빈 줄(Enter)을 전송한다.
-	Abort bool   // true이면 프로세스를 종료한다.
+	Input      string // stdin에 쓸 내용. 빈 문자열이면 빈 줄(Enter)을 전송한다.
+	CloseStdin bool   // true이면 stdin에 EOF/EOT를 보낸다.
+	Abort      bool   // true이면 프로세스를 종료한다.
 }
-
 
 // IdleInputHandler는 명령 실행 중 유휴(인터랙티브 프롬프트 대기) 상태를 처리한다.
 // SmartIdleInputHandler(LLM 판단 + TUI 폴백)가 기본 구현이다.
@@ -87,4 +86,6 @@ type IdleInputHandler interface {
 type QuestionHandler interface {
 	// RequestQuestion은 사용자에게 질문을 던지고 답변을 대기한다.
 	RequestQuestion(ctx context.Context, req tools.QuestionRequest) (tools.QuestionResponse, error)
+	// RequestForm은 사용자에게 다중 필드 폼 입력을 요청하고 결과를 대기한다.
+	RequestForm(ctx context.Context, req tools.FormRequest) (tools.FormResponse, error)
 }

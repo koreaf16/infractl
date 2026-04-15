@@ -75,7 +75,7 @@ func summaryFileRead(args map[string]any, result string) string {
 }
 
 func summaryShellExec(result string, success bool) string {
-	lines := countLines(result)
+	lines := len(shellResultOutputLines("shell_exec", result))
 	if success {
 		return fmt.Sprintf("%d lines output", lines)
 	}
@@ -109,15 +109,19 @@ func summarySearch(result string) string {
 
 // toolBoxContent는 도구 결과 박스 내부에 표시할 줄들을 반환한다.
 // shell_exec / file_transfer처럼 스트리밍 출력이 있는 도구는 호출자가 캡처된 라인을 전달한다.
-// 그 외 도구는 결과에서 간략한 요약 한 줄을 생성한다.
+// 그 외 도구는 결과에서 상세 내용 또는 요약을 생성한다.
 func toolBoxContent(name string, args map[string]any, result string, success bool) []string {
+	if result == "" {
+		if success {
+			return []string{StyleSuccess.Render("Done")}
+		}
+		return []string{StyleError.Render("Failed")}
+	}
+
 	switch name {
 	case "shell_exec", "file_transfer":
 		return nil // 호출자가 스트리밍 캡처 라인을 제공한다
-	case "system_info":
-		if result == "" {
-			return nil
-		}
+	case "system_info", "process_list", "network_info", "disk_usage", "service_status", "k8s_query":
 		return strings.Split(strings.TrimRight(result, "\r\n"), "\n")
 	case "file_write":
 		return []string{summaryFileWrite(args, result)}
@@ -130,7 +134,14 @@ func toolBoxContent(name string, args map[string]any, result string, success boo
 	case "knowledge_search":
 		return []string{summarySearch(result)}
 	default:
-		first := firstLine(result)
+		// 여러 줄인 경우 상세 내용 반환 (renderShellBoxContent에서 10줄로 제한됨)
+		trimmed := strings.TrimRight(result, "\r\n")
+		if strings.Contains(trimmed, "\n") {
+			return strings.Split(trimmed, "\n")
+		}
+
+		// 한 줄인 경우 요약 또는 그대로 반환
+		first := firstLine(trimmed)
 		if len(first) > 80 {
 			first = first[:77] + "..."
 		}

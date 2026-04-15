@@ -26,7 +26,6 @@ func (t *ServiceStatusTool) Description() string {
 
 func (t *ServiceStatusTool) IsReadOnly() bool     { return true }
 func (t *ServiceStatusTool) IsEnabled() bool      { return true }
-func (t *ServiceStatusTool) RiskLevel() RiskLevel { return RiskNone }
 
 func (t *ServiceStatusTool) Parameters() map[string]interface{} {
 	return map[string]interface{}{

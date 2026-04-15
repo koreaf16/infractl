@@ -9,11 +9,11 @@ import (
 
 type noopLLMClient struct{}
 
-func (noopLLMClient) Chat(_ context.Context, _ []llm.Message, _ []llm.ToolDef) (llm.Response, error) {
+func (noopLLMClient) Chat(_ context.Context, _ []llm.Message, _ []llm.ToolDef, _ interface{}) (llm.Response, error) {
 	return llm.Response{}, nil
 }
 
-func (noopLLMClient) ChatStream(_ context.Context, _ []llm.Message, _ []llm.ToolDef, _ func(string), _ func(string)) (llm.Response, error) {
+func (noopLLMClient) ChatStream(_ context.Context, _ []llm.Message, _ []llm.ToolDef, _ interface{}, _ func(string), _ func(string)) (llm.Response, error) {
 	return llm.Response{}, nil
 }
 

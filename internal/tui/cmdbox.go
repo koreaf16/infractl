@@ -191,15 +191,19 @@ func toolDisplayName(toolName string) string {
 		"shell_exec":       "Shell",
 		"file_read":        "Read",
 		"file_write":       "Write",
-		"server_add":       "ServerAdd",
-		"server_remove":    "ServerRemove",
-		"server_list":      "ServerList",
-		"process_list":     "ProcessList",
-		"network_info":     "NetworkInfo",
-		"web_fetch":        "WebFetch",
-		"web_search":       "WebSearch",
-		"knowledge_search": "Search",
-		"knowledge_add":    "LearnAdd",
+		"server_add":       "Server Add",
+		"server_remove":    "Server Remove",
+		"server_list":      "Servers",
+		"process_list":     "Processes",
+		"network_info":     "Network",
+		"disk_usage":       "Disk Usage",
+		"service_status":   "Services",
+		"system_info":      "System Info",
+		"k8s_query":        "Kubernetes",
+		"web_fetch":        "Web Fetch",
+		"web_search":       "Search",
+		"knowledge_search": "Knowledge",
+		"knowledge_add":    "Learn",
 	}
 	if n, ok := names[toolName]; ok {
 		return n
@@ -225,11 +229,8 @@ func toolTargetLabel(toolName, target string) string {
 func toolDisplayArg(toolName string, args map[string]any) string {
 	switch toolName {
 	case "shell_exec":
-		if desc, ok := args["description"].(string); ok && desc != "" {
-			return truncateStr(desc, 50)
-		}
-		if cmd, ok := args["command"].(string); ok {
-			return truncateStr(cmd, 50)
+		if label := shellTaskLabel(toolName, args); label != "" {
+			return truncateStr(label, 70)
 		}
 	case "file_read", "file_write":
 		if p, ok := args["path"].(string); ok {
@@ -275,11 +276,8 @@ func toolShimmerLabel(name string, args map[string]any) string {
 			return displayName + ` "` + truncateStr(q, 30) + `"`
 		}
 	case "shell_exec":
-		if desc, ok := args["description"].(string); ok && desc != "" {
-			return displayName + " " + truncateStr(desc, 40)
-		}
-		if cmd, ok := args["command"].(string); ok && cmd != "" {
-			return displayName + " " + truncateStr(cmd, 40)
+		if label := shellTaskLabel(name, args); label != "" {
+			return displayName + " " + truncateStr(label, 40)
 		}
 	case "file_read", "file_write":
 		if p, ok := args["path"].(string); ok && p != "" {
@@ -321,4 +319,3 @@ func previewCmd(toolName string, args map[string]interface{}) string {
 	}
 	return "running..."
 }
-

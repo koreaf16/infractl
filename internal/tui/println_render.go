@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/yourorg/infractl/internal/llm"
 	"github.com/yourorg/infractl/internal/subagent"
 )
 
@@ -48,6 +49,10 @@ func renderToolSummaryLine(name string, args map[string]any, result string, dura
 // renderResponseText는 최종 응답을 스크롤백 출력용으로 렌더링한다.
 // 각 줄 앞에 2칸 들여쓰기를 적용한다.
 func renderResponseText(content string, md *mdRenderer) string {
+	content = llm.SanitizeAssistantContent(content)
+	if content == "" {
+		return ""
+	}
 	lines := md.Render(content)
 	if len(lines) == 0 {
 		return ""
@@ -66,6 +71,7 @@ func renderResponseText(content string, md *mdRenderer) string {
 // View()의 busy 상태에서 마지막 N줄을 표시할 때 사용한다.
 // 각 줄 앞에 2칸 들여쓰기를 적용한다.
 func renderStreamingPreview(content string, md *mdRenderer, cache *stableCache, maxLines int) []string {
+	content = llm.SanitizeAssistantContent(content)
 	if content == "" {
 		return nil
 	}

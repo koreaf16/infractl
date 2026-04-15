@@ -16,8 +16,6 @@ var (
 	ColorSuccess = lipgloss.Color("#4EBA65")
 	ColorError   = lipgloss.Color("#FF6B80")
 	ColorWarning = lipgloss.Color("#FFC107")
-	// 지연 상태 (Stalled) - 좀 더 강렬한 오렌지/레드
-	ColorStalled = lipgloss.Color("#E05F41")
 	// 보조 텍스트 및 구분선
 	ColorSubtle = lipgloss.Color("#444444")
 	ColorDim    = lipgloss.Color("#777777")
@@ -79,9 +77,6 @@ var (
 
 	// 스피너
 	StyleSpinner = lipgloss.NewStyle().Foreground(ColorClaude)
-
-	// 지연 상태 텍스트 (Stalled)
-	StyleStalled = lipgloss.NewStyle().Foreground(ColorStalled).Bold(true).Italic(true)
 
 	// diff 색상 (Claude 스타일)
 	StyleDiffAdd     = lipgloss.NewStyle().Foreground(ColorSuccess)
@@ -237,9 +232,15 @@ var (
 	StyleGeminiHint = lipgloss.NewStyle().
 				Foreground(ColorDim)
 
+	// Claude CLI "permission" 색상 — 인라인 코드 강조 (파란-보라)
+	ColorPermission = lipgloss.Color("#B1B9F9")
+
+	// 보조 스타일 (회색)
+	StyleSubtle = lipgloss.NewStyle().Foreground(ColorSubtle)
+
 	// 전체 박스 컨테이너
 	StyleGeminiBox = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
+				Border(lipgloss.NormalBorder()).
 				BorderForeground(ColorGeminiBox).
 				PaddingLeft(1).
 				PaddingRight(1)

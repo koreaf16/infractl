@@ -15,8 +15,16 @@ type Client interface {
 	Chat(ctx context.Context, messages []Message, tools []ToolDef, toolChoice interface{}) (Response, error)
 
 	// ChatStream은 스트리밍 방식으로 LLM에 메시지를 전송한다.
+	// toolChoice는 강제 툴 호출 옵션이다 (nil이면 기본 auto).
 	// onThinkingToken은 </think> 이전의 추론 토큰에 호출된다 (nil 허용).
-	// onToken은 </think> 이후의 최종 응답 토큰에 호출된다.
+	// onToken은 </think> 이후의 최종 응답 토큰에 호출된다 (nil 허용).
 	// tool_calls가 포함된 경우 최종 Response에 조합하여 반환한다.
-	ChatStream(ctx context.Context, messages []Message, tools []ToolDef, onThinkingToken func(string), onToken func(string)) (Response, error)
+	ChatStream(ctx context.Context, messages []Message, tools []ToolDef, toolChoice interface{}, onThinkingToken func(string), onToken func(string)) (Response, error)
+}
+
+// InlineToolCallModeClient는 inline tool call 모드를 복제/전환할 수 있는 선택적 확장 인터페이스다.
+// 분류 단계처럼 API function calling이 반드시 필요한 경로에서만 사용할 수 있다.
+type InlineToolCallModeClient interface {
+	Client
+	WithInlineToolCalls(enabled bool) Client
 }

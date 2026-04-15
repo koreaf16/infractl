@@ -12,28 +12,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 
 	"github.com/yourorg/infractl/internal/store"
 )
 
 // validToolName은 안전한 도구 이름 패턴이다 (소문자, 숫자, 언더스코어).
 var validToolName = regexp.MustCompile(`^[a-z][a-z0-9_]{1,49}$`)
-
-// scriptHighRiskPatterns는 스크립트에서 고위험 명령을 감지하는 패턴이다.
-var scriptHighRiskPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)rm\s+(-[rRfF]+|--recursive|--force)`),
-	regexp.MustCompile(`(?i)\bdd\b.*\bof=`),
-	regexp.MustCompile(`(?i)\bmkfs\b`),
-	regexp.MustCompile(`(?i)\b(fdisk|gdisk|parted)\b`),
-	regexp.MustCompile(`(?i)\b(shred|wipefs)\b`),
-	regexp.MustCompile(`>\s*/dev/(sd|vd|xvd|nvme)`),
-}
-
-// scriptMediumRiskPatterns는 스크립트에서 중위험 명령을 감지하는 패턴이다.
-var scriptMediumRiskPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\bkill\s+-9\b`),
-}
 
 // UserToolManager는 사용자 정의 도구의 생성, 로드, 삭제를 관리한다.
 type UserToolManager struct {
@@ -48,7 +32,6 @@ func NewUserToolManager(s store.UserToolStore, reg *Registry, scriptsDir string)
 }
 
 // LoadAll은 DB에 저장된 모든 사용자 도구를 레지스트리에 등록한다.
-// 스크립트 파일이 없는 도구는 IsEnabled()=false로 등록되어 LLM에 노출되지 않는다.
 func (m *UserToolManager) LoadAll(ctx context.Context) error {
 	entries, err := m.store.ListUserTools(ctx)
 	if err != nil {
@@ -81,14 +64,6 @@ func (m *UserToolManager) CreateTool(ctx context.Context, entry store.UserToolEn
 	}
 	entry.ScriptPath = scriptPath
 
-	// 스크립트 내용 기반 위험도 자동 상향
-	detected := detectScriptRisk(scriptContent)
-	if RiskOrd(detected) > RiskOrd(RiskLevel(entry.RiskLevel)) {
-		slog.Warn("user tool risk level upgraded by script analysis",
-			"name", entry.Name, "declared", entry.RiskLevel, "detected", detected)
-		entry.RiskLevel = string(detected)
-	}
-
 	id, err := m.store.SaveUserTool(ctx, entry)
 	if err != nil {
 		_ = os.Remove(scriptPath)
@@ -103,31 +78,6 @@ func (m *UserToolManager) CreateTool(ctx context.Context, entry store.UserToolEn
 
 	slog.Info("user tool created", "name", entry.Name, "path", scriptPath)
 	return id, nil
-}
-
-// detectScriptRisk는 스크립트 내용을 분석하여 실제 위험도를 반환한다.
-// 주석과 빈 줄은 무시하고, 각 명령 줄을 패턴 매칭한다.
-func detectScriptRisk(script string) RiskLevel {
-	max := RiskNone
-	for _, line := range strings.Split(script, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		for _, p := range scriptHighRiskPatterns {
-			if p.MatchString(line) && RiskOrd(RiskHigh) > RiskOrd(max) {
-				max = RiskHigh
-			}
-		}
-		if RiskOrd(max) < RiskOrd(RiskMedium) {
-			for _, p := range scriptMediumRiskPatterns {
-				if p.MatchString(line) {
-					max = RiskMedium
-				}
-			}
-		}
-	}
-	return max
 }
 
 // RemoveTool은 도구를 레지스트리, DB, 스크립트 파일에서 모두 삭제한다.

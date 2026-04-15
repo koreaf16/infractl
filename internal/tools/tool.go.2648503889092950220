@@ -1,0 +1,72 @@
+﻿package tools
+
+import (
+	"context"
+
+	"github.com/yourorg/infractl/internal/executor"
+)
+
+// Tool is the common interface exposed to the agent runtime.
+type Tool interface {
+	Name() string
+	Description() string
+	Parameters() map[string]interface{}
+	IsReadOnly() bool
+	IsEnabled() bool
+	Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error)
+}
+
+// ToolOutcome captures richer execution results for tools that can classify
+// operational success independently from transport/runtime errors.
+type ToolOutcome struct {
+	Content      string
+	Success      bool
+	ExitCode     int
+	ErrorMessage string
+	MetadataJSON string
+}
+
+// ModelPromptDescriber optionally provides a model-facing concise description.
+type ModelPromptDescriber interface {
+	ModelPrompt() string
+}
+
+// DisplayDescriber optionally provides a UI-facing description.
+type DisplayDescriber interface {
+	DisplayDescription() string
+}
+
+// ResultSummarizer optionally provides a compact summary of tool output.
+type ResultSummarizer interface {
+	ResultSummary(output string) string
+}
+
+// DetailedTool optionally returns structured outcome metadata.
+type DetailedTool interface {
+	ExecuteDetailed(ctx context.Context, args map[string]interface{}, exec executor.Executor) (ToolOutcome, error)
+}
+
+// QuestionOption is one selectable answer.
+type QuestionOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description"`
+}
+
+// QuestionRequest describes a user prompt shown by the UI.
+type QuestionRequest struct {
+	Question         string           `json:"question"`
+	Options          []QuestionOption `json:"options"`
+	AllowCustomInput bool             `json:"allow_custom_input,omitempty"`
+	// Header is the optional title shown above the question UI.
+	// Leave it empty for generic prompts with no visible title.
+	// Use explicit headers for confirmations or security prompts.
+	Header string `json:"header,omitempty"`
+}
+
+// QuestionResponse is the user's answer.
+type QuestionResponse struct {
+	SelectedIndex int    `json:"selected_index"`
+	SelectedLabel string `json:"selected_label"`
+	UserInput     string `json:"user_input"`
+	IsOther       bool   `json:"is_other"`
+}

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/yourorg/infractl/internal/executor"
+	"github.com/yourorg/infractl/internal/llm"
 	"github.com/yourorg/infractl/internal/store"
 )
 
@@ -30,6 +31,21 @@ func (f fakeServerStore) Add(ctx context.Context, server store.Server) error    
 func (f fakeServerStore) Update(ctx context.Context, server store.Server) error { return nil }
 func (f fakeServerStore) Remove(ctx context.Context, name string) error         { return nil }
 func (f fakeServerStore) Close() error                                          { return nil }
+
+type fakeIdleLLMClient struct {
+	chatCalled bool
+	resp       llm.Response
+}
+
+func (f *fakeIdleLLMClient) Chat(_ context.Context, _ []llm.Message, _ []llm.ToolDef, _ interface{}) (llm.Response, error) {
+	f.chatCalled = true
+	return f.resp, nil
+}
+
+func (f *fakeIdleLLMClient) ChatStream(_ context.Context, _ []llm.Message, _ []llm.ToolDef, _ interface{}, _ func(string), _ func(string)) (llm.Response, error) {
+	f.chatCalled = true
+	return f.resp, nil
+}
 
 func TestResolveStoredPasswordByTargetName(t *testing.T) {
 	st := fakeServerStore{
@@ -82,6 +98,73 @@ func TestResolveStoredPasswordByHostPrompt(t *testing.T) {
 	}
 	if got != "dbpass" {
 		t.Fatalf("expected stored password, got %q", got)
+	}
+}
+
+func TestSmartIdleInputHandler_SendsEOFForDatabaseREPLPrompt(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		lines   []string
+	}{
+		{name: "sqlplus", command: "sqlplus / as sysdba", lines: []string{"Connected to:", "SQL>"}},
+		{name: "mysql", command: "mysql -uroot", lines: []string{"Welcome to the MySQL monitor.", "mysql>"}},
+		{name: "psql readonly", command: "psql appdb", lines: []string{"psql (16.0)", "appdb=>"}},
+		{name: "psql admin", command: "psql postgres", lines: []string{"psql (16.0)", "appdb=#"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &fakeIdleLLMClient{
+				resp: llm.Response{Content: `{"input":"y","abort":false}`},
+			}
+			handler := NewSmartIdleInputHandler(client)
+
+			resp, err := handler.RequestIdleInput(context.Background(), IdleInputRequest{
+				ToolName:  "shell_exec",
+				Target:    "oracle-db",
+				Command:   tc.command,
+				LastLines: tc.lines,
+			})
+			if err != nil {
+				t.Fatalf("RequestIdleInput() error = %v", err)
+			}
+			if resp.Abort {
+				t.Fatalf("expected EOF response, got abort: %#v", resp)
+			}
+			if !resp.CloseStdin {
+				t.Fatalf("expected EOF response, got %#v", resp)
+			}
+			if resp.Input != "" {
+				t.Fatalf("expected EOF response without typed input, got %#v", resp)
+			}
+			if client.chatCalled {
+				t.Fatal("expected database REPL prompt to short-circuit before LLM call")
+			}
+		})
+	}
+}
+
+func TestSmartIdleInputHandler_AbortsOnUnknownREPLPrompt(t *testing.T) {
+	client := &fakeIdleLLMClient{
+		resp: llm.Response{Content: `{"input":"","abort":true}`},
+	}
+	handler := NewSmartIdleInputHandler(client)
+
+	resp, err := handler.RequestIdleInput(context.Background(), IdleInputRequest{
+		ToolName:  "shell_exec",
+		Target:    "oracle-db",
+		Command:   "dbcli --interactive",
+		LastLines: []string{"inventory=>"},
+	})
+	if err != nil {
+		t.Fatalf("RequestIdleInput() error = %v", err)
+	}
+	if !resp.Abort {
+		t.Fatalf("expected abort for unknown REPL prompt, got %#v", resp)
+	}
+	if !client.chatCalled {
+		t.Fatal("expected fallback LLM path for unknown REPL prompt")
 	}
 }
 

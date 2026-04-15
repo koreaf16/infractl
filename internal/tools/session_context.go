@@ -34,9 +34,6 @@ func (t *SessionContextTool) Description() string {
 
 func (t *SessionContextTool) IsReadOnly() bool { return true }
 func (t *SessionContextTool) IsEnabled() bool  { return true }
-func (t *SessionContextTool) RiskLevel() RiskLevel {
-	return RiskNone
-}
 
 func (t *SessionContextTool) Parameters() map[string]interface{} {
 	return map[string]interface{}{

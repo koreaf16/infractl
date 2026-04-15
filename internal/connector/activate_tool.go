@@ -15,12 +15,18 @@ import (
 	"github.com/yourorg/infractl/internal/tools"
 )
 
+// ServiceScanner는 서버에서 서비스를 자동 탐지하여 DiscoveryStore에 저장하는 인터페이스이다.
+type ServiceScanner interface {
+	ScanAndSave(ctx context.Context, exec executor.Executor, serverName string, ds store.DiscoveryStore) error
+}
+
 // ActivateTool activates a connector from discovered service info and credentials.
 type ActivateTool struct {
 	Manager        *Manager
 	ServerStore    store.ServerStore
 	DiscoveryStore store.DiscoveryStore
 	Disambiguate   DisambiguateHandler // optional UI adapter
+	Scanner        ServiceScanner      // optional: discovery 없을 때 자동 탐지 실행
 }
 
 var _ tools.Tool = (*ActivateTool)(nil)
@@ -29,9 +35,11 @@ func (t *ActivateTool) Name() string { return "connector_activate" }
 
 func (t *ActivateTool) Description() string {
 	return "서비스 커넥터를 활성화합니다. " +
-		"먼저 connector_probe_os_auth를 호출해 OS 인증 가능 여부를 확인하세요. " +
-		"OS 인증이 실패한 경우에만 username/password로 활성화하세요. " +
-		"성공 시 Oracle/MySQL/PostgreSQL/Tomcat/WebLogic 전용 도구가 등록됩니다."
+		"username/password 없이 호출하면 저장된 크리덴셜로 자동 재연결합니다. " +
+		"서비스 탐지 정보가 없거나 만료된 경우 자동으로 탐지를 실행합니다. " +
+		"Oracle PDB는 sub_instance에 PDB명을 지정하세요 (예: sub_instance=HRPDB). " +
+		"먼저 connector_probe_os_auth로 OS 인증을 시도하고, 실패 시에만 username/password를 사용하세요. " +
+		"기본 save_mode는 permanent입니다."
 }
 
 func (t *ActivateTool) Parameters() map[string]interface{} {
@@ -72,6 +80,10 @@ func (t *ActivateTool) Parameters() map[string]interface{} {
 				"enum":        []string{"permanent", "session", "none"},
 				"description": "저장 방식 (기본: session)",
 			},
+			"sub_instance": map[string]interface{}{
+				"type":        "string",
+				"description": "서브 인스턴스 이름. Oracle PDB명(예: HRPDB), K8s namespace 등. 선택적.",
+			},
 			"target": map[string]interface{}{
 				"type":        "string",
 				"description": "실행 target. server와 동일해야 함",
@@ -81,9 +93,8 @@ func (t *ActivateTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *ActivateTool) RiskLevel() tools.RiskLevel { return tools.RiskLow }
-func (t *ActivateTool) IsReadOnly() bool           { return false }
-func (t *ActivateTool) IsEnabled() bool            { return true }
+func (t *ActivateTool) IsReadOnly() bool { return false }
+func (t *ActivateTool) IsEnabled() bool  { return true }
 
 // Execute validates request consistency, hydrates discovery data, and activates connector.
 func (t *ActivateTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
@@ -92,10 +103,12 @@ func (t *ActivateTool) Execute(ctx context.Context, args map[string]interface{},
 	serviceName, _ := args["service_name"].(string)
 	username, _ := args["username"].(string)
 	password, _ := args["password"].(string)
+	subInstance, _ := args["sub_instance"].(string)
 
 	server = strings.TrimSpace(server)
 	serviceType = strings.ToLower(strings.TrimSpace(serviceType))
 	serviceName = strings.TrimSpace(serviceName)
+	subInstance = strings.TrimSpace(subInstance)
 
 	if server == "" || serviceType == "" || serviceName == "" {
 		return "server, service_type, service_name는 필수입니다", nil
@@ -106,23 +119,50 @@ func (t *ActivateTool) Execute(ctx context.Context, args map[string]interface{},
 		server = resolved
 	}
 
+	// 크리덴셜이 없을 때: 저장된 커넥터로 자동 재연결 시도
+	if username == "" && password == "" {
+		if savedInfo, savedCreds, ok := t.Manager.GetSavedConnector(ctx, server, serviceType, serviceName, subInstance); ok {
+			if err := t.Manager.Activate(ctx, savedInfo, savedCreds, SavePermanent); err != nil {
+				return fmt.Sprintf("저장된 크리덴셜로 재연결 실패: %s\nusername/password를 직접 입력하세요.", err), nil
+			}
+			states := t.Manager.States()
+			for _, s := range states {
+				key := connectorKey(savedInfo.ServerName, savedInfo.ServiceType, savedInfo.Name, savedInfo.SubInstance)
+				if s.Name == key {
+					return fmt.Sprintf("✓ %s %s — 저장된 크리덴셜로 자동 재연결 완료 (%d개 도구 등록)\n활성 도구: %v",
+						savedInfo.ServiceType, savedInfo.Name, len(s.Tools), s.Tools), nil
+				}
+			}
+			return fmt.Sprintf("✓ %s %s — 저장된 크리덴셜로 자동 재연결 완료", serviceType, serviceName), nil
+		}
+	}
+
 	if err := validateDiscoveryTarget(exec.Target(), server); err != nil {
 		return err.Error(), nil
 	}
 
 	entry, err := validateRecentDiscovery(ctx, t.DiscoveryStore, server, serviceType, serviceName)
 	if err != nil {
-		return err.Error(), nil
+		if t.Scanner != nil && t.DiscoveryStore != nil {
+			if scanErr := t.Scanner.ScanAndSave(ctx, exec, server, t.DiscoveryStore); scanErr != nil {
+				return fmt.Sprintf("자동 탐지 실패: %s", scanErr), nil
+			}
+			entry, err = validateRecentDiscovery(ctx, t.DiscoveryStore, server, serviceType, serviceName)
+		}
+		if err != nil {
+			return err.Error(), nil
+		}
 	}
 
 	role, _ := args["role"].(string)
 	saveModeStr, _ := args["save_mode"].(string)
 	if strings.TrimSpace(saveModeStr) == "" {
-		saveModeStr = string(SaveSession)
+		saveModeStr = string(SavePermanent) // 기본값: 영구 저장
 	}
 	port := parseOptionalInt(args["port"])
 
 	info := buildServiceInfoFromDiscovery(server, serviceType, serviceName, port, entry)
+	info.SubInstance = subInstance
 	creds := Credentials{
 		Username: username,
 		Password: password,
@@ -136,7 +176,7 @@ func (t *ActivateTool) Execute(ctx context.Context, args map[string]interface{},
 
 	states := t.Manager.States()
 	for _, s := range states {
-		if s.ServerName == info.ServerName && s.Type == info.ServiceType && s.ServiceName == info.Name {
+		if s.ServerName == info.ServerName && s.Type == info.ServiceType && s.ServiceName == info.Name && s.SubInstance == info.SubInstance {
 			return fmt.Sprintf("✓ %s %s 커넥터 활성화 완료 (%d개 도구 등록)\n저장 방식: %s\n활성 도구: %v",
 				info.ServiceType, info.Name, len(s.Tools), saveMode, s.Tools), nil
 		}

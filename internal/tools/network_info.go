@@ -1,26 +1,27 @@
 // Package tools
 // File: network_info.go
-// Description: [TODO: Add description]
-// Responsibility: [TODO: Add responsibility]
-
+// Description: 네트워크 구성 정보 조회 도구
+// Responsibility: IP, 인터페이스 상태, 라우팅 테이블 등 수집
 package tools
 
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/yourorg/infractl/internal/executor"
 )
 
-// NetworkInfoTool reports listening ports or active connections on the target system.
+// NetworkInfoTool은 네트워크 구성 정보를 조회한다.
 type NetworkInfoTool struct{}
 
 func (t *NetworkInfoTool) Name() string { return "network_info" }
 
 func (t *NetworkInfoTool) Description() string {
-	return "Show network information: listening ports or active connections on the target system.\n" +
-		"Use for: identifying which services are running on which ports, checking open connections.\n" +
-		"Useful for service discovery when combined with process_list."
+	return "Retrieve network configuration, IP addresses, interface status, and routing table."
 }
 
 func (t *NetworkInfoTool) IsReadOnly() bool { return true }
@@ -30,55 +31,85 @@ func (t *NetworkInfoTool) Parameters() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
-			"type": map[string]interface{}{
-				"type":        "string",
-				"enum":        []string{"listen", "connections"},
-				"description": "Information type: 'listen' for listening ports (default), 'connections' for active connections",
-			},
 			"target": map[string]interface{}{
 				"type":        "string",
-				"description": "Target server name. Omit or use 'localhost' for local execution.",
+				"description": "Target server name.",
 			},
 		},
 	}
 }
 
-func (t *NetworkInfoTool) RiskLevel() RiskLevel { return RiskNone }
+func (t *NetworkInfoTool) Execute(ctx context.Context, _ map[string]interface{}, exec executor.Executor) (string, error) {
+	platform := executor.CommandPlatform(exec)
+	tasks := []string{"interfaces", "routing", "arp"}
 
-func (t *NetworkInfoTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
-	infoType, _ := argString(args, "type", false)
-	if infoType == "" {
-		infoType = "listen"
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		parts = make(map[string]string)
+		errs  []string
+	)
+
+	slog.Info("network_info_start", "server", exec.Target())
+
+	for _, task := range tasks {
+		wg.Add(1)
+		go func(tk string) {
+			defer wg.Done()
+			slog.Info("task_start", "task", tk)
+			start := time.Now()
+
+			cmd := buildNetworkCommand(tk, platform)
+			result, err := exec.Execute(ctx, cmd)
+			dur := time.Since(start)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("[%s] Error: %s", tk, err))
+				slog.Info("task_fail", "task", tk, "dur", dur)
+				return
+			}
+			parts[tk] = strings.TrimSpace(result.Stdout)
+			slog.Info("task_done", "task", tk, "dur", dur)
+		}(task)
 	}
 
-	cmd := buildNetworkCommand(infoType, executor.CommandPlatform(exec))
-	result, err := exec.Execute(ctx, cmd)
-	if err != nil {
-		return fmt.Sprintf("Execution failed: %s", err), nil
-	}
+	wg.Wait()
 
-	if result.ExitCode != 0 {
-		return fmt.Sprintf("Error getting network info (exit %d):\n%s", result.ExitCode, result.Stderr), nil
+	var output []string
+	for _, tk := range tasks {
+		if content, ok := parts[tk]; ok {
+			output = append(output, fmt.Sprintf("[%s]\n%s", tk, content))
+		}
 	}
-	return result.Stdout, nil
+	output = append(output, errs...)
+
+	return strings.Join(output, "\n\n"), nil
 }
 
-func buildNetworkCommand(infoType string, platform executor.Platform) string {
-	switch platform {
-	case executor.PlatformWindows:
-		if infoType == "connections" {
-			return "netstat -ano | findstr ESTABLISHED"
+func buildNetworkCommand(task string, platform executor.Platform) string {
+	if platform == executor.PlatformWindows {
+		switch task {
+		case "interfaces":
+			return "ipconfig /all"
+		case "routing":
+			return "route print"
+		case "arp":
+			return "arp -a"
+		default:
+			return ""
 		}
-		return "netstat -ano | findstr LISTENING"
-	case executor.PlatformDarwin:
-		if infoType == "connections" {
-			return "netstat -an -p tcp | grep ESTABLISHED"
+	} else {
+		switch task {
+		case "interfaces":
+			return "ip addr show || ifconfig -a"
+		case "routing":
+			return "ip route show || route -n"
+		case "arp":
+			return "ip neigh show || arp -a"
+		default:
+			return ""
 		}
-		return "netstat -an -p tcp | grep LISTEN"
-	default:
-		if infoType == "connections" {
-			return "ss -tnp 2>/dev/null || netstat -tnp 2>/dev/null"
-		}
-		return "ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null"
 	}
 }

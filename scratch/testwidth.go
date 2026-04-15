@@ -1,3 +1,6 @@
+﻿//go:build tools
+// +build tools
+
 package main
 
 import (
@@ -6,6 +9,7 @@ import (
 )
 
 func main() {
-	var s = "°C"
+	var s = "째C"
 	fmt.Printf("runewidth: %d\n", runewidth.StringWidth(s))
 }
+

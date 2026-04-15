@@ -9,6 +9,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/yourorg/infractl/internal/executor"
 	"github.com/yourorg/infractl/internal/llm"
@@ -41,7 +44,6 @@ func (t *WebFetchTool) emit(msg string) {
 }
 
 func (t *WebFetchTool) Name() string        { return "web_fetch" }
-func (t *WebFetchTool) RiskLevel() RiskLevel { return RiskNone }
 func (t *WebFetchTool) IsReadOnly() bool     { return true }
 // IsEnabled는 항상 true를 반환한다. 인터넷 가용성은 Execute() 시점에서 판단한다.
 func (t *WebFetchTool) IsEnabled() bool { return true }
@@ -56,11 +58,16 @@ func (t *WebFetchTool) Parameters() map[string]interface{} {
 		"properties": map[string]interface{}{
 			"url": map[string]interface{}{
 				"type":        "string",
-				"description": "The URL to fetch content from",
+				"description": "The URL to fetch content from (legacy, for single URL)",
+			},
+			"urls": map[string]interface{}{
+				"type":        "array",
+				"items":       map[string]interface{}{"type": "string"},
+				"description": "List of URLs to fetch in parallel.",
 			},
 			"prompt": map[string]interface{}{
 				"type":        "string",
-				"description": "Optional: specific question or extraction request to apply to the fetched content using LLM. If omitted and page is large, auto-summarized.",
+				"description": "Optional: specific question or extraction request to apply to the fetched content using LLM.",
 			},
 			"max_length": map[string]interface{}{
 				"type":        "integer",
@@ -68,47 +75,84 @@ func (t *WebFetchTool) Parameters() map[string]interface{} {
 				"default":     100000,
 			},
 		},
-		"required": []string{"url"},
 	}
 }
 
 func (t *WebFetchTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
-	rawURL, err := argString(args, "url", true)
-	if err != nil {
-		return "", err
+	var urls []string
+	if u, _ := argString(args, "url", false); u != "" {
+		urls = append(urls, u)
 	}
+	if uArr, ok := args["urls"].([]interface{}); ok {
+		for _, u := range uArr {
+			if s, ok := u.(string); ok {
+				urls = append(urls, s)
+			}
+		}
+	}
+
+	if len(urls) == 0 {
+		return "Error: no URL provided", nil
+	}
+
 	prompt, _ := argString(args, "prompt", false)
-
-	md, err := t.Fetcher.Fetch(ctx, rawURL)
-	if err != nil {
-		return "", fmt.Errorf("fetch %s: %w", rawURL, err)
-	}
-
 	fastClient := t.resolveFastClient()
 
-	// prompt 있음 → fast-tier LLM으로 질문에 대한 답 추출
-	if prompt != "" && fastClient != nil {
-		result, err := t.applyPrompt(ctx, fastClient, rawURL, md, prompt)
-		if err != nil {
-			slog.Warn("web fetch prompt failed, returning raw markdown", "url", rawURL, "err", err)
-			return fmt.Sprintf("Content from %s:\n\n%s", rawURL, md), nil
-		}
-		return result, nil
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		results = make(map[string]string)
+		errs    []string
+	)
+
+	slog.Info("web_fetch_start", "count", len(urls))
+
+	for _, rawURL := range urls {
+		wg.Add(1)
+		go func(u string) {
+			defer wg.Done()
+			slog.Info("task_start", "task", u)
+			start := time.Now()
+
+			md, err := t.Fetcher.Fetch(ctx, u)
+			if err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Sprintf("fetch %s: %v", u, err))
+				mu.Unlock()
+				slog.Info("task_fail", "task", u, "dur", time.Since(start))
+				return
+			}
+
+			content := md
+			// apply prompt or summarize if needed
+			if prompt != "" && fastClient != nil {
+				if processed, pErr := t.applyPrompt(ctx, fastClient, u, md, prompt); pErr == nil {
+					content = processed
+				}
+			} else if len(md) > autoSummarizeThreshold && fastClient != nil {
+				if summarized, sErr := t.autoSummarize(ctx, fastClient, u, md); sErr == nil {
+					content = summarized
+				}
+			}
+
+			mu.Lock()
+			results[u] = content
+			mu.Unlock()
+			slog.Info("task_done", "task", u, "dur", time.Since(start))
+		}(rawURL)
 	}
 
-	// prompt 없음 + 대용량 → fast-tier LLM 자동 요약
-	if len(md) > autoSummarizeThreshold && fastClient != nil {
-		slog.Debug("web fetch auto-summarizing large content", "url", rawURL, "len", len(md))
-		result, err := t.autoSummarize(ctx, fastClient, rawURL, md)
-		if err != nil {
-			slog.Warn("web fetch auto-summarize failed, returning raw markdown", "url", rawURL, "err", err)
-			return fmt.Sprintf("Content from %s:\n\n%s", rawURL, md), nil
-		}
-		return result, nil
-	}
+	wg.Wait()
 
-	// 소용량 or LLM 없음 → Markdown 그대로 반환
-	return fmt.Sprintf("Content from %s:\n\n%s", rawURL, md), nil
+	var output []string
+	for _, u := range urls {
+		if content, ok := results[u]; ok {
+			output = append(output, content)
+		}
+	}
+	output = append(output, errs...)
+
+	return strings.Join(output, "\n\n---\n\n"), nil
 }
 
 // resolveFastClient는 fast-tier 클라이언트를 반환한다.

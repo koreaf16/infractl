@@ -50,8 +50,13 @@ func (m AppModel) handleToolMsg(msg tea.Msg) (AppModel, tea.Cmd, bool) {
 	case ToolEndMsg:
 		isBackground := m.activeTools.IsBackgrounded(msg.ToolID)
 		var capturedLines []string
-		if prev := m.activeTools.MostRecent(); prev != nil && prev.toolID == msg.ToolID {
-			capturedLines = prev.shellLines
+		totalLines := 0
+		if toolState, ok := m.activeTools.states[msg.ToolID]; ok {
+			capturedLines = toolState.shellLines
+			totalLines = toolState.shellTotal
+		}
+		if isShellBoxTool(msg.Name) {
+			capturedLines, totalLines = resolveShellBoxOutput(msg.Name, capturedLines, totalLines, msg.Result)
 		}
 		m.activeTools.Remove(msg.ToolID)
 		m.progress.CompleteTool(msg.ToolID, msg.Duration, msg.Success)
@@ -64,6 +69,7 @@ func (m AppModel) handleToolMsg(msg tea.Msg) (AppModel, tea.Cmd, bool) {
 			duration:   msg.Duration,
 			success:    msg.Success,
 			shellLines: capturedLines,
+			shellTotal: totalLines,
 		})
 		if m.activeTools.RunningCount() == 0 {
 			label := m.thinkingLabel
@@ -88,7 +94,7 @@ func (m AppModel) handleToolMsg(msg tea.Msg) (AppModel, tea.Cmd, bool) {
 				if !isShellBoxTool(msg.Name) {
 					contentLines = toolBoxContent(msg.Name, args, msg.Result, msg.Success)
 				}
-				m.box.Println(renderShellBoxCompleted(msg.Name, args, contentLines, msg.Duration, msg.Success, m.width))
+				m.box.Println(renderShellBoxCompleted(msg.Name, args, contentLines, totalLines, msg.Duration, msg.Success, m.width))
 			}
 		}
 		return m, nil, true
@@ -115,6 +121,10 @@ func (m AppModel) handleToolMsg(msg tea.Msg) (AppModel, tea.Cmd, bool) {
 		return m, nil, true
 
 	case AgentDoneMsg:
+		// reqID가 다르면 이미 취소된 이전 요청의 완료 신호 — 무시한다.
+		if msg.ReqID != m.reqID {
+			return m, nil, true
+		}
 		// ResponseDoneMsg보다 먼저 처리될 경우를 대비한 안전망
 		if m.streamTokens != "" && m.box != nil {
 			m.box.Println(renderResponseText(m.streamTokens, m.mdRend))
@@ -126,6 +136,7 @@ func (m AppModel) handleToolMsg(msg tea.Msg) (AppModel, tea.Cmd, bool) {
 		m.streamLines = nil
 		m.streamCache.Reset()
 		if entry, ok := m.queue.Dequeue(); ok {
+			m.reqID++ // 큐에서 꺼낸 요청도 새 세대
 			m.progress.Reset()
 			m.stats.Start()
 			if m.box != nil {

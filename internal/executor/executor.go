@@ -30,6 +30,12 @@ type StdinInjector interface {
 	InjectStdin(line string) error
 }
 
+// StdinEOFSender sends an EOF/EOT signal to the currently running command.
+// Implementations may close a plain stdin pipe or inject Ctrl-D on PTY-backed sessions.
+type StdinEOFSender interface {
+	SendEOF() error
+}
+
 // InteractiveSpec describes an interactive command execution request.
 type InteractiveSpec struct {
 	Command    string

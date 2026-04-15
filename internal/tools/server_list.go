@@ -35,8 +35,6 @@ func (t *ServerListTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *ServerListTool) RiskLevel() RiskLevel { return RiskNone }
-
 func (t *ServerListTool) Execute(ctx context.Context, _ map[string]interface{}, _ executor.Executor) (string, error) {
 	servers, err := t.Store.List(ctx)
 	if err != nil {

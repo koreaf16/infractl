@@ -28,6 +28,7 @@ type AppModel struct {
 	cfg        *config.Config
 	ctx        context.Context
 	cancel     context.CancelFunc
+	reqID      int // 현재 활성 요청 세대 — stale AgentDoneMsg 무시에 사용
 	width      int
 	height     int
 	busy       bool
@@ -40,8 +41,10 @@ type AppModel struct {
 	activeTools activeToolMap
 	queue       inputQueue
 	selection   selectionState
+	form        formState
 
 	selectHandler    *TUISelectHandler
+	formHandler      *TUIFormHandler
 	activeServer     *store.Server
 	connectorMgr     *connector.Manager
 	mcpClients       []*mcp.Client
@@ -54,6 +57,7 @@ type AppModel struct {
 
 	knowledgeStore store.KnowledgeStore
 	ragSourceStore store.RAGSourceStore
+	discoveryStore store.DiscoveryStore
 	costTracker    CostTracker
 	checkpointMgr  CheckpointManager
 	hooksMgr       HooksManager
@@ -61,12 +65,12 @@ type AppModel struct {
 	privCache      *privilege.Cache
 
 	thinkingLabel string
-	thinkBuf      string // thinking 스트리밍 누적 버퍼 (shimmer hint 업데이트용)
+	thinkBuf      string // thinking ?ㅽ듃由щ컢 ?꾩쟻 踰꾪띁 (shimmer hint ?낅뜲?댄듃??
 	stats         turnStats
-	turnCount     int // 지금까지 시작된 턴 수 (구분선 출력 시점 판단용)
+	turnCount     int // 吏湲덇퉴吏 ?쒖옉??????(援щ텇??異쒕젰 ?쒖젏 ?먮떒??
 
-	history      toolHistory
-	histOverlay  toolOverlayState
+	history     toolHistory
+	histOverlay toolOverlayState
 
 	box          *ProgramBox
 	parker       *CursorParkWriter
@@ -88,9 +92,11 @@ type AppOptions struct {
 	CursorParker     *CursorParkWriter
 	ProgramBox       *ProgramBox
 	SelectHandler    *TUISelectHandler
+	FormHandler      *TUIFormHandler
 
 	KnowledgeStore store.KnowledgeStore
 	RAGSourceStore store.RAGSourceStore
+	DiscoveryStore store.DiscoveryStore
 	CostTracker    CostTracker
 	CheckpointMgr  CheckpointManager
 	HooksMgr       HooksManager
@@ -111,8 +117,8 @@ func NewApp(ag *agent.Agent, cfg *config.Config, st store.ServerStore, mgr *exec
 		chat:      newChatView(80, 20),
 		input:     newInputBar(80),
 		statusBar: newStatusBar(cfg.LLM.Model, len(servers)),
-		shimmer:      newShimmer(),
-		progress:     newProgressTree(),
+		shimmer:   newShimmer(),
+		progress:  newProgressTree(),
 		sp:        sp,
 		ag:        ag,
 		store:     st,
@@ -147,15 +153,17 @@ func NewAppWithOptions(
 	m.parker = opts.CursorParker
 	m.box = opts.ProgramBox
 	m.selectHandler = opts.SelectHandler
+	m.formHandler = opts.FormHandler
 	m.knowledgeStore = opts.KnowledgeStore
 	m.ragSourceStore = opts.RAGSourceStore
+	m.discoveryStore = opts.DiscoveryStore
 	m.costTracker = opts.CostTracker
 	m.checkpointMgr = opts.CheckpointMgr
 	m.hooksMgr = opts.HooksMgr
 	m.scheduleMgr = opts.ScheduleMgr
 	m.privCache = opts.PrivCache
 
-	// Agent에 자신(QuestionHandler 구현체)을 등록합니다.
+	// Agent???먯떊(QuestionHandler 援ы쁽泥????깅줉?⑸땲??
 	m.ag.SetQuestionHandler(m)
 
 	return m
@@ -218,6 +226,26 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKeyMsg(msg)
 
 	case SubmitMsg:
+		// 폼 모드 활성 시: 입력값을 폼 필드에 반영하고 agent로 보내지 않는다.
+		if m.form.active && m.form.phase == formPhaseEdit {
+			m.form.AcceptValue(msg.DisplayInput)
+			m.input.Reset()
+			if m.form.AdvanceToNext() {
+				// 모든 필드 완료 → Review 전환 (placeholder 초기화)
+				m.input.ti.Placeholder = "Enter to confirm, Esc to go back"
+			} else {
+				m.input.ti.Placeholder = m.form.CurrentPlaceholder()
+			}
+			return m, nil
+		}
+		if m.form.active && m.form.phase == formPhaseReview {
+			// Review에서 Enter → 확정
+			return m.Update(FormResponseMsg{
+				Result:  m.form.BuildResult(),
+				ReplyCh: m.form.replyCh,
+			})
+		}
+
 		displayInput := msg.DisplayInput
 		expandedInput := msg.ExpandedInput
 		if IsSlashCommand(displayInput) {
@@ -237,6 +265,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ag.UpdateSessionTitle(m.ctx, displayInput)
 		}
 		m.busy = true
+		m.reqID++ // 새 요청 세대 — stale AgentDoneMsg 무시에 사용
 		m.activeTools.Clear()
 		m.progress.Reset()
 		m.stats.Start()
@@ -276,11 +305,26 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ThinkingStartMsg:
-		m.thinkingLabel = ThinkingLabel(msg.Tier, msg.Model)
+		m.thinkingLabel = ThinkingLabel(msg.Tier, m.cfg.LLM.Model) // cfg?먯꽌 紐⑤뜽紐낆쓣 媛?몄샃?덈떎.
 		m.shimmer.SetText(m.thinkingLabel)
-		// 새 LLM 호출 시 이전 thinking 버퍼/힌트 초기화
+		// ??LLM ?몄텧 ???댁쟾 thinking 踰꾪띁/?뚰듃 珥덇린??
 		m.thinkBuf = ""
 		m.shimmer.SetHint("")
+		return m, nil
+
+	case ErrorMsg:
+		m.busy = false
+		m.shimmer.Stop()
+		if m.box != nil {
+			m.box.Println(renderSystemLine(fmt.Sprintf("ERROR: %v", msg.Err)))
+		}
+		// ?먯뿉 ?湲?以묒씤 ?낅젰???덈떎硫??ㅼ쓬 ?낅젰??泥섎━?⑸땲??
+		if entry, ok := m.queue.Dequeue(); ok {
+			return m, tea.Sequence(
+				NewSystemCmd("queued [%d]: %s", m.queue.Len()+1, truncateForQueue(entry.displayInput, 60)),
+				NewSubmitCmd(entry.displayInput, entry.expandedInput),
+			)
+		}
 		return m, nil
 	}
 
@@ -300,22 +344,23 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// RequestQuestion은 QuestionHandler 인터페이스를 구현합니다.
+// RequestQuestion? QuestionHandler ?명꽣?섏씠?ㅻ? 援ы쁽?⑸땲??
 func (m AppModel) RequestQuestion(ctx context.Context, req tools.QuestionRequest) (tools.QuestionResponse, error) {
 	if m.selectHandler == nil {
 		return tools.QuestionResponse{SelectedIndex: -1}, fmt.Errorf("selection handler unavailable")
 	}
 
+	allowCustomInput := req.AllowCustomInput || len(req.Options) == 0
 	opts := make([]SelectOption, len(req.Options))
 	for i, opt := range req.Options {
 		opts[i] = SelectOption{
 			Label:       opt.Label,
 			Description: opt.Description,
-			HideOther:   false, // [Other] 입력을 기본적으로 허용합니다.
+			HideOther:   !allowCustomInput,
 		}
 	}
 
-	res, err := m.selectHandler.RequestSelectCtx(ctx, req.Question, opts)
+	res, err := m.selectHandler.RequestSelectCtxWithHeader(ctx, req.Question, opts, req.Header)
 	if err != nil {
 		return tools.QuestionResponse{SelectedIndex: -1}, err
 	}
@@ -323,8 +368,18 @@ func (m AppModel) RequestQuestion(ctx context.Context, req tools.QuestionRequest
 	return tools.QuestionResponse{
 		SelectedIndex: res.Index,
 		SelectedLabel: res.Label,
+		UserInput:     res.Label,
 		IsOther:       res.IsOther,
 	}, nil
+}
+
+// RequestForm은 QuestionHandler 인터페이스를 구현한다.
+// formHandler를 통해 TUI에 폼 입력 UI를 요청하고 결과를 반환한다.
+func (m AppModel) RequestForm(ctx context.Context, req tools.FormRequest) (tools.FormResponse, error) {
+	if m.formHandler == nil {
+		return tools.FormResponse{Cancelled: true}, fmt.Errorf("form handler unavailable")
+	}
+	return m.formHandler.RequestForm(ctx, req)
 }
 
 func (m AppModel) resize() AppModel {

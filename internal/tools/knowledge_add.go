@@ -22,7 +22,6 @@ type KnowledgeAddTool struct {
 }
 
 func (t *KnowledgeAddTool) Name() string         { return "knowledge_add" }
-func (t *KnowledgeAddTool) RiskLevel() RiskLevel { return RiskNone }
 func (t *KnowledgeAddTool) IsReadOnly() bool     { return false }
 func (t *KnowledgeAddTool) IsEnabled() bool      { return true }
 

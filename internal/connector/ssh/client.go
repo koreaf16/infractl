@@ -8,6 +8,7 @@ package ssh
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
@@ -46,6 +47,7 @@ type Client struct {
 
 	sessionMu sync.Mutex
 	stdinPipe io.WriteCloser // RunStream 실행 중에만 유효; InjectStdin이 사용
+	stdinPTY  bool
 
 	sessionMgr    *SessionManager // persistent shell 세션 풀 (lazy init)
 	sessionMgrMu  sync.Mutex
@@ -63,6 +65,14 @@ func NewClient(cfg *Config) *Client {
 	return &Client{cfg: cfg}
 }
 
+// wrapLoginShell은 command를 login shell(bash -l)로 감싼다.
+// SSH exec request는 non-login shell이라 .bash_profile 등이 로드되지 않는다.
+// base64 인코딩으로 heredoc/single-quote 중첩 quoting 문제를 우회한다.
+func wrapLoginShell(command string) string {
+	encoded := base64.StdEncoding.EncodeToString([]byte(command))
+	return fmt.Sprintf("bash -l -c \"$(echo %s | base64 -d)\"", encoded)
+}
+
 // Run은 원격 서버에서 command를 실행하고 결과를 반환한다.
 // 출력은 64KB로 제한된다.
 func (c *Client) Run(ctx context.Context, command string) (RunResult, error) {
@@ -78,7 +88,7 @@ func (c *Client) Run(ctx context.Context, command string) (RunResult, error) {
 	session.Stdout = &executor.LimitedWriter{Buf: &stdoutBuf, Limit: executor.MaxOutputBytes}
 	session.Stderr = &executor.LimitedWriter{Buf: &stderrBuf, Limit: executor.MaxOutputBytes}
 
-	runErr := session.Run(command)
+	runErr := session.Run(wrapLoginShell(command))
 	duration := time.Since(start)
 
 	exitCode := 0
@@ -133,7 +143,7 @@ func (c *Client) RunStream(
 	if err != nil {
 		return RunResult{}, fmt.Errorf("ssh stdin pipe: %w", err)
 	}
-	c.setStdinPipe(stdinPipe)
+	c.setStdinPipe(stdinPipe, requirePTY)
 	defer func() {
 		c.clearStdinPipe(stdinPipe)
 		stdinPipe.Close()
@@ -150,7 +160,7 @@ func (c *Client) RunStream(
 		session.Stderr = &executor.LimitedWriter{Buf: &stderrBuf, Limit: executor.MaxOutputBytes}
 	}
 
-	if err := session.Start(command); err != nil {
+	if err := session.Start(wrapLoginShell(command)); err != nil {
 		return RunResult{}, fmt.Errorf("ssh start command: %w", err)
 	}
 
@@ -233,7 +243,7 @@ func (c *Client) RunInteractive(
 	if err != nil {
 		return RunResult{}, fmt.Errorf("ssh stdin pipe: %w", err)
 	}
-	c.setStdinPipe(stdinPipe)
+	c.setStdinPipe(stdinPipe, requirePTY)
 	defer func() {
 		c.clearStdinPipe(stdinPipe)
 		stdinPipe.Close()
@@ -248,7 +258,7 @@ func (c *Client) RunInteractive(
 		session.Stderr = &executor.LimitedWriter{Buf: &bytes.Buffer{}, Limit: executor.MaxOutputBytes}
 	}
 
-	if err := session.Start(command); err != nil {
+	if err := session.Start(wrapLoginShell(command)); err != nil {
 		return RunResult{}, fmt.Errorf("ssh start command: %w", err)
 	}
 
@@ -306,10 +316,34 @@ func (c *Client) InjectStdin(line string) error {
 	return nil
 }
 
-func (c *Client) setStdinPipe(pipe io.WriteCloser) {
+// SendEOF closes plain stdin pipes or injects Ctrl-D (EOT) into PTY-backed sessions.
+func (c *Client) SendEOF() error {
+	c.sessionMu.Lock()
+	pipe := c.stdinPipe
+	isPTY := c.stdinPTY
+	c.sessionMu.Unlock()
+
+	if pipe == nil {
+		return fmt.Errorf("send EOF: no active session stdin pipe")
+	}
+	if isPTY {
+		if _, err := pipe.Write([]byte{0x04}); err != nil {
+			return fmt.Errorf("send EOF: %w", err)
+		}
+		return nil
+	}
+	if err := pipe.Close(); err != nil {
+		return fmt.Errorf("send EOF: %w", err)
+	}
+	c.clearStdinPipe(pipe)
+	return nil
+}
+
+func (c *Client) setStdinPipe(pipe io.WriteCloser, isPTY bool) {
 	c.sessionMu.Lock()
 	defer c.sessionMu.Unlock()
 	c.stdinPipe = pipe
+	c.stdinPTY = isPTY
 }
 
 func (c *Client) clearStdinPipe(pipe io.WriteCloser) {
@@ -317,6 +351,7 @@ func (c *Client) clearStdinPipe(pipe io.WriteCloser) {
 	defer c.sessionMu.Unlock()
 	if c.stdinPipe == pipe {
 		c.stdinPipe = nil
+		c.stdinPTY = false
 	}
 }
 

@@ -27,7 +27,6 @@ func (t *K8sQueryTool) Description() string {
 
 func (t *K8sQueryTool) IsReadOnly() bool     { return true }
 func (t *K8sQueryTool) IsEnabled() bool      { return true }
-func (t *K8sQueryTool) RiskLevel() RiskLevel { return RiskNone }
 
 func (t *K8sQueryTool) Parameters() map[string]interface{} {
 	return map[string]interface{}{

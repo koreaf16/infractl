@@ -13,7 +13,6 @@ import (
 	conn "github.com/yourorg/infractl/internal/connector"
 	"github.com/yourorg/infractl/internal/executor"
 	"github.com/yourorg/infractl/internal/pipeline"
-	"github.com/yourorg/infractl/internal/safety"
 	"github.com/yourorg/infractl/internal/tools"
 )
 
@@ -70,7 +69,6 @@ func (c *MySQLConnector) GenerateTools(info conn.ServiceInfo, creds conn.Credent
 }
 
 // buildCmd는 MYSQL_PWD 환경변수로 비밀번호를 전달하는 mysql 명령을 생성한다.
-// 비밀번호를 커맨드라인 인자에 직접 넣지 않아 ps 노출을 방지한다.
 func buildCmd(user, pass, host string, port int, sql string) string {
 	return fmt.Sprintf(
 		`MYSQL_PWD='%s' mysql -u '%s' -h '%s' -P %d --batch --silent -e "%s"`,
@@ -106,58 +104,22 @@ func (c *MySQLConnector) makeQueryTool(prefix, user, pass, host string, port int
 			"properties": map[string]interface{}{
 				"sql":    map[string]interface{}{"type": "string", "description": "실행할 SQL 문"},
 				"target": targetParam(),
-				"skip_backup": map[string]interface{}{
-					"type":        "boolean",
-					"description": "true이면 사전 백업을 건너뜁니다. 공간 부족 등 백업 불가 확인 후에만 사용.",
-				},
 			},
 			"required": []string{"sql"},
 		},
-		tools.RiskLow, false, &c.status,
+		false, &c.status,
 		func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 			sql, _ := args["sql"].(string)
 			if sql == "" {
 				return "sql 인자가 필요합니다", nil
-			}
-			skipBackup, _ := args["skip_backup"].(bool)
-
-			classification := safety.ClassifySQL(sql)
-
-			if classification.RequiresBackup && !skipBackup && classification.TableName != "" {
-				// 1. 공간 사전 확인
-				spaceSQL := safety.SpaceCheckSQL("mysql", classification.TableName)
-				if spaceSQL != "" {
-					spaceRes, spaceErr := exec.Execute(ctx, buildCmd(user, pass, host, port, spaceSQL))
-					if spaceErr == nil {
-						if tableSize, freeSize, ok := safety.ParseSpaceCheckResult(spaceRes.Stdout); ok {
-							if freeSize < tableSize*1.2 {
-								return fmt.Sprintf(
-									"⚠️ 백업 공간 부족 (테이블: %.0fMB, 가용: %.0fMB).\n"+
-										"백업 없이 진행하려면 skip_backup=true 로 재요청하세요.", tableSize, freeSize), nil
-							}
-						}
-					}
-				}
-				// 2. 백업 실행
-				bakRes, bakErr := exec.Execute(ctx, buildCmd(user, pass, host, port, classification.BackupSQL))
-				if bakErr != nil || bakRes.ExitCode != 0 {
-					errOut := bakRes.Stderr
-					if bakErr != nil {
-						errOut = bakErr.Error()
-					}
-					return fmt.Sprintf("백업 실패 → 작업 중단:\n%s", errOut), nil
-				}
 			}
 
 			res, err := exec.Execute(ctx, buildCmd(user, pass, host, port, sql))
 			if err != nil {
 				return fmt.Sprintf("실행 오류: %s", err), nil
 			}
-			result := formatOutput(res.Stdout, res.Stderr, res.ExitCode)
-			if classification.RequiresBackup && !skipBackup && classification.BackupTable != "" {
-				result = fmt.Sprintf("[백업: %s]\n%s", classification.BackupTable, result)
-			}
-			return result, nil
+			output := formatOutput(res.Stdout, res.Stderr, res.ExitCode)
+			return validateAndEnrich(ctx, user, pass, host, port, sql, output, exec), nil
 		},
 	)
 }
@@ -170,7 +132,7 @@ func (c *MySQLConnector) makeStatusTool(prefix, user, pass, host string, port in
 			"type":       "object",
 			"properties": map[string]interface{}{"target": targetParam()},
 		},
-		tools.RiskNone, true, &c.status,
+		true, &c.status,
 		func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 			res, err := exec.Execute(ctx, buildCmd(user, pass, host, port, "SHOW GLOBAL STATUS LIKE 'Threads_%'; SHOW GLOBAL STATUS LIKE 'Uptime';"))
 			if err != nil {
@@ -189,7 +151,7 @@ func (c *MySQLConnector) makeProcesslistTool(prefix, user, pass, host string, po
 			"type":       "object",
 			"properties": map[string]interface{}{"target": targetParam()},
 		},
-		tools.RiskNone, true, &c.status,
+		true, &c.status,
 		func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 			res, err := exec.Execute(ctx, buildCmd(user, pass, host, port, "SHOW FULL PROCESSLIST;"))
 			if err != nil {
@@ -208,7 +170,7 @@ func (c *MySQLConnector) makeDatabasesTool(prefix, user, pass, host string, port
 			"type":       "object",
 			"properties": map[string]interface{}{"target": targetParam()},
 		},
-		tools.RiskNone, true, &c.status,
+		true, &c.status,
 		func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 			sql := "SELECT table_schema AS 'Database', ROUND(SUM(data_length+index_length)/1024/1024,1) AS 'MB' FROM information_schema.tables GROUP BY table_schema ORDER BY MB DESC;"
 			res, err := exec.Execute(ctx, buildCmd(user, pass, host, port, sql))
@@ -228,7 +190,6 @@ func targetParam() map[string]interface{} {
 }
 
 // formatOutput은 명령 실행 결과를 포맷한다.
-// mysql 배너·프롬프트를 제거하고 실제 쿼리 결과만 반환한다.
 func formatOutput(stdout, stderr string, exitCode int) string {
 	out := pipeline.CleanMySQLOutput(stdout)
 	if exitCode != 0 && stderr != "" {

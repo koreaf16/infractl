@@ -49,8 +49,6 @@ func (t *FileReadTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *FileReadTool) RiskLevel() RiskLevel { return RiskNone }
-
 func (t *FileReadTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 	path, err := argString(args, "path", true)
 	if err != nil {

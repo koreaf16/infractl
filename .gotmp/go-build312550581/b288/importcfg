@@ -1,0 +1,24 @@
+# import config
+packagefile context=C:\Dev\Infractl\.gocache\68\68ebcedb076b13fe2277c33e90f8b1a5c487236e93e6d2478b550c2f2f8d5f12-d
+packagefile encoding/base64=C:\Dev\Infractl\.gocache\65\65e641654338f0ba710d3ab3b6f5c45a250c9dc6e6850ed1e9510d57f740bdf2-d
+packagefile encoding/json=C:\Dev\Infractl\.gocache\b8\b8842da09d068d1da5161ca2d099a0660c691da1534b41f53463799b74b5d33e-d
+packagefile fmt=C:\Dev\Infractl\.gocache\a9\a9a97cad3827e2071f1e7e6d192b56d5a3422918007ae6c28125fcdcb609337e-d
+packagefile github.com/yourorg/infractl/internal/connector/ssh=C:\Dev\Infractl\.gocache\0e\0ef339c660e7072480cb9988b5ca656643ad461bbb1942556f1bf3a233bd3ede-d
+packagefile github.com/yourorg/infractl/internal/diff=C:\Dev\Infractl\.gocache\f6\f6b0541803ff17f182e5cf07b8c28e3a1cbcddbee7b7fc19022509a2090439ed-d
+packagefile github.com/yourorg/infractl/internal/executor=C:\Dev\Infractl\.gocache\2c\2c187224178fd3436b7901bce6124934682d55bb0980153f34700c2104989d73-d
+packagefile github.com/yourorg/infractl/internal/llm=C:\Dev\Infractl\.gocache\85\85e94509cf8a07169d886e22f0b46f0ac27045f113ca64970bc93ba461742757-d
+packagefile github.com/yourorg/infractl/internal/privilege=C:\Dev\Infractl\.gocache\92\92f7ff06d226fd140ced14d449bf70d0525a54b1fa6b81513b215b47dc384285-d
+packagefile github.com/yourorg/infractl/internal/rag=C:\Dev\Infractl\.gocache\ca\ca4b62bc387e16d97b7a6428115edc6941957d101f36c1f0694bb1c07c989f4b-d
+packagefile github.com/yourorg/infractl/internal/store=C:\Dev\Infractl\.gocache\dc\dccdb8f5347f6695f7da25c78fcfa0add9e1a844c8e71be5c26f4e2250471d9e-d
+packagefile github.com/yourorg/infractl/internal/web=C:\Dev\Infractl\.gocache\b4\b4fcb6f2f16bd65e4f74b0cd55747bcaddd34e8057376b03767ace0bfe4ac850-d
+packagefile log/slog=C:\Dev\Infractl\.gocache\80\806e4cdcbfab307d09b4e7f2a462ce04f456f91f1b11c2a3f74e1c411d56611b-d
+packagefile net=C:\Dev\Infractl\.gocache\3f\3fbe3d61bcaf90b5af0009418dc64e7b6e798a71a994ff160a6841f8e8dcd9e2-d
+packagefile os=C:\Dev\Infractl\.gocache\c4\c4718498c7c82cfde48400e1efa605af88a895d7291ef2307cb8c73f82b8d211-d
+packagefile path=C:\Dev\Infractl\.gocache\f2\f26a181c378e3969062cdbcfb0216bbc04e3d2d1f0e818b9d48faa52c94f7b1c-d
+packagefile path/filepath=C:\Dev\Infractl\.gocache\e9\e9f0df6806d1b8ba0e78c3d9bffc8defd4bc60760381714c9bf8ec372fecb8c1-d
+packagefile regexp=C:\Dev\Infractl\.gocache\b1\b13ee4a9a9cd19cc87d9cb88f6efefd503aad1d5d0dc3d6fce647ba6d148d63d-d
+packagefile runtime=C:\Dev\Infractl\.gocache\fc\fcdee23b2b20cee365034a3e8db74e4055dd2ab54b13ceac35c0ab48aed7fbd4-d
+packagefile sort=C:\Dev\Infractl\.gocache\f3\f3d818d76dd078e10d0c0163c0f0f637584594edbf25ed92e164e0fe5e32a671-d
+packagefile strings=C:\Dev\Infractl\.gocache\2d\2ded9dc49b8a817ca9058c2571ad219819355a58d18dffba6e34159a2c220edf-d
+packagefile sync=C:\Dev\Infractl\.gocache\23\2395a0222280fa9f0f415e48ab6e1807a4398967f085c466f77ebbfc5a046808-d
+packagefile time=C:\Dev\Infractl\.gocache\d2\d2c8c6a3dd898f5423875686736ab809019d14593a37bb543b1eb186aa7b8524-d

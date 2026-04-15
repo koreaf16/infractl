@@ -13,7 +13,6 @@ import (
 	conn "github.com/yourorg/infractl/internal/connector"
 	"github.com/yourorg/infractl/internal/executor"
 	"github.com/yourorg/infractl/internal/pipeline"
-	"github.com/yourorg/infractl/internal/safety"
 	"github.com/yourorg/infractl/internal/tools"
 )
 
@@ -100,58 +99,22 @@ func (c *PostgreSQLConnector) makeQueryTool(prefix, user, pass, host string, por
 			"properties": map[string]interface{}{
 				"sql":    map[string]interface{}{"type": "string", "description": "실행할 SQL 문"},
 				"target": targetParam(),
-				"skip_backup": map[string]interface{}{
-					"type":        "boolean",
-					"description": "true이면 사전 백업을 건너뜁니다. 공간 부족 등 백업 불가 확인 후에만 사용.",
-				},
 			},
 			"required": []string{"sql"},
 		},
-		tools.RiskLow, false, &c.status,
+		false, &c.status,
 		func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 			sql, _ := args["sql"].(string)
 			if sql == "" {
 				return "sql 인자가 필요합니다", nil
-			}
-			skipBackup, _ := args["skip_backup"].(bool)
-
-			classification := safety.ClassifySQL(sql)
-
-			if classification.RequiresBackup && !skipBackup && classification.TableName != "" {
-				// 1. 공간 사전 확인
-				spaceSQL := safety.SpaceCheckSQL("postgresql", classification.TableName)
-				if spaceSQL != "" {
-					spaceRes, spaceErr := exec.Execute(ctx, buildCmd(user, pass, host, port, dbName, spaceSQL))
-					if spaceErr == nil {
-						if tableSize, freeSize, ok := safety.ParseSpaceCheckResult(spaceRes.Stdout); ok {
-							if freeSize < tableSize*1.2 {
-								return fmt.Sprintf(
-									"⚠️ 백업 공간 부족 (테이블: %.0fMB, 가용: %.0fMB).\n"+
-										"백업 없이 진행하려면 skip_backup=true 로 재요청하세요.", tableSize, freeSize), nil
-							}
-						}
-					}
-				}
-				// 2. 백업 실행
-				bakRes, bakErr := exec.Execute(ctx, buildCmd(user, pass, host, port, dbName, classification.BackupSQL))
-				if bakErr != nil || bakRes.ExitCode != 0 {
-					errOut := bakRes.Stderr
-					if bakErr != nil {
-						errOut = bakErr.Error()
-					}
-					return fmt.Sprintf("백업 실패 → 작업 중단:\n%s", errOut), nil
-				}
 			}
 
 			res, err := exec.Execute(ctx, buildCmd(user, pass, host, port, dbName, sql))
 			if err != nil {
 				return fmt.Sprintf("실행 오류: %s", err), nil
 			}
-			result := formatOutput(res.Stdout, res.Stderr, res.ExitCode)
-			if classification.RequiresBackup && !skipBackup && classification.BackupTable != "" {
-				result = fmt.Sprintf("[백업: %s]\n%s", classification.BackupTable, result)
-			}
-			return result, nil
+			output := formatOutput(res.Stdout, res.Stderr, res.ExitCode)
+			return validateAndEnrich(ctx, user, pass, host, port, dbName, sql, output, exec), nil
 		},
 	)
 }
@@ -164,7 +127,7 @@ func (c *PostgreSQLConnector) makeDatabasesTool(prefix, user, pass, host string,
 			"type":       "object",
 			"properties": map[string]interface{}{"target": targetParam()},
 		},
-		tools.RiskNone, true, &c.status,
+		true, &c.status,
 		func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 			sql := `SELECT datname, pg_size_pretty(pg_database_size(datname)) AS size FROM pg_database ORDER BY pg_database_size(datname) DESC;`
 			res, err := exec.Execute(ctx, buildCmd(user, pass, host, port, "postgres", sql))
@@ -184,7 +147,7 @@ func (c *PostgreSQLConnector) makeConnectionsTool(prefix, user, pass, host strin
 			"type":       "object",
 			"properties": map[string]interface{}{"target": targetParam()},
 		},
-		tools.RiskNone, true, &c.status,
+		true, &c.status,
 		func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 			sql := `SELECT pid, usename, datname, state, wait_event_type, wait_event, LEFT(query,80) AS query FROM pg_stat_activity WHERE state IS NOT NULL ORDER BY state;`
 			res, err := exec.Execute(ctx, buildCmd(user, pass, host, port, "postgres", sql))
@@ -204,7 +167,7 @@ func (c *PostgreSQLConnector) makeLocksTool(prefix, user, pass, host string, por
 			"type":       "object",
 			"properties": map[string]interface{}{"target": targetParam()},
 		},
-		tools.RiskNone, true, &c.status,
+		true, &c.status,
 		func(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
 			sql := `SELECT l.pid, l.mode, l.granted, a.usename, a.state, LEFT(a.query,80) FROM pg_locks l JOIN pg_stat_activity a ON l.pid = a.pid WHERE NOT l.granted OR l.pid IN (SELECT blocking_pid FROM pg_stat_activity WHERE cardinality(pg_blocking_pids(pid)) > 0) ORDER BY l.granted;`
 			res, err := exec.Execute(ctx, buildCmd(user, pass, host, port, "postgres", sql))
@@ -224,7 +187,6 @@ func targetParam() map[string]interface{} {
 }
 
 // formatOutput은 명령 실행 결과를 포맷한다.
-// psql 배너·프롬프트를 제거하고 실제 쿼리 결과만 반환한다.
 func formatOutput(stdout, stderr string, exitCode int) string {
 	out := pipeline.CleanPSQLOutput(stdout)
 	if exitCode != 0 && stderr != "" {

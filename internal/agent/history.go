@@ -86,7 +86,11 @@ func (a *Agent) filterHistory(history []llm.Message) []llm.Message {
 }
 
 // buildMessages는 시스템 프롬프트와 히스토리를 조합하여 LLM 요청용 메시지 슬라이스를 반환한다.
+// sessionSummary가 있으면 요약 기반 컨텍스트를 주입하고, 없으면 기존 filterHistory 방식을 사용한다.
 func (a *Agent) buildMessages(systemMsg llm.Message) []llm.Message {
+	if a.sessionSummary != nil && a.sessionSummary.HasContext() {
+		return a.sessionSummary.BuildContextMessages(systemMsg, a.history)
+	}
 	filteredHistory := a.filterHistory(a.history)
 	messages := make([]llm.Message, 0, len(filteredHistory)+1)
 	messages = append(messages, systemMsg)

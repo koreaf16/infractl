@@ -78,8 +78,9 @@ func defaultTools(
 		&tools.ServerListTool{Store: st},
 		&tools.ServerRemoveTool{Store: st, Manager: mgr, ConnectorCleanup: connMgr},
 		&discovery.DiscoverServicesTool{Store: ds, Scanner: scanner, ServerStore: st},
+		&discovery.DiscoverWebServersTool{Scanner: scanner},
 		&connector.OSAuthProbeTool{Manager: connMgr, ServerStore: st, DiscoveryStore: ds},
-		&connector.ActivateTool{Manager: connMgr, ServerStore: st, DiscoveryStore: ds},
+		&connector.ActivateTool{Manager: connMgr, ServerStore: st, DiscoveryStore: ds, Scanner: &discoveryAutoScanner{scanner: scanner}},
 		&connector.LearnedActivateTool{Manager: connMgr, Store: ls},
 		// Phase 6: 웹 도구
 		&tools.WebSearchTool{},
@@ -217,6 +218,31 @@ func tuiFocusSelectAdapter(h *tui.TUISelectHandler) func(string, []tools.FocusSe
 		}
 		return result.Index, nil
 	}
+}
+
+// discoveryAutoScanner는 discovery.Scanner를 connector.ServiceScanner 인터페이스로 어댑트한다.
+// cmd/infractl(composition root)에서만 사용하여 connector → discovery 직접 의존성 방지.
+type discoveryAutoScanner struct {
+	scanner *discovery.Scanner
+}
+
+func (a *discoveryAutoScanner) ScanAndSave(ctx context.Context, exec executor.Executor, serverName string, ds store.DiscoveryStore) error {
+	result, err := a.scanner.Scan(ctx, exec)
+	if err != nil {
+		return fmt.Errorf("scan %s: %w", serverName, err)
+	}
+	entries := make([]store.DiscoveredServiceEntry, 0, len(result.Services))
+	for _, svc := range result.Services {
+		entries = append(entries, store.DiscoveredServiceEntry{
+			ServerName:  svc.ServerName,
+			ServiceType: string(svc.Type),
+			ServiceName: svc.Name,
+			Port:        svc.Port,
+			Details:     svc.Details,
+			Confidence:  svc.Confidence,
+		})
+	}
+	return ds.SaveDiscoveredServices(ctx, serverName, entries)
 }
 
 // tuiDisambiguateAdapter는 tui.TUISelectHandler를 connector.DisambiguateHandler로 어댑트한다.

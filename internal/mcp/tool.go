@@ -11,7 +11,6 @@ import (
 
 	"github.com/yourorg/infractl/internal/connector"
 	"github.com/yourorg/infractl/internal/executor"
-	"github.com/yourorg/infractl/internal/tools"
 )
 
 // mcpTool은 MCP 서버 도구 하나를 tools.Tool 인터페이스로 래핑한다.
@@ -46,8 +45,7 @@ func (t *mcpTool) Parameters() map[string]interface{} {
 	return map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
 }
 
-func (t *mcpTool) RiskLevel() tools.RiskLevel { return tools.RiskNone }
-func (t *mcpTool) IsReadOnly() bool           { return true }
+func (t *mcpTool) IsReadOnly() bool { return true }
 
 // IsEnabled는 MCP 클라이언트가 connected 상태일 때만 true를 반환한다.
 func (t *mcpTool) IsEnabled() bool {

@@ -1,11 +1,14 @@
+//go:build tools
+// +build tools
+
 package main
 
 import (
 	"context"
 	"fmt"
+	"github.com/yourorg/infractl/internal/llm"
 	"log"
 	"time"
-	"github.com/yourorg/infractl/internal/llm"
 )
 
 func main() {
@@ -15,17 +18,17 @@ func main() {
 		"",
 		60*time.Second,
 	)
-	
-	// Qwen 27B 특수 모드 활성화 (클라이언트 파싱용)
+
+	// Qwen 27B ?뱀닔 紐⑤뱶 ?쒖꽦??(?대씪?댁뼵???뚯떛??
 	client.SetUseInlineToolCalls(true)
 
 	fmt.Println("=== Final Validation: Qwen 3.5 27B Streaming + Prompt Tools ===")
-	
+
 	onToken := func(t string) {
-		fmt.Printf("[%s]", t) // 실시간 스트리밍 확인
+		fmt.Printf("[%s]", t) // ?ㅼ떆媛??ㅽ듃由щ컢 ?뺤씤
 	}
 
-	// 서버 에러를 피하기 위해 tools를 nil로 설정하고 프롬프트에 정의를 넣음 (에이전트 로직 재현)
+	// ?쒕쾭 ?먮윭瑜??쇳븯湲??꾪븯??tools瑜?nil濡??ㅼ젙?섍퀬 ?꾨＼?꾪듃???뺤쓽瑜??ｌ쓬 (?먯씠?꾪듃 濡쒖쭅 ?ы쁽)
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: `You are a helpful assistant. To use tools, follow this format:
 <tool_call>
@@ -37,8 +40,8 @@ Available Tool:
 		{Role: llm.RoleUser, Content: "List files in the current directory using shell_exec."},
 	}
 
-	// 명시적 tools 필드는 nil로 보냄
-	resp, err := client.ChatStream(context.Background(), messages, nil, nil, onToken)
+	// 紐낆떆??tools ?꾨뱶??nil濡?蹂대깂
+	resp, err := client.ChatStream(context.Background(), messages, nil, nil, nil, onToken)
 	if err != nil {
 		log.Fatalf("ChatStream failed: %v", err)
 	}
@@ -47,3 +50,5 @@ Available Tool:
 	fmt.Printf("Content: %s\n", resp.Content)
 	fmt.Printf("ToolCalls: %+v\n", resp.ToolCalls)
 }
+
+

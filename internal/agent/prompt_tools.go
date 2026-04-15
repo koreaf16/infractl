@@ -1,7 +1,7 @@
 // Package agent
 // File: prompt_tools.go
-// Description: 도구 우선순위, 안전 규칙, RAG 섹션 시스템 프롬프트 구성 함수
-// Responsibility: 전용 도구 우선 사용 규칙, 안전 규칙, 지식 검색 우선순위를 프롬프트에 추가
+// Description: ?꾧뎄 ?곗꽑?쒖쐞, ?덉쟾 洹쒖튃, RAG ?뱀뀡 ?쒖뒪???꾨＼?꾪듃 援ъ꽦 ?⑥닔
+// Responsibility: ?꾩슜 ?꾧뎄 ?곗꽑 ?ъ슜 洹쒖튃, ?덉쟾 洹쒖튃, 吏??寃???곗꽑?쒖쐞瑜??꾨＼?꾪듃??異붽?
 
 package agent
 
@@ -13,37 +13,54 @@ import (
 	"github.com/yourorg/infractl/internal/store"
 )
 
-// appendToolSelectionGuidelines는 도구 선택 가이드라인 섹션을 추가한다.
+// appendToolSelectionGuidelines???꾧뎄 ?좏깮 媛?대뱶?쇱씤 ?뱀뀡??異붽??쒕떎.
 func appendToolSelectionGuidelines(sb *strings.Builder) {
 	sb.WriteString("## Tool Selection Guidelines\n")
 	sb.WriteString("Follow this decision priority when choosing tools:\n\n")
-	sb.WriteString("**Information Gathering**\n")
+	sb.WriteString("**Information Gathering & Parallel Execution**\n")
 	sb.WriteString("1. If you already know the answer with high confidence, respond directly.\n")
 	sb.WriteString("2. If the user is asking which machine, shell, or default target is in effect, call `session_context` first.\n")
-	sb.WriteString("3. If you need server-specific data, use the appropriate dedicated tool on the correct target.\n")
-	sb.WriteString("4. For troubleshooting or error resolution, use `rag_search` first.\n")
-	sb.WriteString("5. If `rag_search` has no results and internet is available, use `web_search`.\n")
-	sb.WriteString("6. If you need detailed content from a specific URL, use `web_fetch` after `web_search`.\n")
-	sb.WriteString("7. If user intent is ambiguous or you must choose between multiple valid solutions, call `ask_user_question` to present choices to the user.\n\n")
+	sb.WriteString("3. **Parallel Execution (Efficiency):** For independent information gathering (e.g., checking multiple servers or multiple metrics), generate multiple tool calls in a single response. These will execute in parallel.\n")
+	sb.WriteString("4. **Parallel Execution:** Read-only tools can execute in parallel. Mutation commands execute sequentially to ensure state consistency.\n")
+	sb.WriteString("5. If you need server-specific data, use the appropriate dedicated tool on the correct target.\n")
+	sb.WriteString("6. For troubleshooting or error resolution, use `rag_search` first.\n")
+	sb.WriteString("7. If `rag_search` has no results and internet is available, use `web_search`.\n")
+	sb.WriteString("8. If you need detailed content from a specific URL, use `web_fetch` after `web_search`.\n")
+	sb.WriteString("9. **Target Ambiguity Check (CRITICAL):** Before any command execution, if the user references a server, DB, or instance name:\n")
+	sb.WriteString("   - Check if it matches any entry in the Known Servers Pool or the active server.\n")
+	sb.WriteString("   - If NO match is found, call `ask_user_question` immediately ??do NOT guess or execute blindly.\n")
+	sb.WriteString("   - If the name partially matches or seems like an alias (e.g. '26AI DB' vs 'oracle-db'), still ask to confirm before proceeding.\n\n")
+	sb.WriteString("10. When calling `ask_user_question`, ask exactly ONE concrete question.\n")
+	sb.WriteString("   - `options` must be mutually exclusive answer candidates, not a checklist of things to verify.\n")
+	sb.WriteString("   - If the answer is open-ended, omit `options` and ask for free-text input instead.\n\n")
 
 	sb.WriteString("**Adaptive Service Learning**\n")
-	sb.WriteString("1. First check the learned systems section above.\n")
-	sb.WriteString("2. If not found, use `shell_exec` to locate binaries.\n")
+	sb.WriteString("1. First check the learned systems section above. If a matching entry exists, use the stored path directly ??do NOT search again.\n")
+	sb.WriteString("2. If not found, use `shell_exec` with `find` to locate binaries ??do this ONCE only.\n")
 	sb.WriteString("3. If still not found and internet is available, use `web_search` for setup or commands.\n")
-	sb.WriteString("4. After discovery, call `save_learned_system` to persist the result.\n\n")
+	sb.WriteString("4. **After finding any binary path, call `save_learned_system` IMMEDIATELY** to persist it for future use.\n")
+	sb.WriteString("5. When a binary is found but ORACLE_HOME or similar env is not set, also read the user's profile file once to extract the correct env and set it inline before executing.\n\n")
 
 	sb.WriteString("**Multi-Server Operations**\n")
 	sb.WriteString("- Read-only queries can execute on multiple targets.\n")
-	sb.WriteString("- Mutation commands must execute on one target at a time, with confirmation when required.\n\n")
+	sb.WriteString("- Mutation commands must execute on one target at a time.\n\n")
 }
 
-// appendDiscoveryFlow는 서비스 디스커버리 플로우 섹션을 추가한다.
+// appendDiscoveryFlow???쒕퉬???붿뒪而ㅻ쾭由??뚮줈???뱀뀡??異붽??쒕떎.
 func appendDiscoveryFlow(sb *strings.Builder) {
 	sb.WriteString("**Service Discovery Flow**\n")
 	sb.WriteString("1. Call `discover_services` to scan processes, ports, and config files.\n")
 	sb.WriteString("2. If a known database service is found, call `connector_probe_os_auth` first.\n")
-	sb.WriteString("3. If confidence is only medium, ask the user to confirm service type before activating.\n")
-	sb.WriteString("4. Once a connector is active, use connector-specific tools instead of raw shell_exec.\n\n")
+	sb.WriteString("3. Once a connector is active, use connector-specific tools instead of raw shell_exec.\n\n")
+
+	sb.WriteString("**Oracle PDB Connection (CRITICAL)**\n")
+	sb.WriteString("To connect to an Oracle PDB (Pluggable Database), you MUST use `connector_activate` with `sub_instance=<PDB_NAME>`.\n")
+	sb.WriteString("- CORRECT: call `connector_activate` with `service_name=<CDB_SID>` and `sub_instance=<PDB_NAME>`.\n")
+	sb.WriteString("  This creates a dedicated connector (e.g., `oracle_ai26_ai_db.query`) that connects directly to the PDB service.\n")
+	sb.WriteString("- WRONG: running `ALTER SESSION SET CONTAINER = <PDB_NAME>` via query tool.\n")
+	sb.WriteString("  Each query tool call spawns a new sqlplus process — session state does NOT persist between calls.\n")
+	sb.WriteString("  `ALTER SESSION SET CONTAINER` is lost the moment that sqlplus process exits.\n")
+	sb.WriteString("- After `connector_activate` with sub_instance succeeds, use the new PDB-specific tools (e.g., `oracle_<sid>_<pdb>.query`).\n\n")
 }
 
 func appendDedicatedToolPriority(sb *strings.Builder) {
@@ -60,34 +77,17 @@ func appendDedicatedToolPriority(sb *strings.Builder) {
 	sb.WriteString("| `process_list` | ps aux, tasklist, pgrep |\n")
 	sb.WriteString("| `network_info` | ss -tlnp, netstat, Get-NetTCPConnection |\n")
 	sb.WriteString("| `file_read` | cat, head, tail, Get-Content |\n")
-	sb.WriteString("| `file_transfer` | scp, sftp — file upload/download between local and remote server |\n\n")
+	sb.WriteString("| `file_transfer` | scp, sftp ??file upload/download between local and remote server |\n\n")
 	sb.WriteString("Use `shell_exec` ONLY when no dedicated tool covers the operation.\n\n")
 }
 
 func appendSafetyRules(sb *strings.Builder) {
 	sb.WriteString("## Safety Rules\n")
-	sb.WriteString("**CRITICAL - Follow these rules at all times:**\n\n")
-	sb.WriteString("1. When using `shell_exec`, include a short Korean `description` argument.\n")
-	sb.WriteString("2. When using `shell_exec`, include `risk_assessment` for non-read-only commands.\n")
-	sb.WriteString("3. If the request is ambiguous, ask for clarification before executing anything.\n")
-	sb.WriteString("4. High-risk operations require explicit confirmation.\n")
-	sb.WriteString("5. High-risk shell commands must include `pre_backup_command`.\n")
-	sb.WriteString("6. Mutation tool calls should include rollback and checkpoint metadata when supported.\n")
-	sb.WriteString("7. Before restarting a service, capture current status and prefer dedicated restart tools.\n")
-	sb.WriteString("8. Learned mutation commands must carry backup instructions.\n")
-	sb.WriteString("9. For file uploads/downloads, ALWAYS use `file_transfer` instead of `shell_exec` + scp/sftp. `file_transfer` reuses the authenticated SSH connection and requires no password prompt.\n")
-	sb.WriteString("10. Avoid heredoc commands like `<<EOF` for file edits or config writes; prefer non-interactive `printf` or `tee` one-liners so the command does not block on stdin.\n")
-	sb.WriteString("11. When appending shell environment exports, escape `$` so variable references are written literally to the target file.\n")
-	sb.WriteString("12. Avoid commands that wait for stdin or a password prompt. Prefer non-interactive forms such as `sudo -n`, `runuser -l`, `bash -lc`, or explicit env exports.\n")
-	sb.WriteString("13. **CRITICAL — Privilege escalation and session management:**\n" +
-		"    - ALWAYS use `become_method`/`become_user` (PTY stdin injection) for privilege escalation.\n" +
-		"    - NEVER use inline `echo 'PASSWORD' | sudo -S` or `printf | sudo -S`.\n" +
-		"    - NEVER use `su - root` (use `become_method: sudo` instead).\n" +
-		"    - Reuse acquired sessions (e.g. `session_id: \"root\"` or `session_id: \"oracle\"`) instead of elevating repeatedly.\n" +
-		"    - For file transfers, ALWAYS use `file_transfer` tool (reuses SSH connection, no password needed).\n\n")
+	sb.WriteString("1. Avoid heredoc patterns like `<<EOF` for non-interactive edits.\n")
+	sb.WriteString("2. Prefer `printf` or `tee` one-liners for deterministic file writes.\n")
+	sb.WriteString("3. When writing shell exports, escape `$` so variable references are written literally.\n")
+	sb.WriteString("4. Prefer non-interactive privilege patterns such as `sudo -n`, `runuser -l`, and `bash -lc`.\n\n")
 }
-
-
 
 func appendRAGSection(sb *strings.Builder, ragSources []store.RAGSource, stats *rag.KnowledgeStats) {
 	sb.WriteString("## Knowledge Search Priority\n")
@@ -164,22 +164,25 @@ func appendContextGuardrails(sb *strings.Builder, noActiveServer bool) {
 }
 
 func appendErrorRecoveryProtocol(sb *strings.Builder) {
-	sb.WriteString("## 에러 복구 프로토콜 (필수)\n")
-	sb.WriteString("도구 호출이 실패하거나 shell_exec가 비정상 종료 코드를 반환하면 **즉시 재시도 금지**.\n")
-	sb.WriteString("새 정보 없는 재시도는 턴을 낭비한다. 반드시 아래 순서를 따를 것:\n\n")
-	sb.WriteString("1. **`rag_search` 호출** — 에러 메시지 또는 핵심 문구를 쿼리로 사용\n")
-	sb.WriteString("   - 점수 ≥ 0.3 결과 있으면: 해결책 적용 후 재시도\n")
-	sb.WriteString("   - 결과 없으면: 2번으로 진행\n")
-	sb.WriteString("2. **`web_search` 호출** — rag_search 결과 없을 때만\n")
-	sb.WriteString("   - 에러 코드/메시지 + 도구명 + OS 컨텍스트로 검색\n")
-	sb.WriteString("   - `web_fetch`로 가장 관련성 높은 URL을 읽어 해결책 확인\n")
-	sb.WriteString("3. 찾은 해결책을 적용하고 원래 도구를 재시도\n")
-	sb.WriteString("4. **재시도 성공 후** `knowledge_add` 호출 — 다음 번에 즉시 찾을 수 있도록 저장\n\n")
-	sb.WriteString("모든 도구에 적용 (shell_exec, oracle.query, mysql.query, file_write 등).\n")
-	sb.WriteString("특수 케이스:\n")
-	sb.WriteString("- `privilege authentication failed` / `sorry, try again`: 인용 방식(단일/이중 따옴표), `become_method` 대안, sudoers 설정 검색\n")
-	sb.WriteString("- `command not found`: 대상 OS용 올바른 패키지명 / 설치 명령 검색\n")
-	sb.WriteString("- `ORA-XXXXX` / `MySQL error XXXX`: 에러 코드 직접 검색\n\n")
+	sb.WriteString("## ?먮윭 蹂듦뎄 ?꾨줈?좎퐳 (?꾩닔)\n")
+	sb.WriteString("?꾧뎄 ?몄텧???ㅽ뙣?섍굅??shell_exec媛 鍮꾩젙??醫낅즺 肄붾뱶瑜?諛섑솚?섎㈃ **利됱떆 ?ъ떆??湲덉?**.\n")
+	sb.WriteString("???뺣낫 ?녿뒗 ?ъ떆?꾨뒗 ?댁쓣 ??퉬?쒕떎. 諛섎뱶???꾨옒 ?쒖꽌瑜??곕? 寃?\n\n")
+	sb.WriteString("**[?듭떖 ?먯튃] ?숈씪???묎렐 諛⑹떇?쇰줈 3???댁긽 ?ㅽ뙣?섎㈃ 利됱떆 以묐떒?섍퀬 ?ъ슜?먯뿉寃??곹솴???ㅻ챸?섎씪.**\n\n")
+	sb.WriteString("1. **`rag_search` ?몄텧** ???먮윭 硫붿떆吏 ?먮뒗 ?듭떖 臾멸뎄瑜?荑쇰━濡??ъ슜\n")
+	sb.WriteString("   - ?먯닔 ??0.3 寃곌낵 ?덉쑝硫? ?닿껐梨??곸슜 ???ъ떆??n")
+	sb.WriteString("   - 寃곌낵 ?놁쑝硫? 2踰덉쑝濡?吏꾪뻾\n")
+	sb.WriteString("2. **`web_search` ?몄텧** ??rag_search 寃곌낵 ?놁쓣 ?뚮쭔\n")
+	sb.WriteString("   - ?먮윭 肄붾뱶/硫붿떆吏 + ?꾧뎄紐?+ OS 而⑦뀓?ㅽ듃濡?寃??n")
+	sb.WriteString("   - `web_fetch`濡?媛??愿?⑥꽦 ?믪? URL???쎌뼱 ?닿껐梨??뺤씤\n")
+	sb.WriteString("3. 李얠? ?닿껐梨낆쓣 ?곸슜?섍퀬 ?먮옒 ?꾧뎄瑜??ъ떆??n")
+	sb.WriteString("4. **?ъ떆???깃났 ??* `knowledge_add` ?몄텧 ???ㅼ쓬 踰덉뿉 利됱떆 李얠쓣 ???덈룄濡????n")
+	sb.WriteString("5. ?닿껐梨낆쓣 李얠? 紐삵뻽嫄곕굹 3???쒕룄 ?꾩뿉???숈씪 ?먮윭 諛섎났 ?? ?ъ슜?먯뿉寃??꾩옱源뚯???吏꾨떒 寃곌낵? ?꾩슂???뺣낫瑜?紐낇솗???ㅻ챸?섍퀬 以묐떒\n\n")
+	sb.WriteString("紐⑤뱺 ?꾧뎄???곸슜 (shell_exec, oracle.query, mysql.query, file_write ??.\n")
+	sb.WriteString("?뱀닔 耳?댁뒪:\n")
+	sb.WriteString("- `privilege authentication failed` / `sorry, try again`: ?몄슜 諛⑹떇(?⑥씪/?댁쨷 ?곗샂??, `become_method` ??? sudoers ?ㅼ젙 寃??n")
+	sb.WriteString("- `command not found` / sqlplus 誘몃컻寃? `find` 濡?諛붿씠?덈━ ?꾩튂 ?뺤씤 1?뚮쭔 ?섑뻾. 諛쒓껄 ??ORACLE_HOME???ㅼ젙?섏뿬 ?ъ떆?? 誘몃컻寃????ъ슜?먯뿉寃?蹂닿퀬\n")
+	sb.WriteString("- `ORACLE_HOME not set` / `SP2-0750`: `cat ~/.bash_profile ~/.bashrc ~/.profile` 濡??섍꼍蹂???ㅼ젙 ?뚯씪 1???뺤씤 ??寃쎈줈瑜?吏곸젒 吏?뺥븯???ъ떆??n")
+	sb.WriteString("- `ORA-XXXXX` / `MySQL error XXXX`: ?먮윭 肄붾뱶 吏곸젒 寃??n\n")
 }
 
 func appendQwenToolGuideline(sb *strings.Builder) {
@@ -191,40 +194,44 @@ func appendQwenToolGuideline(sb *strings.Builder) {
 	sb.WriteString("Points to remember:\n")
 	sb.WriteString("- Do not use standard markdown code blocks for tools.\n")
 	sb.WriteString("- You can call multiple tools by repeating the <tool_call> block.\n")
-	sb.WriteString("- Output your thought process (Thinking) first, then the tool call.\n\n")
+	sb.WriteString("- Output your thought process (Thinking) first, then the tool call.\n")
+	sb.WriteString("- After the system executes your tool, it will reply with a <tool_response> block.\n")
+	sb.WriteString("- You MUST analyze the <tool_response> and provide a final text response to the user in Korean.\n")
+	sb.WriteString("- Do NOT output empty responses.\n\n")
 }
 
-// appendTaskCompletionRules는 작업 완료 루프 규칙을 프롬프트에 추가한다.
+// appendTaskCompletionRules???묒뾽 ?꾨즺 猷⑦봽 洹쒖튃???꾨＼?꾪듃??異붽??쒕떎.
 func appendTaskCompletionRules(sb *strings.Builder) {
-	sb.WriteString("## Task Completion Rules (CRITICAL — 반드시 준수)\n")
-	sb.WriteString("**작업이 완전히 끝나기 전에는 절대 최종 응답을 생성하지 않는다.**\n\n")
+	sb.WriteString("## Task Completion Rules (CRITICAL ??諛섎뱶??以??\n")
+	sb.WriteString("**?묒뾽???꾩쟾???앸굹湲??꾩뿉???덈? 理쒖쥌 ?묐떟???앹꽦?섏? ?딅뒗??**\n\n")
 
-	sb.WriteString("### 1. 작업 완료 선언 프로토콜 (Mandatory)\n")
-	sb.WriteString("- 모든 변경 작업(파일 수정, 서비스 재시작, 패키지 설치 등)을 마친 후에는 반드시 `verify_complete` 도구를 호출해야 한다.\n")
-	sb.WriteString("- `verify_complete`를 호출하기 전에는 어떤 경우에도 \"작업을 완료했습니다\"라고 사용자에게 말하지 마시오.\n")
-	sb.WriteString("- 시스템은 `verify_complete` 호출 시 제출된 증거(evidence)를 바탕으로 최종 종료 여부를 판단한다.\n\n")
+	sb.WriteString("### 1. ?묒뾽 ?꾨즺 ?좎뼵 ?꾨줈?좎퐳 (Mandatory)\n")
+	sb.WriteString("- 紐⑤뱺 蹂寃??묒뾽(?뚯씪 ?섏젙, ?쒕퉬???ъ떆?? ?⑦궎吏 ?ㅼ튂 ????留덉튇 ?꾩뿉??諛섎뱶??`verify_complete` ?꾧뎄瑜??몄텧?댁빞 ?쒕떎.\n")
+	sb.WriteString("- `verify_complete`瑜??몄텧?섍린 ?꾩뿉???대뼡 寃쎌슦?먮룄 \"?묒뾽???꾨즺?덉뒿?덈떎\"?쇨퀬 ?ъ슜?먯뿉寃?留먰븯吏 留덉떆??\n")
+	sb.WriteString("- ?쒖뒪?쒖? `verify_complete` ?몄텧 ???쒖텧??利앷굅(evidence)瑜?諛뷀깢?쇰줈 理쒖쥌 醫낅즺 ?щ?瑜??먮떒?쒕떎.\n\n")
 
-	sb.WriteString("### 2. 파일 및 상태 확인 (중복 작업 방지)\n")
-	sb.WriteString("- 작업을 시작하기 전, 그리고 각 단계 직후에 반드시 `shell_exec`로 현재 상태를 확인한다.\n")
-	sb.WriteString("- 파일이 이미 존재하거나 서비스가 이미 원하는 상태이면 해당 단계를 건너뛴다.\n")
-	sb.WriteString("- 히스토리만 믿지 말고 실제 시스템 상태를 명령어로 조회하여 확인하라.\n\n")
+	sb.WriteString("### 2. ?뚯씪 諛??곹깭 ?뺤씤 (以묐났 ?묒뾽 諛⑹?)\n")
+	sb.WriteString("- ?묒뾽???쒖옉?섍린 ?? 洹몃━怨?媛??④퀎 吏곹썑??諛섎뱶??`shell_exec`濡??꾩옱 ?곹깭瑜??뺤씤?쒕떎.\n")
+	sb.WriteString("- ?뚯씪???대? 議댁옱?섍굅???쒕퉬?ㅺ? ?대? ?먰븯???곹깭?대㈃ ?대떦 ?④퀎瑜?嫄대꼫?대떎.\n")
+	sb.WriteString("- ?덉뒪?좊━留?誘우? 留먭퀬 ?ㅼ젣 ?쒖뒪???곹깭瑜?紐낅졊?대줈 議고쉶?섏뿬 ?뺤씤?섎씪.\n\n")
 
-	sb.WriteString("### 3. 오류 발생 시 자율 복구\n")
-	sb.WriteString("- 복구 가능한 오류(디렉토리 없음, 파일 없음, 명령 미설치 등) 발생 시 사용자에게 묻지 말고 즉시 수정 도구를 호출하여 해결한 뒤 작업을 계속하라.\n")
-	sb.WriteString("- **절대로 중간에 멈추지 마시오.** 오류를 고치는 도구를 즉시 호출하라.\n\n")
+	sb.WriteString("### 3. ?ㅻ쪟 諛쒖깮 ???먯쑉 蹂듦뎄\n")
+	sb.WriteString("- 蹂듦뎄 媛?ν븳 ?ㅻ쪟(?붾젆?좊━ ?놁쓬, ?뚯씪 ?놁쓬, 紐낅졊 誘몄꽕移??? 諛쒖깮 ???ъ슜?먯뿉寃?臾살? 留먭퀬 利됱떆 ?섏젙 ?꾧뎄瑜??몄텧?섏뿬 ?닿껐?????묒뾽??怨꾩냽?섎씪.\n")
+	sb.WriteString("- **?? ?숈씪???묎렐 諛⑹떇?쇰줈 3???댁긽 ?ㅽ뙣?섎㈃ 諛섎뱶??硫덉텛怨??ъ슜?먯뿉寃??꾩옱 ?곹솴怨??꾩슂???뺣낫瑜??ㅻ챸?섎씪.**\n")
+	sb.WriteString("- ?덈줈???뺣낫 ?놁씠 媛숈? 紐낅졊??蹂?뺣쭔 ?섎뒗 諛섎났 ?쒕룄??利됱떆 以묐떒?쒕떎.\n\n")
 
-	sb.WriteString("### 4. 다단계 작업의 완전성 (End-to-End)\n")
-	sb.WriteString("사용자의 최종 목표가 달성되었음을 증명할 수 있을 때까지 루프를 멈추지 마시오.\n")
-	sb.WriteString("예: 설치 작업 -> 서비스 시작 -> 포트 리스닝 확인 -> 웹 응답 확인(`curl`) 순서로 진행.\n")
-	sb.WriteString("  Step 1) 사전 상태 확인\n")
-	sb.WriteString("  Step 2) 변경 작업 실행\n")
-	sb.WriteString("  Step 3) 결과 검증 명령어 실행 (필수)\n")
-	sb.WriteString("  Step 4) `verify_complete` 호출\n")
-	sb.WriteString("  Step 5) 최종 응답 생성\n\n")
+	sb.WriteString("### 4. ?ㅻ떒怨??묒뾽???꾩쟾??(End-to-End)\n")
+	sb.WriteString("?ъ슜?먯쓽 理쒖쥌 紐⑺몴媛 ?ъ꽦?섏뿀?뚯쓣 利앸챸?????덉쓣 ?뚭퉴吏 猷⑦봽瑜?硫덉텛吏 留덉떆??\n")
+	sb.WriteString("?? ?ㅼ튂 ?묒뾽 -> ?쒕퉬???쒖옉 -> ?ы듃 由ъ뒪???뺤씤 -> ???묐떟 ?뺤씤(`curl`) ?쒖꽌濡?吏꾪뻾.\n")
+	sb.WriteString("  Step 1) ?ъ쟾 ?곹깭 ?뺤씤\n")
+	sb.WriteString("  Step 2) 蹂寃??묒뾽 ?ㅽ뻾\n")
+	sb.WriteString("  Step 3) 寃곌낵 寃利?紐낅졊???ㅽ뻾 (?꾩닔)\n")
+	sb.WriteString("  Step 4) `verify_complete` ?몄텧\n")
+	sb.WriteString("  Step 5) 理쒖쥌 ?묐떟 ?앹꽦\n\n")
 
-	sb.WriteString("### 5. 자율 실행 및 일괄 보고\n")
-	sb.WriteString("- 중간 단계마다 \"~를 했습니다. 계속할까요?\"라고 묻지 마시오. 목표 달성을 위해 필요한 일련의 과정을 멈춤 없이 수행하라.\n")
-	sb.WriteString("- 같은 방법으로 3회 이상 실패하거나, 해결 불가능한 권한/설정 문제에 직면했을 때만 사용자에게 도움을 요청하라.\n\n")
+	sb.WriteString("### 5. ?먯쑉 ?ㅽ뻾 諛??쇨큵 蹂닿퀬\n")
+	sb.WriteString("- 以묎컙 ?④퀎留덈떎 \"~瑜??덉뒿?덈떎. 怨꾩냽?좉퉴??\"?쇨퀬 臾살? 留덉떆?? 紐⑺몴 ?ъ꽦???꾪빐 ?꾩슂???쇰젴??怨쇱젙??硫덉땄 ?놁씠 ?섑뻾?섎씪.\n")
+	sb.WriteString("- 媛숈? 諛⑸쾿?쇰줈 3???댁긽 ?ㅽ뙣?섍굅?? ?닿껐 遺덇??ν븳 沅뚰븳/?ㅼ젙 臾몄젣??吏곷㈃?덉쓣 ?뚮쭔 ?ъ슜?먯뿉寃??꾩????붿껌?섎씪.\n\n")
 }
 
 func appendPhasePlanning(sb *strings.Builder) {
@@ -233,7 +240,7 @@ func appendPhasePlanning(sb *strings.Builder) {
 	sb.WriteString("1. First, outline a numbered Phase plan in your response before executing.\n")
 	sb.WriteString("2. Format each phase as: \"Phase A: <short description>\", \"Phase B: <description>\", etc.\n")
 	sb.WriteString("3. In each tool call's `description` field, prefix with the phase identifier.\n")
-	sb.WriteString("   Example: description: \"Phase A: K8s Pod 상태 확인\"\n")
+	sb.WriteString("   Example: description: \"Phase A: K8s Pod ?곹깭 ?뺤씤\"\n")
 	sb.WriteString("4. This helps the user track progress on complex multi-step operations.\n")
-	sb.WriteString("5. For simple tasks (1-3 tool calls), skip phase planning and execute directly.\n\n")
+	sb.WriteString("5. Even for simple tasks (1-3 tool calls), you MUST provide a Korean `description` for every tool call explaining why you are performing that action.\n\n")
 }

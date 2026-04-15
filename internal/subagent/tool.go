@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/yourorg/infractl/internal/executor"
-	"github.com/yourorg/infractl/internal/tools"
 )
 
 // AnalyzeTool은 서브에이전트 병렬 분석을 실행하는 LLM 도구이다.
@@ -46,7 +45,6 @@ func (t *AnalyzeTool) Parameters() map[string]interface{} {
 		"required": []string{"question"},
 	}
 }
-func (t *AnalyzeTool) RiskLevel() tools.RiskLevel { return tools.RiskNone }
 func (t *AnalyzeTool) IsReadOnly() bool            { return true }
 func (t *AnalyzeTool) IsEnabled() bool             { return true }
 

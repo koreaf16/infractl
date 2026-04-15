@@ -8,7 +8,10 @@ package tools
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/yourorg/infractl/internal/executor"
 )
@@ -25,9 +28,8 @@ func (t *SystemInfoTool) Description() string {
 		"Prefer this tool for any system overview or health check request."
 }
 
-func (t *SystemInfoTool) IsReadOnly() bool     { return true }
-func (t *SystemInfoTool) IsEnabled() bool      { return true }
-func (t *SystemInfoTool) RiskLevel() RiskLevel { return RiskNone }
+func (t *SystemInfoTool) IsReadOnly() bool { return true }
+func (t *SystemInfoTool) IsEnabled() bool  { return true }
 
 func (t *SystemInfoTool) Parameters() map[string]interface{} {
 	return map[string]interface{}{
@@ -55,28 +57,61 @@ func (t *SystemInfoTool) Execute(ctx context.Context, args map[string]interface{
 	platform := executor.CommandPlatform(exec)
 	sections := parseSections(sectionsStr)
 
-	var parts []string
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		parts = make(map[string]string)
+		errs  []string
+	)
+
+	slog.Info("system_info_start", "server", exec.Target(), "sections", sections)
+
 	for _, section := range sections {
-		cmd := buildSystemInfoCommand(section, platform)
-		if cmd == "" {
-			continue
-		}
-		result, err := exec.Execute(ctx, cmd)
-		if err != nil {
-			parts = append(parts, fmt.Sprintf("[%s] Error: %s", section, err))
-			continue
-		}
-		if result.ExitCode != 0 {
-			parts = append(parts, fmt.Sprintf("[%s] Error (exit %d):\n%s", section, result.ExitCode, result.Stderr))
-			continue
-		}
-		parts = append(parts, fmt.Sprintf("[%s]\n%s", section, strings.TrimSpace(result.Stdout)))
+		wg.Add(1)
+		go func(sec string) {
+			defer wg.Done()
+			slog.Info("task_start", "task", sec)
+			start := time.Now()
+
+			cmd := buildSystemInfoCommand(sec, platform)
+			if cmd == "" {
+				return
+			}
+			result, err := exec.Execute(ctx, cmd)
+			dur := time.Since(start)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("[%s] Error: %s", sec, err))
+				slog.Info("task_fail", "task", sec, "dur", dur)
+				return
+			}
+			if result.ExitCode != 0 {
+				errs = append(errs, fmt.Sprintf("[%s] Error (exit %d):\n%s", sec, result.ExitCode, result.Stderr))
+				slog.Info("task_fail", "task", sec, "dur", dur)
+				return
+			}
+			parts[sec] = strings.TrimSpace(result.Stdout)
+			slog.Info("task_done", "task", sec, "dur", dur)
+		}(section)
 	}
 
-	if len(parts) == 0 {
+	wg.Wait()
+
+	// Maintain requested order
+	var output []string
+	for _, sec := range sections {
+		if content, ok := parts[sec]; ok {
+			output = append(output, fmt.Sprintf("[%s]\n%s", sec, content))
+		}
+	}
+	output = append(output, errs...)
+
+	if len(output) == 0 {
 		return "No sections collected.", nil
 	}
-	return strings.Join(parts, "\n\n"), nil
+	return strings.Join(output, "\n\n"), nil
 }
 
 func parseSections(raw string) []string {
@@ -128,7 +163,7 @@ func buildSystemInfoWindows(section string) string {
 	case "memory":
 		return "wmic OS get TotalVisibleMemorySize,FreePhysicalMemory /format:list"
 	case "disk":
-		return "wmic logicaldisk get DeviceID,Size,FreeSpace,FileSystem /format:list"
+		return `Get-Volume | Where-Object {$_.DriveType -eq 'Fixed'} | Select-Object DriveLetter,FileSystemLabel,@{N='TotalGB';E={[math]::Round($_.Size/1GB,2)}},@{N='FreeGB';E={[math]::Round($_.SizeRemaining/1GB,2)}},@{N='UsedPercent';E={if($_.Size -gt 0){[math]::Round(100-($_.SizeRemaining/$_.Size*100),2)}else{0}}} | Format-List`
 	case "uptime":
 		return "net stats workstation | findstr /B /C:\"Statistics since\""
 	default:

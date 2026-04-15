@@ -64,9 +64,8 @@ func (t *OSAuthProbeTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *OSAuthProbeTool) RiskLevel() tools.RiskLevel { return tools.RiskNone }
-func (t *OSAuthProbeTool) IsReadOnly() bool           { return false }
-func (t *OSAuthProbeTool) IsEnabled() bool            { return true }
+func (t *OSAuthProbeTool) IsReadOnly() bool { return true }
+func (t *OSAuthProbeTool) IsEnabled() bool  { return true }
 
 // Execute probes OS auth and activates connector on success.
 func (t *OSAuthProbeTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {

@@ -21,7 +21,6 @@ type SaveLearnedSystemTool struct {
 }
 
 func (t *SaveLearnedSystemTool) Name() string         { return "save_learned_system" }
-func (t *SaveLearnedSystemTool) RiskLevel() RiskLevel { return RiskNone }
 func (t *SaveLearnedSystemTool) IsReadOnly() bool     { return false }
 func (t *SaveLearnedSystemTool) IsEnabled() bool      { return true }
 
