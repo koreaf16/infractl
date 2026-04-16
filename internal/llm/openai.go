@@ -30,7 +30,12 @@ type OpenAIClient struct {
 	streamClient       *http.Client
 	useInlineToolCalls bool          // true면 본문 내 <tool_call> 태그를 가로채서 파싱함 (Qwen 27B 등 특정 모델용)
 	streamIdleTimeout  time.Duration // SSE 스트림 청크 간 최대 유휴 시간 (0이면 defaultStreamIdleTimeout 사용)
+	temperature        *float64      // nil이면 서버 기본값(1.0) 사용
 }
+
+// SetTemperature는 모든 요청에 적용할 temperature를 설정한다.
+// nil을 전달하면 서버 기본값(1.0)이 사용된다.
+func (c *OpenAIClient) SetTemperature(t *float64) { c.temperature = t }
 
 func NewOpenAIClient(endpoint, model, apiKey string, timeout time.Duration) *OpenAIClient {
 	return &OpenAIClient{
@@ -55,17 +60,20 @@ func (c *OpenAIClient) Chat(ctx context.Context, messages []Message, tools []Too
 	reqMessages := messages
 	reqTools := tools
 
+	reqToolChoice := toolChoice
 	if c.useInlineToolCalls {
 		reqMessages = c.transformMessagesForInlineTools(messages)
-		reqTools = nil // Tool API 비활성화
+		reqTools = nil        // Tool API 비활성화
+		reqToolChoice = nil   // tools 없으면 tool_choice도 제외해야 함 (Qwen API 400 방지)
 	}
 
 	reqBody := chatRequest{
-		Model:      c.model,
-		Messages:   reqMessages,
-		Tools:      reqTools,
-		ToolChoice: toolChoice,
-		Stream:     false,
+		Model:       c.model,
+		Messages:    reqMessages,
+		Tools:       reqTools,
+		ToolChoice:  reqToolChoice,
+		Stream:      false,
+		Temperature: c.temperature,
 	}
 
 	data, err := json.Marshal(reqBody)
@@ -139,17 +147,20 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, messages []Message, tools
 	reqMessages := messages
 	reqTools := tools
 
+	reqToolChoice := toolChoice
 	if c.useInlineToolCalls {
 		reqMessages = c.transformMessagesForInlineTools(messages)
-		reqTools = nil // Tool API 비활성화
+		reqTools = nil        // Tool API 비활성화
+		reqToolChoice = nil   // tools 없으면 tool_choice도 제외해야 함 (Qwen API 400 방지)
 	}
 
 	reqBody := chatRequest{
-		Model:      c.model,
-		Messages:   reqMessages,
-		Tools:      reqTools,
-		ToolChoice: toolChoice,
-		Stream:     true,
+		Model:       c.model,
+		Messages:    reqMessages,
+		Tools:       reqTools,
+		ToolChoice:  reqToolChoice,
+		Stream:      true,
+		Temperature: c.temperature,
 	}
 
 	data, err := json.Marshal(reqBody)
