@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/yourorg/infractl/internal/agent/todo"
 	"github.com/yourorg/infractl/internal/checkpoint"
 	"github.com/yourorg/infractl/internal/config"
 	"github.com/yourorg/infractl/internal/connector"
@@ -25,7 +26,7 @@ import (
 	"github.com/yourorg/infractl/internal/connector/weblogic"
 	"github.com/yourorg/infractl/internal/discovery"
 	"github.com/yourorg/infractl/internal/executor"
-	"github.com/yourorg/infractl/internal/hooks"
+	"github.com/yourorg/infractl/internal/lifecycle"
 	"github.com/yourorg/infractl/internal/llm"
 	"github.com/yourorg/infractl/internal/mcp"
 	"github.com/yourorg/infractl/internal/privilege"
@@ -51,14 +52,19 @@ func defaultTools(
 	llmReg *llm.Registry,
 	ragMgr *rag.Manager,
 	ragStore store.RAGSourceStore,
+	externalEmbedder rag.EmbeddingGenerator,
 	memSvc *rag.MemoryService,
 	cpMgr *checkpoint.Manager,
-	hooksMgr *hooks.Manager,
+	hooksMgr *lifecycle.Manager,
 	subOrchestrator *subagent.Orchestrator,
 	sched *schedule.Scheduler,
 ) []tools.Tool {
 	scanner := discovery.NewScanner()
 	fetcher := web.NewFetcher(100, 15*time.Minute)
+	todoStore := todo.NewStore()
+	todoTracker := todo.NewTracker(todoStore)
+	todoWriteTool := &todo.WriteTool{Tracker: todoTracker}
+	todoReadTool := &todo.ReadTool{Store: todoStore}
 	return []tools.Tool{
 		// 빌트인 도구
 		&tools.ShellExecTool{PrivilegeCache: privilege.NewCache()},
@@ -75,15 +81,18 @@ func defaultTools(
 		&tools.K8sQueryTool{},
 		&tools.DiskUsageTool{},
 		&tools.ServerAddTool{Store: st, Manager: mgr},
+		&tools.ServerAddTool{Store: st, Manager: mgr, ToolName: "workspace_add"},
 		&tools.ServerListTool{Store: st},
+		&tools.ServerListTool{Store: st, ToolName: "workspace_list"},
 		&tools.ServerRemoveTool{Store: st, Manager: mgr, ConnectorCleanup: connMgr},
+		&tools.ServerRemoveTool{Store: st, Manager: mgr, ConnectorCleanup: connMgr, ToolName: "workspace_remove"},
 		&discovery.DiscoverServicesTool{Store: ds, Scanner: scanner, ServerStore: st},
 		&discovery.DiscoverWebServersTool{Scanner: scanner},
 		&connector.OSAuthProbeTool{Manager: connMgr, ServerStore: st, DiscoveryStore: ds},
 		&connector.ActivateTool{Manager: connMgr, ServerStore: st, DiscoveryStore: ds, Scanner: &discoveryAutoScanner{scanner: scanner}},
 		&connector.LearnedActivateTool{Manager: connMgr, Store: ls},
 		// Phase 6: 웹 도구
-		&tools.WebSearchTool{},
+		&tools.WebSearchTool{Fetcher: fetcher, LLMClient: lc, LLMRegistry: llmReg},
 		&tools.WebFetchTool{Fetcher: fetcher, LLMClient: lc, LLMRegistry: llmReg},
 		// Phase 6: 지식 베이스 도구
 		&tools.KnowledgeSearchTool{Store: ks},
@@ -94,12 +103,13 @@ func defaultTools(
 		&tools.UserToolCreateTool{Manager: utm},
 		// Phase 7: RAG 검색 및 등록 도구
 		&tools.RAGSearchTool{Manager: ragMgr},
-		&tools.RAGRegisterTool{Store: ragStore},
+		&tools.RAGProbeSourceTool{ExecManager: mgr},
+		&tools.RAGRegisterTool{Store: ragStore, ExecManager: mgr, Embedder: externalEmbedder},
 		&tools.MemorySearchTool{Memory: memSvc},
 		// Phase 8: 체크포인트 + 훅 도구
 		&checkpoint.ListTool{Manager: cpMgr},
 		&checkpoint.RollbackTool{Manager: cpMgr},
-		&hooks.RegisterTool{Manager: hooksMgr},
+		&lifecycle.RegisterTool{Manager: hooksMgr},
 		// Phase 8: 서브에이전트 도구
 		&subagent.AnalyzeTool{Orchestrator: subOrchestrator},
 		&subagent.DelegateAgentTool{Runner: subOrchestrator.Runner()},
@@ -107,11 +117,16 @@ func defaultTools(
 		&schedule.CreateTool{Scheduler: sched},
 		&schedule.ListTool{Scheduler: sched},
 		// 활성 서버 포커스 도구
-		&tools.ServerFocusTool{Store: st},
+		&tools.ServerFocusTool{Store: st, Manager: mgr},
+		&tools.ServerFocusTool{Store: st, Manager: mgr, ToolName: "workspace_focus"},
 		// 작업 완료 검증 도구
 		&tools.VerifyCompleteTool{},
 		// 질의응답 도구
 		&tools.AskUserQuestionTool{},
+		// 명령 제안 도구 (사용자 확인 흐름)
+		&tools.ProposeActionTool{},
+		// Phase A: 다단계 작업 todo 도구
+		todoWriteTool, todoReadTool,
 	}
 }
 
@@ -124,10 +139,11 @@ func loadSavedServers(ctx context.Context, st store.ServerStore, mgr *executor.M
 
 	for _, srv := range servers {
 		cfg := &sshconn.Config{
-			Host:     srv.Host,
-			Port:     srv.Port,
-			User:     srv.User,
-			AuthType: string(srv.AuthType),
+			Host:         srv.Host,
+			Port:         srv.Port,
+			User:         srv.User,
+			AuthType:     string(srv.AuthType),
+			WorkspaceDir: srv.WorkspaceDir,
 		}
 		if srv.AuthType == store.AuthTypeKey {
 			cfg.KeyPath = srv.Credential
@@ -136,7 +152,7 @@ func loadSavedServers(ctx context.Context, st store.ServerStore, mgr *executor.M
 		}
 
 		client := sshconn.NewClient(cfg)
-		sshExec := sshconn.NewSSHExecutor(srv.Name, client, srv.OS)
+		sshExec := sshconn.NewSSHExecutor(srv.Name, client, srv.OS, srv.WorkspaceDir)
 		mgr.Register(srv.Name, sshExec)
 		slog.Info("loaded server from store", "name", srv.Name, "host", srv.Host)
 	}

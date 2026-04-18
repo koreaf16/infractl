@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/yourorg/infractl/internal/workspace"
 )
 
 var (
@@ -20,11 +22,11 @@ var (
 )
 
 func getCacheDir() string {
-	home, err := os.UserHomeDir()
+	stateDir, err := workspace.StateDir()
 	if err != nil {
 		return os.TempDir()
 	}
-	cacheDir := filepath.Join(home, ".infractl", "cache")
+	cacheDir := filepath.Join(stateDir, "cache")
 	os.MkdirAll(cacheDir, 0755)
 	return cacheDir
 }

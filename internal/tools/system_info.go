@@ -48,10 +48,15 @@ func (t *SystemInfoTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *SystemInfoTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
-	sectionsStr, _ := argString(args, "sections", false)
-	if sectionsStr == "" {
+func (t *SystemInfoTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (ToolOutcome, error) {
+	// sections은 LLM이 배열(["OS","CPU",...]) 또는 문자열("os,cpu,...") 형태로 전달할 수 있다.
+	// argStringSlice는 두 형식 모두 처리한다.
+	rawSlice := argStringSlice(args, "sections")
+	var sectionsStr string
+	if len(rawSlice) == 0 {
 		sectionsStr = "all"
+	} else {
+		sectionsStr = strings.Join(rawSlice, ",")
 	}
 
 	platform := executor.CommandPlatform(exec)
@@ -70,11 +75,14 @@ func (t *SystemInfoTool) Execute(ctx context.Context, args map[string]interface{
 		wg.Add(1)
 		go func(sec string) {
 			defer wg.Done()
+			EmitOutput(ctx, fmt.Sprintf("task_start task=%s", sec))
 			slog.Info("task_start", "task", sec)
 			start := time.Now()
 
 			cmd := buildSystemInfoCommand(sec, platform)
 			if cmd == "" {
+				slog.Warn("system_info unknown section, skipping", "section", sec)
+				EmitOutput(ctx, fmt.Sprintf("task_skip task=%s reason=unknown", sec))
 				return
 			}
 			result, err := exec.Execute(ctx, cmd)
@@ -84,15 +92,18 @@ func (t *SystemInfoTool) Execute(ctx context.Context, args map[string]interface{
 			defer mu.Unlock()
 			if err != nil {
 				errs = append(errs, fmt.Sprintf("[%s] Error: %s", sec, err))
+				EmitOutput(ctx, fmt.Sprintf("task_fail task=%s dur=%s", sec, dur))
 				slog.Info("task_fail", "task", sec, "dur", dur)
 				return
 			}
 			if result.ExitCode != 0 {
 				errs = append(errs, fmt.Sprintf("[%s] Error (exit %d):\n%s", sec, result.ExitCode, result.Stderr))
+				EmitOutput(ctx, fmt.Sprintf("task_fail task=%s dur=%s", sec, dur))
 				slog.Info("task_fail", "task", sec, "dur", dur)
 				return
 			}
 			parts[sec] = strings.TrimSpace(result.Stdout)
+			EmitOutput(ctx, fmt.Sprintf("task_done task=%s dur=%s", sec, dur))
 			slog.Info("task_done", "task", sec, "dur", dur)
 		}(section)
 	}
@@ -109,18 +120,18 @@ func (t *SystemInfoTool) Execute(ctx context.Context, args map[string]interface{
 	output = append(output, errs...)
 
 	if len(output) == 0 {
-		return "No sections collected.", nil
+		return ToolOutcome{Content: "No sections collected.", Success: true}, nil
 	}
-	return strings.Join(output, "\n\n"), nil
+	return ToolOutcome{Content: strings.Join(output, "\n\n"), Success: true}, nil
 }
 
 func parseSections(raw string) []string {
-	if strings.TrimSpace(raw) == "all" {
+	if strings.EqualFold(strings.TrimSpace(raw), "all") {
 		return []string{"os", "cpu", "memory", "disk", "uptime"}
 	}
 	var out []string
 	for _, s := range strings.Split(raw, ",") {
-		s = strings.TrimSpace(s)
+		s = strings.ToLower(strings.TrimSpace(s))
 		if s != "" {
 			out = append(out, s)
 		}
@@ -157,15 +168,15 @@ func buildSystemInfoLinux(section string) string {
 func buildSystemInfoWindows(section string) string {
 	switch section {
 	case "os":
-		return "systeminfo | findstr /B /C:\"OS\""
+		return "Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,OSArchitecture | Format-List"
 	case "cpu":
-		return "wmic cpu get Name,NumberOfCores,NumberOfLogicalProcessors /format:list"
+		return "Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors | Format-List"
 	case "memory":
-		return "wmic OS get TotalVisibleMemorySize,FreePhysicalMemory /format:list"
+		return "Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize,FreePhysicalMemory | Format-List"
 	case "disk":
 		return `Get-Volume | Where-Object {$_.DriveType -eq 'Fixed'} | Select-Object DriveLetter,FileSystemLabel,@{N='TotalGB';E={[math]::Round($_.Size/1GB,2)}},@{N='FreeGB';E={[math]::Round($_.SizeRemaining/1GB,2)}},@{N='UsedPercent';E={if($_.Size -gt 0){[math]::Round(100-($_.SizeRemaining/$_.Size*100),2)}else{0}}} | Format-List`
 	case "uptime":
-		return "net stats workstation | findstr /B /C:\"Statistics since\""
+		return "Get-CimInstance Win32_OperatingSystem | Select-Object LastBootUpTime | Format-List"
 	default:
 		return ""
 	}

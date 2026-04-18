@@ -111,6 +111,8 @@ func (la *liveArea) contentWidth() int {
 
 func (la *liveArea) clearDrawn() {
 	if la.drawn > 0 {
+		// ANSI 위로 이동 시 실제 터미널 물리 줄 수를 고려해야 하지만,
+		// lipgloss.Height로 계산된 값을 기반으로 안전하게 이동합니다.
 		fmt.Fprintf(os.Stdout, ansiCursorUp, la.drawn)
 		fmt.Fprint(os.Stdout, ansiClearToEnd)
 		la.drawn = 0
@@ -123,11 +125,13 @@ func (la *liveArea) draw() {
 		la.drawn = 0
 		return
 	}
-	if !strings.HasSuffix(rendered, "\n") {
-		rendered += "\n"
-	}
+	// lipgloss.Height는 ANSI 이스케이프와 줄 바꿈을 포함한 실제 높이를 반환합니다.
+	la.drawn = lipgloss.Height(rendered)
 	fmt.Fprint(os.Stdout, rendered)
-	la.drawn = strings.Count(rendered, "\n")
+	if !strings.HasSuffix(rendered, "\n") {
+		fmt.Fprint(os.Stdout, "\n")
+		la.drawn++
+	}
 }
 
 func (la *liveArea) render() string {

@@ -9,6 +9,7 @@ import (
 	"context"
 
 	"github.com/yourorg/infractl/internal/executor"
+	"github.com/yourorg/infractl/internal/tools"
 )
 
 // ConnectorTool은 커넥터가 생성하는 도구의 공통 구현체이다.
@@ -60,11 +61,15 @@ func (t *ConnectorTool) SetOutputCb(cb func(string)) {
 	t.OutputCb = cb
 }
 
-// Execute는 executeFn을 호출한다.
-func (t *ConnectorTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
+// Execute는 executeFn을 호출하고 결과를 ToolOutcome으로 감싼다.
+func (t *ConnectorTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (tools.ToolOutcome, error) {
 	// executeFn 내부에서 t.OutputCb 등에 접근할 수 있도록 컨텍스트에 주입
 	ctx = context.WithValue(ctx, "tool", t)
-	return t.executeFn(ctx, args, exec)
+	result, err := t.executeFn(ctx, args, exec)
+	if err != nil {
+		return tools.ToolOutcome{}, err
+	}
+	return tools.ToolOutcome{Content: result, Success: true}, nil
 }
 
 // targetParam은 도구 파라미터에 target 필드를 추가하는 헬퍼이다.

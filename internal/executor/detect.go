@@ -8,6 +8,8 @@ package executor
 import (
 	"context"
 	"strings"
+
+	"github.com/yourorg/infractl/internal/executor/shell/powershell"
 )
 
 // DetectOS probes the target and returns a human-readable OS description plus platform family.
@@ -22,7 +24,9 @@ func DetectOS(ctx context.Context, exec Executor) (string, Platform) {
 		return out, NormalizePlatform(out)
 	}
 
-	windowsCaption := `powershell -NoProfile -NonInteractive -Command "(Get-CimInstance Win32_OperatingSystem).Caption"`
+	psCmd := `(Get-CimInstance Win32_OperatingSystem).Caption`
+	encoded := powershell.EncodeUTF16LE(psCmd)
+	windowsCaption := `powershell -NoProfile -NonInteractive -EncodedCommand ` + encoded
 	if res, err := exec.Execute(ctx, windowsCaption); err == nil && strings.TrimSpace(res.Stdout) != "" {
 		out := strings.TrimSpace(res.Stdout)
 		return out, NormalizePlatform(out)

@@ -3,14 +3,14 @@ package tui
 import "time"
 
 type activeToolState struct {
-	toolID       string
-	toolName     string
-	target       string
-	args         map[string]any
-	startTime    time.Time
-	shellLines   []string
-	shellTotal   int
-	backgrounded bool
+	toolID           string
+	toolName         string
+	target           string
+	args             map[string]any
+	startTime        time.Time
+	shellLines       []string
+	shellTotal       int
+	backgrounded     bool
 }
 
 type activeToolMap struct {
@@ -100,6 +100,16 @@ func (m *activeToolMap) BackgroundCount() int {
 		}
 	}
 	return count
+}
+
+func (m *activeToolMap) ForegroundTools() []*activeToolState {
+	out := make([]*activeToolState, 0, len(m.ids))
+	for _, id := range m.ids {
+		if s := m.states[id]; s != nil && !s.backgrounded {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func (m *activeToolMap) Clear() {

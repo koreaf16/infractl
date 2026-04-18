@@ -13,18 +13,25 @@ import (
 	sshconn "github.com/yourorg/infractl/internal/connector/ssh"
 	"github.com/yourorg/infractl/internal/executor"
 	"github.com/yourorg/infractl/internal/store"
+	"github.com/yourorg/infractl/internal/workspace"
 )
 
 // ServerAddTool registers a new SSH target after validating connectivity.
 type ServerAddTool struct {
-	Store   store.ServerStore
-	Manager *executor.Manager
+	Store    store.ServerStore
+	Manager  *executor.Manager
+	ToolName string
 }
 
-func (t *ServerAddTool) Name() string { return "server_add" }
+func (t *ServerAddTool) Name() string {
+	if strings.TrimSpace(t.ToolName) != "" {
+		return t.ToolName
+	}
+	return "server_add"
+}
 
 func (t *ServerAddTool) Description() string {
-	return "Register a new SSH server. Tests connectivity before saving. Supports key or password auth."
+	return "Register a new SSH workspace. Tests connectivity before saving. Supports key or password auth."
 }
 
 func (t *ServerAddTool) IsReadOnly() bool { return false }
@@ -36,7 +43,7 @@ func (t *ServerAddTool) Parameters() map[string]interface{} {
 		"properties": map[string]interface{}{
 			"name": map[string]interface{}{
 				"type":        "string",
-				"description": "Alias for the server (e.g., 'db-server')",
+				"description": "Workspace alias (e.g., 'db-workspace')",
 			},
 			"host": map[string]interface{}{
 				"type":        "string",
@@ -59,39 +66,46 @@ func (t *ServerAddTool) Parameters() map[string]interface{} {
 				"type":        "string",
 				"description": "For auth_type=key: path to private key file. For auth_type=password: the password.",
 			},
+			"workspace_dir": map[string]interface{}{
+				"type":        "string",
+				"description": "Remote workspace directory for this SSH account. Default: ~/.infractl/workspace.",
+			},
 		},
 		"required": []string{"name", "host", "user", "auth_type", "credential"},
 	}
 }
 
-func (t *ServerAddTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
+func (t *ServerAddTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (ToolOutcome, error) {
 	name, err := argString(args, "name", true)
 	if err != nil {
-		return fmt.Sprintf("Error: %s", err), nil
+		return ToolOutcome{Content: fmt.Sprintf("Error: %s", err), Success: true}, nil
 	}
 	host, err := argString(args, "host", true)
 	if err != nil {
-		return fmt.Sprintf("Error: %s", err), nil
+		return ToolOutcome{Content: fmt.Sprintf("Error: %s", err), Success: true}, nil
 	}
 	user, err := argString(args, "user", true)
 	if err != nil {
-		return fmt.Sprintf("Error: %s", err), nil
+		return ToolOutcome{Content: fmt.Sprintf("Error: %s", err), Success: true}, nil
 	}
 	authType, err := argString(args, "auth_type", true)
 	if err != nil {
-		return fmt.Sprintf("Error: %s", err), nil
+		return ToolOutcome{Content: fmt.Sprintf("Error: %s", err), Success: true}, nil
 	}
 	credential, err := argString(args, "credential", true)
 	if err != nil {
-		return fmt.Sprintf("Error: %s", err), nil
+		return ToolOutcome{Content: fmt.Sprintf("Error: %s", err), Success: true}, nil
 	}
 	port := argInt(args, "port", 22)
+	workspaceDir, _ := argString(args, "workspace_dir", false)
+	workspaceDir = workspace.RemoteDirOrDefault(workspaceDir)
 
 	cfg := &sshconn.Config{
-		Host:     host,
-		Port:     port,
-		User:     user,
-		AuthType: authType,
+		Host:         host,
+		Port:         port,
+		User:         user,
+		AuthType:     authType,
+		WorkspaceDir: workspaceDir,
 	}
 	if authType == "key" {
 		cfg.KeyPath = credential
@@ -103,35 +117,46 @@ func (t *ServerAddTool) Execute(ctx context.Context, args map[string]interface{}
 	result, runErr := client.Run(ctx, "echo ok")
 	if runErr != nil {
 		client.Close()
-		return fmt.Sprintf("SSH connection test failed for %s@%s:%d: %s", user, host, port, runErr), nil
+		return ToolOutcome{Content: fmt.Sprintf("SSH connection test failed for %s@%s:%d: %s", user, host, port, runErr), Success: true}, nil
 	}
 	if result.ExitCode != 0 {
 		client.Close()
-		return fmt.Sprintf("SSH test command failed (exit %d): %s", result.ExitCode, result.Stderr), nil
+		return ToolOutcome{Content: fmt.Sprintf("SSH test command failed (exit %d): %s", result.ExitCode, result.Stderr), Success: true}, nil
+	}
+	workspaceCmd := fmt.Sprintf("mkdir -p %s", workspace.POSIXShellPath(workspaceDir))
+	workspaceResult, workspaceErr := client.Run(ctx, workspaceCmd)
+	if workspaceErr != nil {
+		client.Close()
+		return ToolOutcome{Content: fmt.Sprintf("Workspace setup failed for %s: %s", workspaceDir, workspaceErr), Success: true}, nil
+	}
+	if workspaceResult.ExitCode != 0 {
+		client.Close()
+		return ToolOutcome{Content: fmt.Sprintf("Workspace setup failed (exit %d): %s", workspaceResult.ExitCode, workspaceResult.Stderr), Success: true}, nil
 	}
 
 	probeExec := sshconn.NewSSHExecutor(name, client)
 	osInfo, _ := executor.DetectOS(ctx, probeExec)
 
 	srv := store.Server{
-		Name:       name,
-		Host:       host,
-		Port:       port,
-		User:       user,
-		AuthType:   store.AuthType(authType),
-		Credential: credential,
-		OS:         osInfo,
+		Name:         name,
+		Host:         host,
+		Port:         port,
+		User:         user,
+		AuthType:     store.AuthType(authType),
+		Credential:   credential,
+		OS:           osInfo,
+		WorkspaceDir: workspaceDir,
 	}
 	if err := t.Store.Add(ctx, srv); err != nil {
 		client.Close()
-		return fmt.Sprintf("Failed to save server: %s", err), nil
+		return ToolOutcome{Content: fmt.Sprintf("Failed to save workspace: %s", err), Success: true}, nil
 	}
 
-	sshExec := sshconn.NewSSHExecutor(name, client, osInfo)
+	sshExec := sshconn.NewSSHExecutor(name, client, osInfo, workspaceDir)
 	t.Manager.Register(name, sshExec)
 
 	if strings.TrimSpace(osInfo) == "" {
-		return fmt.Sprintf("Server '%s' registered successfully (%s@%s:%d, auth: %s)", name, user, host, port, authType), nil
+		return ToolOutcome{Content: fmt.Sprintf("Workspace '%s' registered successfully (%s@%s:%d, auth: %s, workspace: %s)", name, user, host, port, authType, workspaceDir), Success: true}, nil
 	}
-	return fmt.Sprintf("Server '%s' registered successfully (%s@%s:%d, auth: %s, os: %s)", name, user, host, port, authType, osInfo), nil
+	return ToolOutcome{Content: fmt.Sprintf("Workspace '%s' registered successfully (%s@%s:%d, auth: %s, os: %s, workspace: %s)", name, user, host, port, authType, osInfo, workspaceDir), Success: true}, nil
 }

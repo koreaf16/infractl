@@ -1,7 +1,6 @@
 // Package agent
 // File: compaction_restore.go
-// Description: compaction 완료 후 활성 서버/커넥터 상태를 히스토리에 재주입
-// Responsibility: compaction으로 손실될 수 있는 운영 컨텍스트(activeServer, 커넥터)를 즉시 복원
+// Description: compaction ?꾨즺 ???쒖꽦 ?쒕쾭/而ㅻ꽖???곹깭瑜??덉뒪?좊━???ъ＜??// Responsibility: compaction?쇰줈 ?먯떎?????덈뒗 ?댁쁺 而⑦뀓?ㅽ듃(activeServer, 而ㅻ꽖??瑜?利됱떆 蹂듭썝
 
 package agent
 
@@ -15,23 +14,23 @@ import (
 	"github.com/yourorg/infractl/internal/llm"
 )
 
-// injectPostCompactContext는 compaction 완료 직후 활성 서버와 커넥터 상태를
-// 히스토리에 user/assistant 쌍으로 재주입한다.
+// injectPostCompactContext??compaction ?꾨즺 吏곹썑 ?쒖꽦 ?쒕쾭? 而ㅻ꽖???곹깭瑜?// ?덉뒪?좊━??user/assistant ?띿쑝濡??ъ＜?낇븳??
 //
-// 주입 조건: activeServer가 설정되어 있거나 활성 커넥터가 1개 이상 존재할 때.
-// 시스템 프롬프트에도 이 정보가 포함되지만, 히스토리에 명시적으로 존재하면
-// LLM이 현재 컨텍스트를 더 확실하게 인지한다.
+// 二쇱엯 議곌굔: activeServer媛 ?ㅼ젙?섏뼱 ?덇굅???쒖꽦 而ㅻ꽖?곌? 1媛??댁긽 議댁옱????
+// ?쒖뒪???꾨＼?꾪듃?먮룄 ???뺣낫媛 ?ы븿?섏?留? ?덉뒪?좊━??紐낆떆?곸쑝濡?議댁옱?섎㈃
+// LLM???꾩옱 而⑦뀓?ㅽ듃瑜????뺤떎?섍쾶 ?몄??쒕떎.
 func (a *Agent) injectPostCompactContext(_ context.Context) {
 	var parts []string
 
 	if a.activeServer != nil {
 		parts = append(parts, fmt.Sprintf(
-			"[Active Server] %s (%s@%s:%d) — OS: %s",
+			"[Active Workspace] %s (%s@%s:%d) OS: %s Workspace: %s",
 			a.activeServer.Name,
 			a.activeServer.User,
 			a.activeServer.Host,
 			a.activeServer.Port,
 			a.activeServer.OS,
+			a.activeServer.WorkspaceDir,
 		))
 		if a.activeServer.EnvProfile != "" {
 			parts = append(parts, "  Environment: "+a.activeServer.EnvProfile)
@@ -61,11 +60,11 @@ func (a *Agent) injectPostCompactContext(_ context.Context) {
 	}
 
 	note := "[Context restored after compaction]\n" + strings.Join(parts, "\n") +
-		"\n\n[Reminder] 서비스/포트 식별 시 반드시 discover_services 또는 process_list로 검증하세요. 추측하지 마세요."
+		"\n\n[Reminder] Workspaces are execution contexts. Verify service state with dedicated tools before acting on service assumptions."
 
 	a.history = append(a.history,
 		llm.Message{Role: llm.RoleUser, Content: note},
-		llm.Message{Role: llm.RoleAssistant, Content: "Context noted. Active server and connector state restored."},
+		llm.Message{Role: llm.RoleAssistant, Content: "Context noted. Active workspace and connector state restored."},
 	)
 
 	serverName := ""

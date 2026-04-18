@@ -5,7 +5,10 @@
 
 package tools
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // argString은 args 맵에서 key에 해당하는 문자열 값을 반환한다.
 // required가 true이고 값이 없으면 error를 반환한다.
@@ -40,6 +43,46 @@ func argInt(args map[string]interface{}, key string, defaultVal int) int {
 		return int(n)
 	}
 	return defaultVal
+}
+
+// argStringSlice returns a string slice from args[key].
+// It accepts []string, []interface{}, or a single comma/newline-separated string.
+func argStringSlice(args map[string]interface{}, key string) []string {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return nil
+	}
+
+	add := func(raw string, out *[]string) {
+		for _, part := range strings.FieldsFunc(raw, func(r rune) bool {
+			return r == ',' || r == '\n' || r == '\r' || r == '\t'
+		}) {
+			item := strings.TrimSpace(part)
+			if item != "" {
+				*out = append(*out, item)
+			}
+		}
+	}
+
+	out := make([]string, 0, 4)
+	switch t := v.(type) {
+	case []string:
+		for _, item := range t {
+			item = strings.TrimSpace(item)
+			if item != "" {
+				out = append(out, item)
+			}
+		}
+	case []interface{}:
+		for _, item := range t {
+			add(fmt.Sprintf("%v", item), &out)
+		}
+	case string:
+		add(t, &out)
+	default:
+		add(fmt.Sprintf("%v", t), &out)
+	}
+	return out
 }
 
 // ExtractTarget은 args 맵에서 "target" 값을 추출하고 맵에서 삭제한다.

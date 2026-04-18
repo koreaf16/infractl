@@ -6,66 +6,119 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
-	"strings"
 	"time"
 
 	"github.com/creack/pty"
 )
 
-// ExecuteInteractive runs a local command in a PTY and streams raw terminal chunks.
-func (e *LocalExecutor) ExecuteInteractive(ctx context.Context, spec InteractiveSpec, onChunk func(string)) (ExecResult, error) {
-	start := time.Now()
-	ctx, cancel := context.WithTimeout(ctx, e.timeout)
-	defer cancel()
+// localInteractiveSession implements ExecSession for interactive local commands.
+type localInteractiveSession struct {
+	ctx        context.Context
+	cancel     context.CancelFunc
+	cmd        *exec.Cmd
+	ptmx       *os.File
+	done       chan struct{}
+	result     ExecResult
+	err        error
+	start      time.Time
+	cleanupFns []func() error
+	onChunk    func(string)
+}
 
-	cmd, err := buildCommand(ctx, spec.Command)
-	if err != nil {
-		return ExecResult{}, fmt.Errorf("build command: %w", err)
-	}
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		return ExecResult{}, fmt.Errorf("start PTY command: %w", err)
-	}
-	defer ptmx.Close()
+func (s *localInteractiveSession) InjectStdin(line string) error {
+	_, err := fmt.Fprintln(s.ptmx, line)
+	return err
+}
 
-	e.setActivePTY(ptmx)
-	defer e.clearActiveStdin(ptmx)
+func (s *localInteractiveSession) SendEOF() error {
+	_, err := s.ptmx.Write([]byte{0x04})
+	return err
+}
 
-	var output strings.Builder
+func (s *localInteractiveSession) Wait() (ExecResult, error) {
+	<-s.done
+	return s.result, s.err
+}
+
+func (s *localInteractiveSession) run() {
+	defer close(s.done)
+	defer s.cancel()
+	defer s.ptmx.Close()
+	defer runCleanups(s.cleanupFns)
+
+	var output []byte
 	buf := make([]byte, 1024)
 	for {
-		n, readErr := ptmx.Read(buf)
+		n, readErr := s.ptmx.Read(buf)
 		if n > 0 {
-			chunk := string(buf[:n])
-			output.WriteString(chunk)
-			if onChunk != nil {
-				onChunk(chunk)
+			chunk := buf[:n]
+			output = append(output, chunk...)
+			if s.onChunk != nil {
+				s.onChunk(string(chunk))
 			}
 		}
 		if readErr != nil {
-			if readErr == io.EOF {
-				break
+			if readErr != io.EOF {
+				s.err = fmt.Errorf("read PTY output: %w", readErr)
 			}
-			return ExecResult{}, fmt.Errorf("read PTY output: %w", readErr)
+			break
 		}
 	}
 
-	waitErr := cmd.Wait()
-	duration := time.Since(start)
+	waitErr := s.cmd.Wait()
+	duration := time.Since(s.start)
 
 	exitCode := 0
 	if waitErr != nil {
 		if exitErr, ok := waitErr.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		} else {
-			return ExecResult{}, fmt.Errorf("wait PTY command: %w", waitErr)
+			s.err = fmt.Errorf("wait PTY command: %w", waitErr)
+			return
 		}
 	}
 
-	return ExecResult{
-		Stdout:   TruncateOutput(output.String(), MaxOutputBytes),
+	s.result = ExecResult{
+		Stdout:   TruncateOutput(string(output), MaxOutputBytes),
 		ExitCode: exitCode,
 		Duration: duration,
-	}, nil
+	}
+}
+
+// ExecuteInteractive runs a local command in a PTY and returns a session for stdin control.
+func (e *LocalExecutor) ExecuteInteractive(ctx context.Context, spec InteractiveSpec, onChunk func(string)) (ExecSession, error) {
+	var cancel context.CancelFunc
+	if _, ok := ctx.Deadline(); ok {
+		ctx, cancel = context.WithCancel(ctx)
+	} else {
+		ctx, cancel = context.WithTimeout(ctx, e.timeout)
+	}
+
+	prepared, err := buildCommand(ctx, spec.Command)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("build command: %w", err)
+	}
+	cmd := exec.CommandContext(ctx, prepared.Argv[0], prepared.Argv[1:]...)
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		cancel()
+		runCleanups(prepared.CleanupFns)
+		return nil, fmt.Errorf("start PTY command: %w", err)
+	}
+
+	session := &localInteractiveSession{
+		ctx:        ctx,
+		cancel:     cancel,
+		cmd:        cmd,
+		ptmx:       ptmx,
+		done:       make(chan struct{}),
+		start:      time.Now(),
+		cleanupFns: prepared.CleanupFns,
+		onChunk:    onChunk,
+	}
+	go session.run()
+	return session, nil
 }

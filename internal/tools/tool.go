@@ -13,7 +13,13 @@ type Tool interface {
 	Parameters() map[string]interface{}
 	IsReadOnly() bool
 	IsEnabled() bool
-	Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error)
+	Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (ToolOutcome, error)
+}
+
+// ConcurrencySafeTool can provide argument-aware concurrency safety checks.
+// Tools that do not implement this fall back to IsReadOnly() in partitioning.
+type ConcurrencySafeTool interface {
+	IsConcurrencySafe(args map[string]interface{}) bool
 }
 
 // ToolOutcome captures richer execution results for tools that can classify
@@ -41,9 +47,9 @@ type ResultSummarizer interface {
 	ResultSummary(output string) string
 }
 
-// DetailedTool optionally returns structured outcome metadata.
-type DetailedTool interface {
-	ExecuteDetailed(ctx context.Context, args map[string]interface{}, exec executor.Executor) (ToolOutcome, error)
+// ExecuteWithOutcome은 ToolOutcome을 반환하는 도구 실행을 돕는 헬퍼다.
+func ExecuteWithOutcome(ctx context.Context, tool Tool, args map[string]interface{}, exec executor.Executor) (ToolOutcome, error) {
+	return tool.Execute(ctx, args, exec)
 }
 
 // QuestionOption is one selectable answer.
@@ -73,11 +79,13 @@ type QuestionResponse struct {
 
 // FormFieldDef는 폼 입력 필드 하나의 정의다.
 type FormFieldDef struct {
-	Name         string `json:"name"`
-	Label        string `json:"label"`
-	Placeholder  string `json:"placeholder,omitempty"`
-	Required     bool   `json:"required,omitempty"`
-	DefaultValue string `json:"default_value,omitempty"`
+	Name         string   `json:"name"`
+	Label        string   `json:"label"`
+	Placeholder  string   `json:"placeholder,omitempty"`
+	Required     bool     `json:"required,omitempty"`
+	DefaultValue string   `json:"default_value,omitempty"`
+	FieldType    string   `json:"field_type,omitempty"` // "text"(기본) | "select"
+	Options      []string `json:"options,omitempty"`    // FieldType=="select"일 때 선택지 목록
 }
 
 // FormRequest는 에이전트가 TUI에 폼 입력을 요청할 때 사용한다.

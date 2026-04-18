@@ -77,7 +77,7 @@ func (m *Manager) SearchWithOptions(ctx context.Context, query string, opts Sear
 		topK = 5
 	}
 	if opts.MinScore == 0 {
-		opts.MinScore = 0.05
+		opts.MinScore = 0.7
 	}
 
 	// 1. 후보군 수집 (리랭커가 있다면 더 넉넉하게 수집)

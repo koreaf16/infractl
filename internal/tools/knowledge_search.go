@@ -50,19 +50,19 @@ func (t *KnowledgeSearchTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *KnowledgeSearchTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
+func (t *KnowledgeSearchTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (ToolOutcome, error) {
 	query, err := argString(args, "query", true)
 	if err != nil {
-		return "", err
+		return ToolOutcome{}, err
 	}
 	limit := argInt(args, "limit", 5)
 
 	entries, err := t.Store.SearchKnowledge(ctx, query, limit)
 	if err != nil {
-		return "", fmt.Errorf("knowledge search %q: %w", query, err)
+		return ToolOutcome{}, fmt.Errorf("knowledge search %q: %w", query, err)
 	}
 	if len(entries) == 0 {
-		return fmt.Sprintf("No knowledge found for: %q\nConsider using web_search to find information online.", query), nil
+		return ToolOutcome{Content: fmt.Sprintf("No knowledge found for: %q\nConsider using web_search to find information online.", query), Success: true}, nil
 	}
 
 	var sb strings.Builder
@@ -81,5 +81,5 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args map[string]inter
 		// 사용 카운트 증가 (비동기, 에러 무시)
 		go t.Store.IncrementUseCount(context.Background(), e.ID) //nolint: errcheck
 	}
-	return sb.String(), nil
+	return ToolOutcome{Content: sb.String(), Success: true}, nil
 }

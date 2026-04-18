@@ -21,6 +21,9 @@ func (c *OpenAIClient) WithInlineToolCalls(v bool) Client {
 	return &clone
 }
 
+// IsInlineToolCalls는 현재 인라인 툴 호출 모드 활성화 여부를 반환한다.
+func (c *OpenAIClient) IsInlineToolCalls() bool { return c.useInlineToolCalls }
+
 // transformMessagesForInlineTools는 useInlineToolCalls 모드일 때
 // vLLM의 내부 tool 파서를 우회하기 위해 메시지 이력을 조작한다.
 func (c *OpenAIClient) transformMessagesForInlineTools(messages []Message) []Message {

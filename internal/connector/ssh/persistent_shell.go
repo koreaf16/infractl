@@ -19,9 +19,18 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 
 	"github.com/yourorg/infractl/internal/executor"
+	"github.com/yourorg/infractl/internal/workspace"
 )
 
 const shellIdleTimeout = 3 * time.Second
+
+// ElevationEventSink receives elevation lifecycle notifications from PersistentShell.
+// Implemented by privilege.Tracker (wired at injection time by the caller).
+type ElevationEventSink interface {
+	OnSessionCreated(host, sessionID, loginUser string)
+	OnElevationDone(host, sessionID, methodStr, fromUser, toUser string)
+	OnSessionClosed(host, sessionID string)
+}
 
 // PersistentShell holds a long-lived SSH session running a bash process.
 // Commands are executed via the delimiter protocol (persistent_shell_marker.go)
@@ -38,6 +47,9 @@ type PersistentShell struct {
 	currentDir  string
 	createdAt   time.Time
 	lastUsed    time.Time
+	sink        ElevationEventSink
+	sessionID   string // set by SessionManager after creation
+	host        string // set by SessionManager at creation; used for sink calls
 }
 
 // newPersistentShell opens a new SSH session, allocates a PTY, and starts bash -l.
@@ -87,6 +99,10 @@ func newPersistentShell(ctx context.Context, client *Client) (*PersistentShell, 
 		_ = sh.Close()
 		return nil, fmt.Errorf("persistent shell start bash: %w", err)
 	}
+	if err := sh.enterWorkspace(ctx, client.cfg.WorkspaceDir); err != nil {
+		_ = sh.Close()
+		return nil, err
+	}
 	return sh, nil
 }
 
@@ -116,6 +132,18 @@ func (s *PersistentShell) CurrentDir() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.currentDir
+}
+
+func (s *PersistentShell) enterWorkspace(ctx context.Context, dir string) error {
+	ws := workspace.POSIXShellPath(dir)
+	result, err := s.RunCommand(ctx, fmt.Sprintf("mkdir -p %s && cd %s", ws, ws), 10*time.Second, nil)
+	if err != nil {
+		return fmt.Errorf("persistent shell enter workspace: %w", err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("persistent shell enter workspace: exit %d", result.ExitCode)
+	}
+	return nil
 }
 
 // RunCommand executes cmd using the delimiter protocol and returns its output,
@@ -168,11 +196,26 @@ func (s *PersistentShell) Elevate(
 	if err != nil {
 		return fmt.Errorf("persistent shell: elevation verify: %w", err)
 	}
+	previousUser := s.currentUser
 	s.currentUser = probe.CurrentUser
 	s.currentDir = probe.CurrentDir
 	s.lastUsed = time.Now()
 	slog.Info("persistent shell: elevation complete", "user", s.currentUser, "dir", s.currentDir)
+	if s.sink != nil {
+		s.sink.OnElevationDone(s.targetHost(), s.sessionID, "elevation", previousUser, s.currentUser)
+	}
 	return nil
+}
+
+// targetHost returns the host label used for sink notifications.
+func (s *PersistentShell) targetHost() string { return s.host }
+
+// SetSink wires an ElevationEventSink and sets the host/sessionID labels used
+// in all subsequent sink calls. Called once by SessionManager after creation.
+func (s *PersistentShell) SetSink(sink ElevationEventSink, host, sessionID string) {
+	s.sink = sink
+	s.host = host
+	s.sessionID = sessionID
 }
 
 // Close sends exit to bash and closes the SSH session.

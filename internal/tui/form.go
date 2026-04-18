@@ -15,24 +15,17 @@ import (
 	"github.com/yourorg/infractl/internal/tools"
 )
 
-type formPhase int
-
-const (
-	formPhaseEdit   formPhase = iota
-	formPhaseReview formPhase = iota
-)
-
 // formState는 다중 필드 폼 입력 모드의 상태를 관리한다.
 // 실제 텍스트 입력은 기존 inputBar에 위임하고, 이 구조체는 값 수집과 상태 박스 렌더링만 담당한다.
 type formState struct {
-	active      bool
-	title       string
-	headerLabel string
-	fields      []tools.FormFieldDef
-	values      []string // 필드별 입력값
-	cursor      int      // 현재 활성 필드 인덱스
-	phase       formPhase
-	replyCh     chan FormResult
+	active        bool
+	title         string
+	headerLabel   string
+	fields        []tools.FormFieldDef
+	values        []string // 필드별 입력값
+	cursor        int      // 현재 활성 필드 인덱스
+	selectCursors []int    // SELECT 필드별 현재 하이라이트 인덱스
+	replyCh       chan FormResult
 }
 
 // Activate는 폼 입력 모드를 활성화한다.
@@ -42,11 +35,24 @@ func (f *formState) Activate(title string, fields []tools.FormFieldDef, replyCh 
 	f.headerLabel = header
 	f.fields = fields
 	f.values = make([]string, len(fields))
+	f.selectCursors = make([]int, len(fields))
 	for i, field := range fields {
-		f.values[i] = field.DefaultValue
+		if field.FieldType == "select" && len(field.Options) > 0 {
+			// SELECT 필드: 첫 번째 옵션을 기본값으로
+			f.values[i] = field.Options[0]
+			// DefaultValue가 Options 중 하나이면 그 인덱스로 초기화
+			for j, opt := range field.Options {
+				if opt == field.DefaultValue {
+					f.selectCursors[i] = j
+					f.values[i] = opt
+					break
+				}
+			}
+		} else {
+			f.values[i] = field.DefaultValue
+		}
 	}
 	f.cursor = 0
-	f.phase = formPhaseEdit
 	f.replyCh = replyCh
 }
 
@@ -57,13 +63,12 @@ func (f *formState) Deactivate() {
 	f.headerLabel = ""
 	f.fields = nil
 	f.values = nil
+	f.selectCursors = nil
 	f.cursor = 0
-	f.phase = formPhaseEdit
 	f.replyCh = nil
 }
 
 // CurrentFieldLabel은 현재 활성 필드의 라벨을 반환한다.
-// 입력란 프롬프트 표시에 사용된다.
 func (f *formState) CurrentFieldLabel() string {
 	if !f.active || f.cursor >= len(f.fields) {
 		return ""
@@ -76,10 +81,46 @@ func (f *formState) CurrentPlaceholder() string {
 	if !f.active || f.cursor >= len(f.fields) {
 		return ""
 	}
+	if f.fields[f.cursor].FieldType == "select" {
+		return "" // SELECT 필드는 텍스트 입력 없음
+	}
 	return f.fields[f.cursor].Placeholder
 }
 
-// AcceptValue는 현재 필드에 값을 저장한다.
+// IsSelectField는 현재 활성 필드가 SELECT 타입인지 반환한다.
+func (f *formState) IsSelectField() bool {
+	if !f.active || f.cursor >= len(f.fields) {
+		return false
+	}
+	return f.fields[f.cursor].FieldType == "select" && len(f.fields[f.cursor].Options) > 0
+}
+
+// SelectUp은 현재 SELECT 필드의 하이라이트를 위로 이동하고 값을 즉시 반영한다.
+func (f *formState) SelectUp() {
+	i := f.cursor
+	if i >= len(f.fields) || f.fields[i].FieldType != "select" {
+		return
+	}
+	if f.selectCursors[i] > 0 {
+		f.selectCursors[i]--
+		f.values[i] = f.fields[i].Options[f.selectCursors[i]]
+	}
+}
+
+// SelectDown은 현재 SELECT 필드의 하이라이트를 아래로 이동하고 값을 즉시 반영한다.
+func (f *formState) SelectDown() {
+	i := f.cursor
+	if i >= len(f.fields) || f.fields[i].FieldType != "select" {
+		return
+	}
+	opts := f.fields[i].Options
+	if f.selectCursors[i] < len(opts)-1 {
+		f.selectCursors[i]++
+		f.values[i] = opts[f.selectCursors[i]]
+	}
+}
+
+// AcceptValue는 현재 필드에 값을 저장한다 (텍스트 필드용).
 func (f *formState) AcceptValue(value string) {
 	if f.cursor < len(f.values) {
 		f.values[f.cursor] = value
@@ -87,12 +128,11 @@ func (f *formState) AcceptValue(value string) {
 }
 
 // AdvanceToNext는 커서를 다음 필드로 이동한다.
-// 모든 필드가 입력되면 Review 모드로 전환하고 true를 반환한다.
+// 모든 필드가 입력되면 즉시 true를 반환한다 (Review 단계 없음).
 func (f *formState) AdvanceToNext() bool {
 	f.cursor++
 	if f.cursor >= len(f.fields) {
 		f.cursor = len(f.fields) - 1
-		f.phase = formPhaseReview
 		return true
 	}
 	return false
@@ -126,14 +166,11 @@ func (f *formState) BuildResult() FormResult {
 }
 
 // View는 폼 상태 박스를 렌더링한다.
-// activeValue: 현재 활성 필드에서 타이핑 중인 값 (textarea에서 읽어옴)
+// activeValue: 현재 활성 텍스트 필드에서 타이핑 중인 값 (textarea에서 읽어옴)
 // cursorOffset: 활성 필드 내 커서 위치 (rune 단위)
 func (f *formState) View(width int, activeValue string, cursorOffset int) string {
 	if !f.active {
 		return ""
-	}
-	if f.phase == formPhaseReview {
-		return f.viewReview(width)
 	}
 	return f.viewEdit(width, activeValue, cursorOffset)
 }
@@ -147,7 +184,6 @@ func (f *formState) viewEdit(width int, activeValue string, cursorOffset int) st
 	var body strings.Builder
 	body.WriteString("\n")
 
-	// 제목을 박스 안쪽 첫 줄 콘텐츠로 표시
 	hdr := strings.TrimSpace(f.headerLabel)
 	if hdr == "" {
 		hdr = strings.TrimSpace(f.title)
@@ -168,8 +204,9 @@ func (f *formState) viewEdit(width int, activeValue string, cursorOffset int) st
 		}
 
 		label := field.Label + ":"
-		// label을 일정 너비로 패딩하여 값이 정렬되도록
 		labelPadded := fmt.Sprintf("%-16s", label)
+
+		isSelect := field.FieldType == "select" && len(field.Options) > 0
 
 		switch {
 		case i < f.cursor:
@@ -178,16 +215,35 @@ func (f *formState) viewEdit(width int, activeValue string, cursorOffset int) st
 			labelStr := StyleGeminiSubDesc.Render(labelPadded)
 			valStr := StyleGeminiSelected.Render(val)
 			body.WriteString(fmt.Sprintf("  %s %s %s\n", checkMark, labelStr, valStr))
+
+		case i == f.cursor && isSelect:
+			// 현재 활성 SELECT 필드: 옵션 목록 인라인 표시
+			arrow := StyleGeminiBullet.Render("→")
+			labelStr := StyleGeminiSubDesc.Render(labelPadded)
+			body.WriteString(fmt.Sprintf("  %s %s\n", arrow, labelStr))
+			selCursor := 0
+			if i < len(f.selectCursors) {
+				selCursor = f.selectCursors[i]
+			}
+			for j, opt := range field.Options {
+				if j == selCursor {
+					bullet := StyleGeminiBullet.Render(">")
+					optStr := StyleGeminiSelected.Render(opt)
+					body.WriteString(fmt.Sprintf("      %s %s\n", bullet, optStr))
+				} else {
+					optStr := StyleGeminiOption.Render("  " + opt)
+					body.WriteString(fmt.Sprintf("      %s\n", optStr))
+				}
+			}
+
 		case i == f.cursor:
-			// 현재 활성 필드: fake cursor를 activeValue 내 cursorOffset 위치에 삽입
+			// 현재 활성 텍스트 필드: fake cursor 삽입
 			arrow := StyleGeminiBullet.Render("→")
 			labelStr := StyleGeminiSubDesc.Render(labelPadded)
 			var displayVal string
 			if activeValue == "" && field.Placeholder != "" {
-				// 빈 값: 커서 + placeholder 힌트
 				displayVal = cursorBlock + StyleGeminiSubDesc.Render(field.Placeholder)
 			} else {
-				// 타이핑 중: value[:offset] + 커서 + value[offset:]
 				runes := []rune(activeValue)
 				off := cursorOffset
 				if off > len(runes) {
@@ -198,6 +254,7 @@ func (f *formState) viewEdit(width int, activeValue string, cursorOffset int) st
 				displayVal = before + cursorBlock + after
 			}
 			body.WriteString(fmt.Sprintf("  %s %s %s\n", arrow, labelStr, displayVal))
+
 		default:
 			// 미입력 필드
 			circle := StyleGeminiOption.Render("○")
@@ -222,58 +279,18 @@ func (f *formState) viewEdit(width int, activeValue string, cursorOffset int) st
 	return boxStyle.Render(body.String())
 }
 
-func (f *formState) viewReview(width int) string {
-	innerW := width - 6
-	if innerW < 30 {
-		innerW = 30
-	}
-
-	var body strings.Builder
-	body.WriteString("\n")
-	body.WriteString(StyleSelectionQuestion.Render("  입력 내용을 확인하세요:") + "\n")
-	body.WriteString("\n")
-
-	for i, field := range f.fields {
-		val := ""
-		if i < len(f.values) {
-			val = f.values[i]
-		}
-		label := fmt.Sprintf("%-16s", field.Label+":")
-		labelStr := StyleGeminiSubDesc.Render(label)
-		valStr := StyleGeminiSelected.Render(val)
-		body.WriteString(fmt.Sprintf("  %s %s\n", labelStr, valStr))
-	}
-
-	body.WriteString("\n")
-	body.WriteString(StyleGeminiHint.Render("  Enter confirm | Esc go back to edit") + "\n")
-
-	boxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorGeminiBox).
-		PaddingLeft(1).
-		PaddingRight(1).
-		Width(innerW + 2)
-
-	renderedBox := boxStyle.Render(body.String())
-	lines := strings.SplitN(renderedBox, "\n", 2)
-	if len(lines) >= 2 {
-		titleLine := " " + StyleGeminiHeader.Render("Review Answers") + " "
-		firstLineW := lipgloss.Width(lines[0])
-		headerLine := buildBoxHeader(titleLine, firstLineW)
-		return headerLine + "\n" + lines[1]
-	}
-	return renderedBox
-}
-
 // Height는 현재 폼 박스의 예상 줄 수를 반환한다.
 func (f *formState) Height() int {
 	if !f.active {
 		return 0
 	}
-	if f.phase == formPhaseReview {
-		return len(f.fields) + 7
+	extra := 0
+	for i, field := range f.fields {
+		if i == f.cursor && field.FieldType == "select" {
+			extra += len(field.Options)
+		}
 	}
-	return len(f.fields) + 5
+	return len(f.fields) + 5 + extra
 }
 
 // ─── TUIFormHandler ────────────────────────────────────────────────────────

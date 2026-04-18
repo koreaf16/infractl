@@ -22,14 +22,6 @@ type SubmitMsg struct {
 	PastedContents map[int]store.PastedContent
 }
 
-var slashCommands = []string{
-	"/help", "/tools", "/servers", "/server", "/clear", "/model",
-	"/connectors", "/mcp", "/sessions", "/history",
-	"/yoro", "/knowledge", "/rag", "/cost",
-	"/checkpoints", "/hooks", "/schedules",
-	"/ospermission", "/quit", "/exit",
-}
-
 type inputHistoryEntry struct {
 	DisplayInput   string
 	PastedContents map[int]store.PastedContent
@@ -46,6 +38,7 @@ type inputBar struct {
 	searchMode   bool
 	searchQuery  string
 	searchIdx    int
+	slashMenu    slashMenuState
 
 	pastedContents     map[int]store.PastedContent
 	nextPasteID        int
@@ -110,6 +103,15 @@ func (ib *inputBar) setWidth(w int) {
 	ib.syncHeight()
 }
 
+// SetBusy는 바쁜 상태일 때 placeholder를 "Enter to queue..." 로 변경한다.
+func (ib *inputBar) SetBusy(busy bool) {
+	if busy {
+		ib.ti.Placeholder = "Enter to queue next prompt..."
+	} else {
+		ib.ti.Placeholder = ""
+	}
+}
+
 func (ib *inputBar) setMaxHeight(h int) {
 	ib.maxHeight = max(h, 1)
 	ib.ti.MaxHeight = ib.maxHeight
@@ -117,11 +119,11 @@ func (ib *inputBar) setMaxHeight(h int) {
 }
 
 func (ib *inputBar) Value() string {
-	return strings.TrimSpace(ib.ti.Value())
+	return ib.ti.Value()
 }
 
 func (ib *inputBar) ExpandedValue() string {
-	return strings.TrimSpace(expandPastedTextRefs(ib.ti.Value(), ib.pastedContents))
+	return expandPastedTextRefs(ib.ti.Value(), ib.pastedContents)
 }
 
 func (ib *inputBar) Draft() inputHistoryEntry {
@@ -137,6 +139,7 @@ func (ib *inputBar) Reset() {
 	ib.searchMode = false
 	ib.searchQuery = ""
 	ib.searchIdx = 0
+	ib.clearSlashSuggestions()
 	ib.pendingPasteChunks = nil
 	ib.pendingPasteSeq = 0
 	ib.pastedContents = nil
@@ -176,6 +179,11 @@ func (ib *inputBar) Update(msg tea.Msg) (inputBar, tea.Cmd) {
 		}
 
 		// Space: 붙여넣기 블록 위에서 접기/펼치기 토글
+		if ib.handleSlashSuggestionKey(m) {
+			ib.syncHeight()
+			return *ib, nil
+		}
+
 		if !ib.searchMode && m.Type == tea.KeyRunes && string(m.Runes) == " " {
 			if ib.togglePasteAtCursor() {
 				ib.syncHeight()
@@ -201,6 +209,7 @@ func (ib *inputBar) Update(msg tea.Msg) (inputBar, tea.Cmd) {
 			if m.Alt {
 				// Alt+Enter: 멀티라인 줄 바꿈 삽입
 				ib.ti.InsertString("\n")
+				ib.refreshSlashSuggestions()
 				ib.syncHeight()
 				return *ib, nil
 			}
@@ -211,13 +220,13 @@ func (ib *inputBar) Update(msg tea.Msg) (inputBar, tea.Cmd) {
 				return *ib, nil
 			}
 			draft := ib.Draft()
-			if draft.DisplayInput == "" {
+			if strings.TrimSpace(draft.DisplayInput) == "" {
 				return *ib, nil
 			}
 			ib.AddToHistory(draft)
 			submit := SubmitMsg{
 				DisplayInput:   draft.DisplayInput,
-				ExpandedInput:  strings.TrimSpace(expandPastedTextRefs(draft.DisplayInput, draft.PastedContents)),
+				ExpandedInput:  expandPastedTextRefs(draft.DisplayInput, draft.PastedContents),
 				PastedContents: draft.PastedContents,
 			}
 			ib.Reset()
@@ -252,12 +261,13 @@ func (ib *inputBar) Update(msg tea.Msg) (inputBar, tea.Cmd) {
 	ib.ti, cmd = ib.ti.Update(msg)
 	ib.cleanupOrphanedPastedContents()
 	ib.maybeTruncateCurrentInput()
+	ib.refreshSlashSuggestions()
 	ib.syncHeight()
 	return *ib, cmd
 }
 
 func (ib *inputBar) AddToHistory(entry inputHistoryEntry) {
-	if entry.DisplayInput == "" {
+	if strings.TrimSpace(entry.DisplayInput) == "" {
 		return
 	}
 
@@ -284,6 +294,9 @@ func (ib *inputBar) AddToHistory(entry inputHistoryEntry) {
 
 func (ib *inputBar) View() string {
 	body := ib.ti.View()
+	if menu := ib.renderSlashSuggestions(); menu != "" {
+		body += "\n" + menu
+	}
 	if ib.searchMode {
 		label := "?뵇 ?????(" + ib.searchQuery + "): "
 		return prefixInputLines(

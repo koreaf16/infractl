@@ -26,6 +26,10 @@ func (e platformTestExecutor) Target() string {
 	return e.target
 }
 
+func (e platformTestExecutor) Host() string {
+	return e.target
+}
+
 func (e platformTestExecutor) Platform() executor.Platform {
 	return e.platform
 }

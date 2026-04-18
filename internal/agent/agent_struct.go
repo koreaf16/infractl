@@ -6,8 +6,14 @@
 package agent
 
 import (
+	"sync"
 	"time"
 
+	"github.com/yourorg/infractl/internal/agent/compact"
+	"github.com/yourorg/infractl/internal/agent/planmode"
+	"github.com/yourorg/infractl/internal/agent/query"
+	"github.com/yourorg/infractl/internal/agent/taskctx"
+	todoagent "github.com/yourorg/infractl/internal/agent/todo"
 	"github.com/yourorg/infractl/internal/background"
 	"github.com/yourorg/infractl/internal/checkpoint"
 	"github.com/yourorg/infractl/internal/connector"
@@ -15,8 +21,10 @@ import (
 	"github.com/yourorg/infractl/internal/executor"
 	"github.com/yourorg/infractl/internal/hooks"
 	"github.com/yourorg/infractl/internal/llm"
+	"github.com/yourorg/infractl/internal/privilege"
 	"github.com/yourorg/infractl/internal/rag"
 	"github.com/yourorg/infractl/internal/store"
+	"github.com/yourorg/infractl/internal/subagent"
 	"github.com/yourorg/infractl/internal/tools"
 )
 
@@ -42,7 +50,7 @@ type Agent struct {
 	costTracker         *cost.Tracker
 	bgManager           *background.Manager
 	checkpointMgr       *checkpoint.Manager
-	hooksMgr            *hooks.Manager
+	hookRunner          *hooks.Runner
 	modelName           string
 	sessionHookFired    bool
 	maxHistory          int
@@ -52,17 +60,47 @@ type Agent struct {
 	lastUserPrompt      string
 	lastFailedLogID     int64
 	lastSystemPromptLen int
+	promptCache         *promptCache
+	promptInputs        *promptInputCache
+	lastPromptProfile   promptProfile
 	compactBreaker      *llm.CircuitBreaker
-	llmBreaker          *llm.CircuitBreaker
+	compactStack        *compact.Stack
 	sessionSummary      *SessionSummaryManager
 	yoroMode            bool
-	planMode            bool
+	planState           *planmode.State
+	todoStore           *todoagent.Store
+	todoEnforcer        *todoagent.Enforcer
 	idleHandler         IdleInputHandler
 	questionHandler     QuestionHandler
+	subagentRunner      *subagent.Runner
+	taskProgressMu      sync.Mutex
+	taskProgress        map[string]tools.TaskProgressMetadata
+	pendingAction       PendingActionTracker
+	historyTurnCounter  int
+	currentPlan         *PlanState
+	pendingProposal     *taskctx.PendingProposal
+	taskMgr             *taskctx.Manager
+	elevationTrk        *privilege.Tracker
+	credVault           *privilege.Vault
+	queryEngine         *query.Engine
+	querySink           query.QueryEventSink
+
+	// Phase F: auto-promotion 임계값 (0이면 비활성)
+	promotionThreshold time.Duration
 }
 
 // New????????ш낄援θキ????獄쏅똻???筌먲퐢??
 func New(client llm.Client, registry *tools.Registry, mgr *executor.Manager, handler EventHandler, st store.ServerStore) *Agent {
+	stack := compact.NewStack(client, nil)
+	reactive := stack.NewReactive(client)
+	recovery := compact.NewRecovery(stack.Collapse(), reactive, client)
+
+	engine := query.New(nil)
+	engine.SetCompact(stack)
+	engine.SetRecovery(recovery)
+
+	ps := planmode.NewState()
+	tStore := todoStoreFromRegistry(registry)
 	return &Agent{
 		llmClient:        client,
 		registry:         registry,
@@ -73,9 +111,31 @@ func New(client llm.Client, registry *tools.Registry, mgr *executor.Manager, han
 		maxHistory:       defaultMaxHistory,
 		maxToolLoop:      defaultMaxToolLoop,
 		maxContextTokens: defaultMaxContextTokens,
+		promptCache:      newPromptCache(),
+		promptInputs:     newPromptInputCache(),
 		compactBreaker:   llm.NewCircuitBreaker(maxConsecutiveCompactFailures, 5*time.Minute),
-		llmBreaker:       llm.NewCircuitBreaker(5, 2*time.Minute),
+		compactStack:     stack,
+		pendingAction:    newPendingActionTracker(),
+		queryEngine:      engine,
+		querySink:        query.NoopEventSink{},
+		planState:        ps,
+		todoStore:        tStore,
+		todoEnforcer:     todoagent.NewEnforcer(tStore),
 	}
+}
+
+// todoStoreFromRegistry reuses the TodoWrite tool store so enforcement sees the same list.
+func todoStoreFromRegistry(registry *tools.Registry) *todoagent.Store {
+	if registry != nil {
+		if tool, ok := registry.Get(todoagent.WriteToolName); ok {
+			if wt, ok := tool.(*todoagent.WriteTool); ok && wt.Tracker != nil {
+				if store := wt.Tracker.Store(); store != nil {
+					return store
+				}
+			}
+		}
+	}
+	return todoagent.NewStore()
 }
 
 // SetConnectorManager????節뗪콪???癲ル슢?????????낆뒩????筌먲퐢??
@@ -107,9 +167,12 @@ func (a *Agent) NewSmartIdleInputHandler() *SmartIdleInputHandler {
 }
 
 // SetSessionStore???嶺뚮ㅎ??????????롢걫???낆뒩????筌먲퐢??
-// SetSessionSummary는 프로그레시브 요약 관리자를 주입한다.
+// SetSessionSummary는 프로그레시브 요약 관리자를 주입하고, compact stack 의 mild 전략으로 연결한다.
 func (a *Agent) SetSessionSummary(sm *SessionSummaryManager) {
 	a.sessionSummary = sm
+	if a.compactStack != nil {
+		a.compactStack.SetMild(sm)
+	}
 }
 
 func (a *Agent) SetSessionStore(s store.SessionStore) {
@@ -167,7 +230,6 @@ func (a *Agent) ToggleYoroMode() bool {
 	return a.yoroMode
 }
 
-
 // Tools???濚밸Ŧ援욃ㅇ????ш낄猷??癲ル슢?꾤땟戮⑤뭄???袁⑸즵????筌먲퐢??
 func (a *Agent) Tools() []tools.Tool {
 	return a.registry.List()
@@ -204,3 +266,17 @@ func (a *Agent) ToggleYOROMode() bool {
 // IsYOROMode??YORO 癲ル슢?꾤땟?????筌?????????袁⑸즵????筌먲퐢??
 func (a *Agent) IsYOROMode() bool { return a.yoroMode }
 
+// SetSubagentRunner는 Pre-flight 인텔리전스 수집에 사용할 서브에이전트 러너를 주입한다.
+func (a *Agent) SetSubagentRunner(r *subagent.Runner) {
+	a.subagentRunner = r
+}
+
+// SetQueryEventSink 는 query.Engine 이벤트를 소비할 sink 를 주입한다.
+// nil 이면 NoopEventSink 로 대체된다.
+func (a *Agent) SetQueryEventSink(s query.QueryEventSink) {
+	if s == nil {
+		a.querySink = query.NoopEventSink{}
+	} else {
+		a.querySink = s
+	}
+}

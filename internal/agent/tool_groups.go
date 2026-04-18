@@ -16,16 +16,16 @@ import (
 type ToolGroup string
 
 const (
-	GroupSystemInfo   ToolGroup = "system_info"
-	GroupFileOps      ToolGroup = "file_ops"
-	GroupShell        ToolGroup = "shell"
-	GroupNetwork      ToolGroup = "network"
-	GroupServiceMgmt  ToolGroup = "service_mgmt"
-	GroupDiscovery    ToolGroup = "discovery"
-	GroupKnowledge    ToolGroup = "knowledge"
-	GroupWeb          ToolGroup = "web"
-	GroupServerMgmt   ToolGroup = "server_mgmt"
-	GroupConnector    ToolGroup = "connector"
+	GroupSystemInfo    ToolGroup = "system_info"
+	GroupFileOps       ToolGroup = "file_ops"
+	GroupShell         ToolGroup = "shell"
+	GroupNetwork       ToolGroup = "network"
+	GroupServiceMgmt   ToolGroup = "service_mgmt"
+	GroupDiscovery     ToolGroup = "discovery"
+	GroupKnowledge     ToolGroup = "knowledge"
+	GroupWeb           ToolGroup = "web"
+	GroupServerMgmt    ToolGroup = "server_mgmt"
+	GroupConnector     ToolGroup = "connector"
 	GroupOrchestration ToolGroup = "orchestration"
 )
 
@@ -53,13 +53,14 @@ var toolGroupMembers = map[ToolGroup][]string{
 	},
 	GroupKnowledge: {
 		"knowledge_search", "knowledge_add", "rag_search",
-		"rag_register", "memory_search", "save_learned_system",
+		"rag_probe_source", "rag_register", "memory_search", "save_learned_system",
 	},
 	GroupWeb: {
 		"web_search", "web_fetch",
 	},
 	GroupServerMgmt: {
 		"server_list", "server_add", "server_remove", "server_focus",
+		"workspace_list", "workspace_add", "workspace_remove", "workspace_focus",
 	},
 	GroupOrchestration: {
 		"background_jobs", "delegate_task", "subagent_analyze",
@@ -71,7 +72,7 @@ var toolGroupMembers = map[ToolGroup][]string{
 // baseToolNames는 needs_tools=true일 때 항상 포함하는 기반 도구이다.
 // ask_user_question은 어떤 그룹에도 속하지 않으므로 항상 포함시켜야
 // Qwen 모델이 올바른 스키마(question + options)를 참조할 수 있다.
-var baseToolNames = []string{"session_context", "read_placeholder", "ask_user_question"}
+var baseToolNames = []string{"session_context", "read_placeholder", "ask_user_question", "propose_action", "TodoWrite"}
 
 func ResolveAllToolGroups(
 	reg *tools.Registry,

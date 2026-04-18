@@ -7,16 +7,20 @@ package ssh
 import (
 	"context"
 	"fmt"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/yourorg/infractl/internal/executor"
+	"github.com/yourorg/infractl/internal/workspace"
 )
 
 // SSHExecutor executes commands on a remote target via SSH.
 type SSHExecutor struct {
-	name     string
-	client   *Client
-	platform executor.Platform
+	name         string
+	client       *Client
+	platform     executor.Platform
+	workspaceDir string
 }
 
 // NewSSHExecutor wraps an SSH client with an executor implementation.
@@ -27,12 +31,21 @@ func NewSSHExecutor(name string, client *Client, osHint ...string) *SSHExecutor 
 			platform = detected
 		}
 	}
-	return &SSHExecutor{name: name, client: client, platform: platform}
+	workspaceDir := client.cfg.WorkspaceDir
+	if len(osHint) > 1 && strings.TrimSpace(osHint[1]) != "" {
+		workspaceDir = osHint[1]
+	}
+	return &SSHExecutor{
+		name:         name,
+		client:       client,
+		platform:     platform,
+		workspaceDir: workspace.RemoteDirOrDefault(workspaceDir),
+	}
 }
 
 // Execute runs a command on the remote host.
 func (e *SSHExecutor) Execute(ctx context.Context, command string) (executor.ExecResult, error) {
-	result, err := e.client.Run(ctx, command)
+	result, err := e.client.Run(ctx, e.workspaceCommand(command))
 	if err != nil {
 		return executor.ExecResult{}, fmt.Errorf("ssh execute on %s: %w", e.name, err)
 	}
@@ -46,50 +59,21 @@ func (e *SSHExecutor) Execute(ctx context.Context, command string) (executor.Exe
 }
 
 // ExecuteStream runs a command and streams stdout line-by-line.
-func (e *SSHExecutor) ExecuteStream(ctx context.Context, command string, onLine func(string)) (executor.ExecResult, error) {
-	result, err := e.client.RunStream(ctx, command, false, onLine, nil)
-	if err != nil {
-		return executor.ExecResult{}, fmt.Errorf("ssh stream on %s: %w", e.name, err)
-	}
-
-	return executor.ExecResult{
-		Stdout:   result.Stdout,
-		Stderr:   result.Stderr,
-		ExitCode: result.ExitCode,
-		Duration: result.Duration,
-	}, nil
+func (e *SSHExecutor) ExecuteStream(ctx context.Context, command string, onLine func(string)) (executor.ExecSession, error) {
+	return e.client.RunStream(ctx, e.workspaceCommand(command), false, onLine, nil)
 }
 
 // ExecuteStreamPTY runs a command with PTY allocated, streaming stdout line-by-line.
 // PTY ensures interactive prompts (sudo, su, passwd) appear in stdout
 // instead of /dev/tty, enabling the idle handler to detect and auto-respond.
-func (e *SSHExecutor) ExecuteStreamPTY(ctx context.Context, command string, onLine func(string)) (executor.ExecResult, error) {
-	result, err := e.client.RunStream(ctx, command, true, onLine, nil)
-	if err != nil {
-		return executor.ExecResult{}, fmt.Errorf("ssh pty stream on %s: %w", e.name, err)
-	}
-
-	return executor.ExecResult{
-		Stdout:   result.Stdout,
-		Stderr:   result.Stderr,
-		ExitCode: result.ExitCode,
-		Duration: result.Duration,
-	}, nil
+func (e *SSHExecutor) ExecuteStreamPTY(ctx context.Context, command string, onLine func(string)) (executor.ExecSession, error) {
+	return e.client.RunStream(ctx, e.workspaceCommand(command), true, onLine, nil)
 }
 
 // ExecuteInteractive runs a command while streaming raw terminal chunks.
-func (e *SSHExecutor) ExecuteInteractive(ctx context.Context, spec executor.InteractiveSpec, onChunk func(string)) (executor.ExecResult, error) {
-	result, err := e.client.RunInteractive(ctx, spec.Command, spec.RequirePTY, onChunk)
-	if err != nil {
-		return executor.ExecResult{}, fmt.Errorf("ssh interactive on %s: %w", e.name, err)
-	}
-
-	return executor.ExecResult{
-		Stdout:   result.Stdout,
-		Stderr:   result.Stderr,
-		ExitCode: result.ExitCode,
-		Duration: result.Duration,
-	}, nil
+func (e *SSHExecutor) ExecuteInteractive(ctx context.Context, spec executor.InteractiveSpec, onChunk func(string)) (executor.ExecSession, error) {
+	spec.Command = e.workspaceCommand(spec.Command)
+	return e.client.RunInteractive(ctx, spec.Command, spec.RequirePTY, onChunk)
 }
 
 // ExecuteStreamWithIdle runs a command and exposes idle callbacks for interactive prompts.
@@ -98,33 +82,22 @@ func (e *SSHExecutor) ExecuteStreamWithIdle(
 	command string,
 	onLine func(string),
 	onIdle func(executor.StdinInjector),
-) (executor.ExecResult, error) {
-	result, err := e.client.RunStream(ctx, command, false, onLine, onIdle)
-	if err != nil {
-		return executor.ExecResult{}, fmt.Errorf("ssh stream on %s: %w", e.name, err)
-	}
-
-	return executor.ExecResult{
-		Stdout:   result.Stdout,
-		Stderr:   result.Stderr,
-		ExitCode: result.ExitCode,
-		Duration: result.Duration,
-	}, nil
-}
-
-// InjectStdin forwards interactive input to the active SSH session.
-func (e *SSHExecutor) InjectStdin(line string) error {
-	return e.client.InjectStdin(line)
-}
-
-// SendEOF forwards EOF/EOT signaling to the active SSH session.
-func (e *SSHExecutor) SendEOF() error {
-	return e.client.SendEOF()
+) (executor.ExecSession, error) {
+	return e.client.RunStream(ctx, e.workspaceCommand(command), false, onLine, onIdle)
 }
 
 // Target returns the server alias.
 func (e *SSHExecutor) Target() string {
 	return e.name
+}
+
+// Host returns the remote IP/host.
+func (e *SSHExecutor) Host() string {
+	return e.client.Host()
+}
+
+func (e *SSHExecutor) WorkspaceDir() string {
+	return workspace.RemoteDirOrDefault(e.workspaceDir)
 }
 
 // Platform returns the remote target platform.
@@ -143,6 +116,11 @@ func (e *SSHExecutor) ShellName() string {
 // Upload transfers a local file to the remote host via SFTP.
 // Implements executor.FileTransferExecutor.
 func (e *SSHExecutor) Upload(ctx context.Context, localPath, remotePath string, onProgress func(transferred, total int64)) error {
+	resolved, err := e.resolveTransferPath(ctx, remotePath)
+	if err != nil {
+		return fmt.Errorf("resolve remote upload path %s: %w", remotePath, err)
+	}
+	remotePath = resolved
 	if err := e.client.Upload(ctx, localPath, remotePath, onProgress); err != nil {
 		return fmt.Errorf("sftp upload to %s: %w", e.name, err)
 	}
@@ -152,6 +130,11 @@ func (e *SSHExecutor) Upload(ctx context.Context, localPath, remotePath string, 
 // Download transfers a file from the remote host to a local path via SFTP.
 // Implements executor.FileTransferExecutor.
 func (e *SSHExecutor) Download(ctx context.Context, remotePath, localPath string, onProgress func(transferred, total int64)) error {
+	resolved, err := e.resolveTransferPath(ctx, remotePath)
+	if err != nil {
+		return fmt.Errorf("resolve remote download path %s: %w", remotePath, err)
+	}
+	remotePath = resolved
 	if err := e.client.Download(ctx, remotePath, localPath, onProgress); err != nil {
 		return fmt.Errorf("sftp download from %s: %w", e.name, err)
 	}
@@ -161,6 +144,43 @@ func (e *SSHExecutor) Download(ctx context.Context, remotePath, localPath string
 // Close closes the SSH client connection.
 func (e *SSHExecutor) Close() error {
 	return e.client.Close()
+}
+
+func (e *SSHExecutor) workspaceCommand(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return command
+	}
+	ws := workspace.POSIXShellPath(e.WorkspaceDir())
+	return fmt.Sprintf("mkdir -p %s && cd %s && %s", ws, ws, command)
+}
+
+func (e *SSHExecutor) resolveTransferPath(ctx context.Context, remotePath string) (string, error) {
+	remotePath = strings.TrimSpace(remotePath)
+	if remotePath == "" || path.IsAbs(remotePath) {
+		return remotePath, nil
+	}
+
+	ws := workspace.POSIXShellPath(e.WorkspaceDir())
+	pathExpr := workspace.POSIXShellPath(remotePath)
+	script := fmt.Sprintf(
+		`mkdir -p %s && cd %s && target=%s && case "$target" in /*) printf '%%s' "$target" ;; *) printf '%%s' "$PWD/$target" ;; esac`,
+		ws,
+		ws,
+		pathExpr,
+	)
+	result, err := e.client.Run(ctx, script)
+	if err != nil {
+		return "", err
+	}
+	if result.ExitCode != 0 {
+		return "", fmt.Errorf("remote path resolve failed: %s", strings.TrimSpace(result.Stderr))
+	}
+	resolved := strings.TrimSpace(result.Stdout)
+	if resolved == "" {
+		return remotePath, nil
+	}
+	return resolved, nil
 }
 
 // ── PersistentSessionExecutor ────────────────────────────────────────────────

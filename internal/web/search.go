@@ -32,6 +32,29 @@ type SearchResult struct {
 	Snippet string
 }
 
+// SearchOptions customizes a web search request.
+type SearchOptions struct {
+	AllowedDomains []string
+	BlockedDomains []string
+}
+
+// SearchOption mutates SearchOptions.
+type SearchOption func(*SearchOptions)
+
+// WithAllowedDomains constrains results to the given domains.
+func WithAllowedDomains(domains ...string) SearchOption {
+	return func(opts *SearchOptions) {
+		opts.AllowedDomains = append(opts.AllowedDomains, domains...)
+	}
+}
+
+// WithBlockedDomains excludes results from the given domains.
+func WithBlockedDomains(domains ...string) SearchOption {
+	return func(opts *SearchOptions) {
+		opts.BlockedDomains = append(opts.BlockedDomains, domains...)
+	}
+}
+
 // searxngResponse는 SearXNG JSON 응답 구조이다.
 type searxngResponse struct {
 	Results []struct {
@@ -42,16 +65,24 @@ type searxngResponse struct {
 }
 
 // Search는 SearXNG에서 query를 검색하여 최대 limit개의 결과를 반환한다.
-func Search(ctx context.Context, query string, limit int) ([]SearchResult, error) {
+func Search(ctx context.Context, query string, limit int, opts ...SearchOption) ([]SearchResult, error) {
 	if limit <= 0 || limit > maxResults {
 		limit = 5
 	}
+
+	searchOpts := SearchOptions{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&searchOpts)
+		}
+	}
+	searchQuery := buildSearchQuery(query, searchOpts)
 
 	reqCtx, cancel := context.WithTimeout(ctx, searchTimeout)
 	defer cancel()
 
 	params := url.Values{
-		"q":      {query},
+		"q":      {searchQuery},
 		"format": {"json"},
 	}
 
@@ -65,13 +96,13 @@ func Search(ctx context.Context, query string, limit int) ([]SearchResult, error
 	client := &http.Client{Timeout: searchTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		slog.Warn("searxng search failed", "query", query, "err", err)
+		slog.Warn("searxng search failed", "query", searchQuery, "err", err)
 		return nil, fmt.Errorf("searxng unreachable: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		slog.Warn("searxng search error status", "query", query, "status", resp.Status)
+		slog.Warn("searxng search error status", "query", searchQuery, "status", resp.Status)
 		return nil, fmt.Errorf("searxng returned status %s (check if JSON format is enabled)", resp.Status)
 	}
 
@@ -110,6 +141,53 @@ func Search(ctx context.Context, query string, limit int) ([]SearchResult, error
 		})
 	}
 
-	slog.Debug("searxng search done", "query", query, "results", len(results))
+	slog.Debug("searxng search done", "query", searchQuery, "results", len(results))
 	return results, nil
+}
+
+func buildSearchQuery(query string, opts SearchOptions) string {
+	parts := []string{strings.TrimSpace(query)}
+	seen := make(map[string]bool)
+
+	appendDomainClause := func(prefix, raw string) {
+		domain := normalizeSearchDomain(raw)
+		if domain == "" {
+			return
+		}
+		clause := prefix + domain
+		if seen[clause] {
+			return
+		}
+		seen[clause] = true
+		parts = append(parts, clause)
+	}
+
+	for _, domain := range opts.AllowedDomains {
+		appendDomainClause("site:", domain)
+	}
+	for _, domain := range opts.BlockedDomains {
+		appendDomainClause("-site:", domain)
+	}
+
+	return strings.TrimSpace(strings.Join(parts, " "))
+}
+
+func normalizeSearchDomain(raw string) string {
+	domain := strings.TrimSpace(raw)
+	if domain == "" {
+		return ""
+	}
+	domain = strings.TrimPrefix(domain, "site:")
+	domain = strings.TrimPrefix(domain, "-site:")
+	domain = strings.TrimPrefix(domain, "https://")
+	domain = strings.TrimPrefix(domain, "http://")
+	domain = strings.TrimPrefix(domain, "www.")
+	domain = strings.Trim(domain, "/")
+	if domain == "" {
+		return ""
+	}
+	if strings.Contains(domain, "/") {
+		domain = strings.SplitN(domain, "/", 2)[0]
+	}
+	return domain
 }

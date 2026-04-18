@@ -45,15 +45,8 @@ func (s *SSHExternalSearcher) Search(ctx context.Context, source store.RAGSource
 	}
 
 	vecStr := formatVectorStr(queryVec)
-	creds := source.Credentials
 
-	cmd := buildVectorSearchCmd(
-		source.DBType, source.DBName, source.ServerName,
-		0, // 포트는 서버명으로 해결 (SSH executor가 처리)
-		creds.Username, creds.Password, creds.Role,
-		source.TableName, source.TextColumn, source.VectorColumn,
-		source.ResultColumns, vecStr, topK,
-	)
+	cmd := buildVectorSearchCmd(source, vecStr, topK)
 	if cmd == "" {
 		return nil, fmt.Errorf("unsupported db type: %s", source.DBType)
 	}
@@ -66,7 +59,7 @@ func (s *SSHExternalSearcher) Search(ctx context.Context, source store.RAGSource
 		slog.Warn("vector search non-zero exit", "source", source.Name, "stderr", result.Stderr)
 	}
 
-	parsed := parseQueryOutput(result.Stdout, source.ResultColumns)
+	parsed := parseQueryOutput(result.Stdout, mergedSelectColumns(source.ResultColumns, source.MetadataColumns))
 	slog.Debug("external rag search", "source", source.Name, "rows", len(parsed))
 	return parsed, nil
 }

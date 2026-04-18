@@ -26,6 +26,11 @@ type Job struct {
 	Error       string
 	StartedAt   time.Time
 	CompletedAt *time.Time
+
+	// Phase F: 파일 스트리밍 필드
+	StoragePath         string // stdout 파일 경로 (Streamed=true일 때 유효)
+	Streamed            bool   // SubmitStreaming으로 제출된 경우 true
+	MonitorBytesEmitted int    // Monitor 도구가 이 Job에 대해 누적 반환한 바이트 수
 }
 
 // IsActive는 작업이 아직 실행 중인지 반환한다.

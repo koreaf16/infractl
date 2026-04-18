@@ -111,6 +111,7 @@ func (ib *inputBar) applyPastedText(raw string) {
 
 	ib.cleanupOrphanedPastedContents()
 	ib.maybeTruncateCurrentInput()
+	ib.refreshSlashSuggestions()
 }
 
 func (ib *inputBar) maxVisiblePasteLines() int {
@@ -164,6 +165,7 @@ func (ib *inputBar) maybeTruncateCurrentInput() {
 	ib.ti.CursorEnd()
 	ib.pastedContents = result.PastedContents
 	ib.nextPasteID = nextPasteID(ib.pastedContents)
+	ib.refreshSlashSuggestions()
 }
 
 func normalizePastedText(raw string) string {

@@ -1,0 +1,51 @@
+# shell_readonly.yaml — ComputeMetadata read_only 분류 케이스 (10개)
+cases:
+  - id: ro_01
+    tool: bash
+    command: "ls -la"
+    expect_readonly: true
+
+  - id: ro_02
+    tool: bash
+    command: "cat /etc/hosts | grep 127"
+    expect_readonly: true
+
+  - id: ro_03
+    tool: bash
+    command: "df -h && du -sh /tmp"
+    expect_readonly: true
+
+  - id: ro_04
+    tool: bash
+    command: "ps aux | grep nginx"
+    expect_readonly: true
+
+  - id: ro_05
+    tool: bash
+    command: "grep -r 'error' /var/log/nginx/access.log"
+    expect_readonly: true
+
+  - id: ro_06
+    tool: bash
+    command: "rm -rf /tmp/foo"
+    expect_readonly: false
+
+  - id: ro_07
+    tool: bash
+    command: "echo hi > /tmp/out"
+    expect_readonly: false
+
+  - id: ro_08
+    tool: bash
+    command: "tar -xzf archive.tar.gz"
+    expect_readonly: false
+
+  - id: ro_09
+    tool: bash
+    command: "mkdir /tmp/newdir"
+    expect_readonly: false
+
+  - id: ro_10
+    tool: bash
+    command: "cp /etc/hosts /tmp/hosts_backup"
+    expect_readonly: false

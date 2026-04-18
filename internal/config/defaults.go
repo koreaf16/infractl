@@ -77,6 +77,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 }
 
+// defaultTemperature는 temperature 미설정 시 사용할 기본값이다.
+var defaultTemperature = func() *float64 { v := 0.0; return &v }()
+
 // applyDefaults는 누락된 설정에 기본값을 적용한다.
 func applyDefaults(cfg *Config) {
 	if cfg.LLM.Timeout == 0 {
@@ -84,6 +87,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.LLM.Mode == "" {
 		cfg.LLM.Mode = "full"
+	}
+	if cfg.LLM.Temperature == nil {
+		cfg.LLM.Temperature = defaultTemperature
 	}
 
 	// models.general이 없으면 레거시 llm 필드를 general로 승격한다 (하위호환)
@@ -100,16 +106,29 @@ func applyDefaults(cfg *Config) {
 		if cfg.Models.General.Mode == "" {
 			cfg.Models.General.Mode = "full"
 		}
+		if cfg.Models.General.Temperature == nil {
+			cfg.Models.General.Temperature = defaultTemperature
+		}
 	}
 
 	// reasoning 티어 기본값
-	if cfg.Models.Reasoning != nil && cfg.Models.Reasoning.Timeout == 0 {
-		cfg.Models.Reasoning.Timeout = 120
+	if cfg.Models.Reasoning != nil {
+		if cfg.Models.Reasoning.Timeout == 0 {
+			cfg.Models.Reasoning.Timeout = 120
+		}
+		if cfg.Models.Reasoning.Temperature == nil {
+			cfg.Models.Reasoning.Temperature = defaultTemperature
+		}
 	}
 
 	// fast 티어 기본값
-	if cfg.Models.Fast != nil && cfg.Models.Fast.Timeout == 0 {
-		cfg.Models.Fast.Timeout = 30
+	if cfg.Models.Fast != nil {
+		if cfg.Models.Fast.Timeout == 0 {
+			cfg.Models.Fast.Timeout = 30
+		}
+		if cfg.Models.Fast.Temperature == nil {
+			cfg.Models.Fast.Temperature = defaultTemperature
+		}
 	}
 
 	// reranker 기본값
@@ -126,4 +145,7 @@ func applyDefaults(cfg *Config) {
 	if cfg.Embedding.Endpoint == "" {
 		cfg.Embedding.Endpoint = cfg.LLM.Endpoint
 	}
+
+	// Phase F: 멀티태스크 기본값 적용
+	applyMultitaskDefaults(cfg)
 }

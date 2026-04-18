@@ -19,17 +19,16 @@ type logBlock struct {
 	Text      string
 }
 
-func logRequestJSON(model string, data []byte) {
+func LogRequestJSON(model string, data []byte) {
 	var req struct {
 		Messages []struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
+			Role       string          `json:"role"`
+			Content    json.RawMessage `json:"content"`
+			ToolCalls  []ToolCall      `json:"tool_calls"`
+			ToolCallID string          `json:"tool_call_id"`
+			Name       string          `json:"name"`
 		} `json:"messages"`
-		Tools []struct {
-			Function struct {
-				Name string `json:"name"`
-			} `json:"function"`
-		} `json:"tools"`
+		Tools []json.RawMessage `json:"tools"`
 	}
 	if err := json.Unmarshal(data, &req); err != nil {
 		logToFile(model, "SND", string(data))
@@ -37,31 +36,33 @@ func logRequestJSON(model string, data []byte) {
 	}
 
 	var sb strings.Builder
-	for _, msg := range req.Messages {
-		content, ok := jsonContentToString(msg.Content)
-		if !ok || strings.TrimSpace(content) == "" {
-			continue
-		}
+	for i, msg := range req.Messages {
+		content, _ := jsonContentToString(msg.Content)
+
 		// 각 메시지를 구분하는 내부 헤더 추가
-		fmt.Fprintf(&sb, "--- [%s] ---\n%s\n\n", strings.ToUpper(msg.Role), strings.TrimSpace(content))
+		fmt.Fprintf(&sb, "--- [MSG #%d: %s] ---\n", i, strings.ToUpper(msg.Role))
+		if strings.TrimSpace(content) != "" {
+			fmt.Fprintf(&sb, "%s\n", strings.TrimSpace(content))
+		}
+		if len(msg.ToolCalls) > 0 {
+			for _, tc := range msg.ToolCalls {
+				fmt.Fprintf(&sb, "[Tool Call Request] %s\n%s\n", tc.Function.Name, prettyJSON(tc.Function.Arguments))
+			}
+		}
+		if msg.ToolCallID != "" || msg.Name != "" {
+			id := msg.ToolCallID
+			if id == "" {
+				id = msg.Name
+			}
+			fmt.Fprintf(&sb, "[Tool Result ID: %s]\n", id)
+		}
+		fmt.Fprintf(&sb, "\n")
 	}
 
 	if len(req.Tools) > 0 {
-		fmt.Fprintf(&sb, "--- [TOOLS] ---\n")
+		fmt.Fprintf(&sb, "--- [FULL TOOL DEFINITIONS] ---\n")
 		for _, t := range req.Tools {
-			if t.Function.Name != "" {
-				fmt.Fprintf(&sb, "- %s\n", t.Function.Name)
-			}
-		}
-	} else {
-		// 인라인 모드인 경우 프롬프트 내의 도구 목록 패턴을 찾아 힌트 출력
-		for _, msg := range req.Messages {
-			content, _ := jsonContentToString(msg.Content)
-			if strings.Contains(content, "Available Tools") || strings.Contains(content, "Tool Groups") {
-				fmt.Fprintf(&sb, "--- [TOOLS (Inferred from Prompt)] ---\n")
-				fmt.Fprintf(&sb, "(Tools are defined within the system prompt for distilled mode)\n")
-				break
-			}
+			fmt.Fprintf(&sb, "%s\n", prettyJSON(string(t)))
 		}
 	}
 
@@ -73,7 +74,7 @@ func logRequestJSON(model string, data []byte) {
 	}})
 }
 
-func logResponseJSON(model string, data []byte) {
+func LogResponseJSON(model string, data []byte) {
 	blocks := make([]logBlock, 0, 3)
 
 	content, ok := extractJSONLogContent(string(data))
@@ -249,18 +250,18 @@ func writeLogBlocks(blocks []logBlock) {
 
 	for _, block := range blocks {
 		text := decodeLogEscapes(block.Text)
-		// block.Role이 "assistant"인 경우에만 stripThinkingText 적용 (이미 위에 logResponseJSON에서 처리됨)
 		if strings.TrimSpace(text) == "" {
 			continue
 		}
 		label := resolveBlockLabel(block)
-		// 헤더에 데이터 크기(문자 수)를 포함하여 context 규모 파악을 돕는다.
-		header := fmt.Sprintf("========== %s [%d chars]", label, len(text))
+		// 20개의 ❌를 사용하여 더 명확한 구분선을 만든다.
+		const sep = "❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌"
+		header := fmt.Sprintf("%s %s [%d chars]", sep, label, len(text))
 		if block.Model != "" {
 			header += " | " + block.Model
 		}
-		header += " =========="
-		fmt.Fprintf(f, "\n%s\n%s\n%s\n", header, strings.TrimSpace(text), strings.Repeat("=", len(header)))
+		header += " " + sep
+		fmt.Fprintf(f, "\n%s\n%s\n%s\n", header, strings.TrimSpace(text), sep)
 	}
 }
 

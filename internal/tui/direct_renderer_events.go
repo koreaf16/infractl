@@ -91,7 +91,7 @@ func (r *DirectRenderer) OnToolStart(toolID, name, target string, args map[strin
 	headerLine := buildToolHeaderLine(name, target, args)
 	headerLine = StyleResponseBracket.Render("  * ") + headerLine
 	r.box.Reset()
-	r.box.SetInfo(shellBoxStatusLine(name, args, 0, boxIconRunning, 0))
+	r.box.SetInfo(shellBoxStatusLine(name, args, 0, boxIconRunning, 0, ""))
 	r.box.PrintPermanent(headerLine)
 	label := r.thinkingLabel
 	if label == "" {
@@ -110,37 +110,36 @@ func (r *DirectRenderer) OnToolOutput(toolID, line string) {
 	if trimmed != "" {
 		r.shellTotal++
 		r.shellLines = appendShellLine(r.shellLines, trimmed, shellBoxMaxLines)
-		r.box.SetInfo(shellBoxStatusLine(r.shellToolName, r.shellArgs, r.shellTotal, boxIconRunning, 0))
+		r.box.SetInfo(shellBoxStatusLine(r.shellToolName, r.shellArgs, r.shellTotal, boxIconRunning, 0, ""))
 		r.box.SetContentWithTotal(r.shellLines, r.shellTotal)
 		r.box.Redraw()
 	}
 }
 
-func (r *DirectRenderer) OnToolEnd(toolID, name, result string, duration time.Duration, success bool) {
+func (r *DirectRenderer) OnToolEnd(toolID, name, result string, duration time.Duration, success bool, metadataJSON string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.stopShimmerInternal()
-	r.progress.CompleteTool(toolID, duration, success)
+	r.progress.CompleteTool(toolID, duration, success, metadataJSON)
+	if name == "verify_complete" {
+		if meta, ok := parseTaskProgressMetadata(metadataJSON); ok && strings.TrimSpace(meta.VerifiedByToolID) != "" {
+			r.progress.UpdateTaskProgress(meta.VerifiedByToolID, metadataJSON)
+		}
+	}
 
 	var args map[string]any
-	for _, item := range r.progress.items {
-		if item.toolID == toolID {
-			args = item.args
+	for i := len(r.progress.items) - 1; i >= 0; i-- {
+		if r.progress.items[i].toolID == toolID {
+			args = r.progress.items[i].args
 			break
 		}
 	}
 
-	contentLines := r.shellLines
-	totalLines := r.shellTotal
-	if !isShellBoxTool(name) {
-		contentLines = toolBoxContent(name, args, result, success)
-	} else {
-		contentLines, totalLines = resolveShellBoxOutput(name, contentLines, totalLines, result)
-	}
+	contentLines, totalLines := resolveToolBoxContent(name, args, r.shellLines, r.shellTotal, result, success)
 
 	r.box.Reset()
-	r.box.PrintPermanent(renderShellBoxCompleted(name, args, contentLines, totalLines, duration, success, r.width))
+	r.box.PrintPermanent(renderShellBoxCompleted(name, args, contentLines, totalLines, duration, success, r.width, metadataJSON))
 
 	r.shellArgs = nil
 	r.shellLines = nil

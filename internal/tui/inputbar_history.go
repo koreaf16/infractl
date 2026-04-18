@@ -34,11 +34,13 @@ func (ib *inputBar) handleSearchInput(msg tea.KeyMsg) bool {
 			ib.searchIdx = 0
 			ib.applySearch()
 		}
+		ib.clearSlashSuggestions()
 		return true
 	case tea.KeyRunes:
 		ib.searchQuery += string(msg.Runes)
 		ib.searchIdx = 0
 		ib.applySearch()
+		ib.clearSlashSuggestions()
 		return true
 	default:
 		return false
@@ -50,6 +52,7 @@ func (ib *inputBar) advanceHistorySearch() {
 		ib.searchMode = true
 		ib.searchQuery = ""
 		ib.searchIdx = 0
+		ib.clearSlashSuggestions()
 		return
 	}
 
@@ -69,6 +72,7 @@ func (ib *inputBar) restoreHistoryEntry(entry inputHistoryEntry) {
 	ib.ti.CursorEnd()
 	ib.pastedContents = clonePastedContents(entry.PastedContents)
 	ib.nextPasteID = nextPasteID(ib.pastedContents)
+	ib.refreshSlashSuggestions()
 }
 
 func (ib *inputBar) restoreNextHistory() bool {
@@ -83,6 +87,7 @@ func (ib *inputBar) restoreNextHistory() bool {
 		ib.ti.SetValue("")
 		ib.pastedContents = nil
 		ib.nextPasteID = 1
+		ib.clearSlashSuggestions()
 		return true
 	}
 
@@ -110,18 +115,23 @@ func (ib *inputBar) applySearch() {
 }
 
 func (ib *inputBar) handleTabComplete() {
+	if ib.hasSlashSuggestions() {
+		ib.acceptSlashSuggestion()
+		return
+	}
+
 	val := ib.ti.Value()
 	// 경로(/home/... 등)는 자동완성 대상에서 제외
 	if !IsSlashCommandPrefix(val) {
 		return
 	}
-	for _, cmd := range slashCommands {
-		if strings.HasPrefix(cmd, val) && cmd != val {
-			ib.ti.SetValue(cmd)
-			ib.ti.CursorEnd()
-			return
-		}
+	matches := slashCommandMatchesPrefix(val)
+	if len(matches) == 0 {
+		return
 	}
+	ib.ti.SetValue(slashCommandDisplayName(matches[0]))
+	ib.ti.CursorEnd()
+	ib.clearSlashSuggestions()
 }
 
 func (ib *inputBar) shouldRecallHistory() bool {

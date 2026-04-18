@@ -49,9 +49,10 @@ func (t *ServiceStatusTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *ServiceStatusTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
+func (t *ServiceStatusTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (ToolOutcome, error) {
 	service, _ := argString(args, "service", false)
 	action, _ := argString(args, "action", false)
+	action = strings.ToLower(strings.TrimSpace(action))
 	if action == "" {
 		action = "status"
 	}
@@ -59,21 +60,21 @@ func (t *ServiceStatusTool) Execute(ctx context.Context, args map[string]interfa
 	platform := executor.CommandPlatform(exec)
 	cmd := buildServiceCommand(service, action, platform)
 	if cmd == "" {
-		return "unsupported action: " + action, nil
+		return ToolOutcome{Content: "unsupported action: " + action, Success: false, ErrorMessage: "unsupported action: " + action}, nil
 	}
 
 	result, err := exec.Execute(ctx, cmd)
 	if err != nil {
-		return fmt.Sprintf("execution failed: %s", err), nil
+		return ToolOutcome{Content: fmt.Sprintf("execution failed: %s", err), Success: true}, nil
 	}
 	if result.ExitCode != 0 && result.Stdout == "" {
-		return fmt.Sprintf("error (exit %d):\n%s", result.ExitCode, result.Stderr), nil
+		return ToolOutcome{Content: fmt.Sprintf("error (exit %d):\n%s", result.ExitCode, result.Stderr), Success: true}, nil
 	}
 	out := strings.TrimSpace(result.Stdout)
 	if result.Stderr != "" {
 		out += "\n[stderr]\n" + strings.TrimSpace(result.Stderr)
 	}
-	return out, nil
+	return ToolOutcome{Content: out, Success: true}, nil
 }
 
 func buildServiceCommand(service, action string, platform executor.Platform) string {

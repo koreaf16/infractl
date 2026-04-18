@@ -13,12 +13,12 @@ import (
 
 // 트리 문자 상수
 const (
-	treeBranch    = "├─"
+	treeBranch     = "├─"
 	treeLastBranch = "└─"
-	treePipe      = "│"
-	treeResult    = "⎿"
-	treeIndent    = "   "
-	treeBranchPad = "   " // branch 후 들여쓰기
+	treePipe       = "│"
+	treeResult     = "⎿"
+	treeIndent     = "   "
+	treeBranchPad  = "   " // branch 후 들여쓰기
 )
 
 // progressStatus는 진행 항목의 상태를 나타낸다.
@@ -26,20 +26,22 @@ type progressStatus int
 
 const (
 	statusRunning progressStatus = iota
+	statusWaiting
 	statusDone
 	statusError
 )
 
 // progressItem은 단일 도구 실행 항목이다.
 type progressItem struct {
-	toolID     string
-	toolName   string
-	target     string
-	args       map[string]any
-	status     progressStatus
-	duration   time.Duration
-	startTime  time.Time
-	lastOutput string
+	toolID       string
+	toolName     string
+	target       string
+	args         map[string]any
+	status       progressStatus
+	duration     time.Duration
+	startTime    time.Time
+	lastOutput   string
+	metadataJSON string
 }
 
 // progressTree는 현재 턴의 도구 실행 트리를 관리한다.
@@ -67,12 +69,17 @@ func (pt *progressTree) AddTool(toolID, name, target string, args map[string]any
 }
 
 // CompleteTool은 toolID에 해당하는 도구를 완료 처리한다.
-func (pt *progressTree) CompleteTool(toolID string, duration time.Duration, success bool) {
+func (pt *progressTree) CompleteTool(toolID string, duration time.Duration, success bool, metadataJSON string) {
 	for i := range pt.items {
 		if pt.items[i].toolID == toolID && pt.items[i].status == statusRunning {
 			pt.items[i].duration = duration
+			pt.items[i].metadataJSON = metadataJSON
 			if success {
-				pt.items[i].status = statusDone
+				if meta, ok := parseTaskProgressMetadata(metadataJSON); ok && meta.PendingVerification() {
+					pt.items[i].status = statusWaiting
+				} else {
+					pt.items[i].status = statusDone
+				}
 			} else {
 				pt.items[i].status = statusError
 			}
@@ -92,6 +99,26 @@ func (pt *progressTree) SetOutput(toolID, line string) {
 			pt.items[i].lastOutput = truncateStr(line, 60)
 			return
 		}
+	}
+}
+
+func (pt *progressTree) UpdateTaskProgress(toolID, metadataJSON string) {
+	for i := range pt.items {
+		if pt.items[i].toolID != toolID {
+			continue
+		}
+		pt.items[i].metadataJSON = metadataJSON
+		if meta, ok := parseTaskProgressMetadata(metadataJSON); ok {
+			if meta.PendingVerification() {
+				pt.items[i].status = statusWaiting
+			} else if meta.VerificationStatus == "verified" {
+				pt.items[i].status = statusDone
+			}
+		}
+		break
+	}
+	if len(pt.phases) > 0 {
+		pt.updatePhaseStatuses()
 	}
 }
 
@@ -160,6 +187,8 @@ func (pt *progressTree) calcPhaseStatus(toolIDs []string) progressStatus {
 				case statusRunning:
 					hasRunning = true
 					allDone = false
+				case statusWaiting:
+					allDone = false
 				case statusError:
 					hasError = true
 				case statusDone:
@@ -173,6 +202,9 @@ func (pt *progressTree) calcPhaseStatus(toolIDs []string) progressStatus {
 	}
 	if hasError {
 		return statusError
+	}
+	if !allDone {
+		return statusWaiting
 	}
 	if allDone {
 		return statusDone
@@ -202,6 +234,16 @@ func (pt *progressTree) RunningCount() int {
 	return count
 }
 
+func (pt *progressTree) WaitingCount() int {
+	count := 0
+	for _, item := range pt.items {
+		if item.status == statusWaiting {
+			count++
+		}
+	}
+	return count
+}
+
 // View는 진행 트리를 렌더링한다.
 // Phase가 있으면 Phase 그룹 뷰, 없으면 flat 뷰를 사용한다.
 func (pt *progressTree) View() string {
@@ -220,6 +262,7 @@ func (pt *progressTree) View() string {
 
 	// 헤더
 	running := pt.RunningCount()
+	waiting := pt.WaitingCount()
 	if len(pt.items) == 1 && running == 1 {
 		item := pt.items[0]
 		elapsed := formatElapsedShort(time.Since(item.startTime))
@@ -244,6 +287,8 @@ func (pt *progressTree) View() string {
 	b.WriteString(treeIndent + StyleClaude().Render("●") + " ")
 	if running > 0 {
 		b.WriteString(StyleThinking.Render(fmt.Sprintf("Running %d tools...", running)))
+	} else if waiting > 0 {
+		b.WriteString(StyleCmdBoxDim.Render(fmt.Sprintf("%d tasks waiting for verification", waiting)))
 	} else {
 		b.WriteString(StyleInfoBarDim.Render(fmt.Sprintf("%d tool uses", len(pt.items))))
 	}
@@ -275,6 +320,9 @@ func renderTreeItem(item progressItem, isLast bool) string {
 
 	// 상태 표시
 	switch item.status {
+	case statusWaiting:
+		elapsed := formatElapsedShort(item.duration)
+		b.WriteString(" " + StyleCmdBoxDim.Render("(검증 대기, "+elapsed+")"))
 	case statusDone:
 		elapsed := formatElapsedShort(item.duration)
 		b.WriteString(" " + StyleCmdBoxDim.Render("("+elapsed+")"))

@@ -1,0 +1,122 @@
+# system_risk_deny.yaml — system_risk.sh 가 deny 해야 하는 케이스 (20개)
+# format: tool / command / expect_deny (bool) / expect_keyword (deny reason 키워드, 선택)
+cases:
+  - id: sr_01
+    tool: bash
+    command: "rm -rf /"
+    expect_deny: true
+    expect_keyword: "rm -rf"
+
+  - id: sr_02
+    tool: bash
+    command: "rm -rf /etc"
+    expect_deny: true
+    expect_keyword: "rm -rf"
+
+  - id: sr_03
+    tool: bash
+    command: "rm -rf /etc/*"
+    expect_deny: true
+    expect_keyword: "rm -rf"
+
+  - id: sr_04
+    tool: bash
+    command: "rm -rf /var/log"
+    expect_deny: true
+    expect_keyword: "rm -rf"
+
+  - id: sr_05
+    tool: bash
+    command: "rm -rf /usr/bin"
+    expect_deny: true
+    expect_keyword: "rm -rf"
+
+  - id: sr_06
+    tool: bash
+    command: "rm -rf /bin"
+    expect_deny: true
+    expect_keyword: "rm -rf"
+
+  - id: sr_07
+    tool: bash
+    command: "rm -rf /sbin"
+    expect_deny: true
+    expect_keyword: "rm -rf"
+
+  - id: sr_08
+    tool: bash
+    command: "rm -rf /root"
+    expect_deny: true
+    expect_keyword: "rm -rf"
+
+  - id: sr_09
+    tool: bash
+    command: "rm -rf ~"
+    expect_deny: true
+    expect_keyword: "rm -rf"
+
+  - id: sr_10
+    tool: bash
+    command: "dd if=/dev/zero of=/dev/sda"
+    expect_deny: true
+    expect_keyword: "dd"
+
+  - id: sr_11
+    tool: bash
+    command: "dd if=/dev/urandom of=/dev/nvme0n1 bs=1M"
+    expect_deny: true
+    expect_keyword: "dd"
+
+  - id: sr_12
+    tool: bash
+    command: "mkfs.ext4 /dev/sda1"
+    expect_deny: true
+    expect_keyword: "mkfs"
+
+  - id: sr_13
+    tool: bash
+    command: ":(){ :|:& };:"
+    expect_deny: true
+    expect_keyword: "fork bomb"
+
+  - id: sr_14
+    tool: bash
+    command: "chmod -R 777 /"
+    expect_deny: true
+    expect_keyword: "chmod"
+
+  - id: sr_15
+    tool: bash
+    command: "chmod -R 777 /etc"
+    expect_deny: true
+    expect_keyword: "chmod"
+
+  - id: sr_16
+    tool: bash
+    command: "chown -R nobody /etc"
+    expect_deny: true
+    expect_keyword: "chown"
+
+  - id: sr_17
+    tool: bash
+    command: "chown -R root:root /var"
+    expect_deny: true
+    expect_keyword: "chown"
+
+  - id: sr_18
+    tool: bash
+    command: "iptables -F"
+    expect_deny: true
+    expect_keyword: "iptables"
+
+  - id: sr_19
+    tool: bash
+    command: "ufw disable"
+    expect_deny: true
+    expect_keyword: "ufw"
+
+  - id: sr_20
+    tool: bash
+    command: "cat /dev/urandom > /dev/sda"
+    expect_deny: true
+    expect_keyword: "디바이스"

@@ -28,7 +28,7 @@ var (
 )
 
 var (
-	passwordPromptRegex = regexp.MustCompile(`(?i)(password:|passphrase for .*:|password for .*:|password for [^ ]+|[A-Za-z0-9_.-]+@[A-Za-z0-9_.:-]+'s password:)`)
+	passwordPromptRegex = regexp.MustCompile(`(?i)(\[sudo\]\s+password for .*:|\[sudo\]\s+[A-Za-z0-9_.-]+의 암호:|password:|passphrase for .*:|password for .*:|password for [^ ]+|[A-Za-z0-9_.-]+@[A-Za-z0-9_.:-]+'s password:|암호:|パスワード:)`)
 	sudoDeniedRegex     = regexp.MustCompile(`(?i)(not in the sudoers file|is not allowed to run sudo|may not run sudo|permission denied)`)
 	authFailureRegex    = regexp.MustCompile(`(?i)(authentication failure|sorry, try again|incorrect password)`)
 )
@@ -183,10 +183,10 @@ func (w WrappedExecutor) PrivilegeContext() Context {
 }
 
 // ExecuteStream forwards stream execution when supported.
-func (w WrappedExecutor) ExecuteStream(ctx context.Context, command string, onLine func(string)) (executor.ExecResult, error) {
+func (w WrappedExecutor) ExecuteStream(ctx context.Context, command string, onLine func(string)) (executor.ExecSession, error) {
 	se, ok := w.Executor.(executor.StreamExecutor)
 	if !ok {
-		return executor.ExecResult{}, fmt.Errorf("stream execution is not supported on %s", executor.ExecutionContextLabel(w.Executor))
+		return nil, fmt.Errorf("stream execution is not supported on %s", executor.ExecutionContextLabel(w.Executor))
 	}
 	return se.ExecuteStream(ctx, command, onLine)
 }
@@ -210,10 +210,10 @@ func (w WrappedExecutor) SendEOF() error {
 }
 
 // ExecuteInteractive forwards interactive execution when supported.
-func (w WrappedExecutor) ExecuteInteractive(ctx context.Context, spec executor.InteractiveSpec, onChunk func(string)) (executor.ExecResult, error) {
+func (w WrappedExecutor) ExecuteInteractive(ctx context.Context, spec executor.InteractiveSpec, onChunk func(string)) (executor.ExecSession, error) {
 	ie, ok := w.Executor.(executor.InteractiveExecutor)
 	if !ok {
-		return executor.ExecResult{}, fmt.Errorf("interactive execution is not supported on %s", executor.ExecutionContextLabel(w.Executor))
+		return nil, fmt.Errorf("interactive execution is not supported on %s", executor.ExecutionContextLabel(w.Executor))
 	}
 	return ie.ExecuteInteractive(ctx, spec, onChunk)
 }
@@ -230,16 +230,26 @@ func (w WrappedExecutor) ShellName() string {
 
 // Plan describes the commands needed to execute a shell command with elevated privileges.
 type Plan struct {
-	Method            Method
-	User              string
-	ValidateCommand   string
-	NonInteractiveRun string
-	InteractiveRun    string
-	PromptToken       string
-	RequirePTY        bool
+	Method             Method
+	User               string
+	UserCheckCommand   string // pre-flight: verify the target OS user exists
+	ValidateCommand    string
+	NonInteractiveRun  string
+	InteractiveRun     string
+	ProfileFallbackRun string // last-resort: source user profile as current user
+	PromptToken        string
+	RequirePTY         bool
 }
 
 // BuildPlan constructs a privilege execution plan for Unix-like targets.
+//
+// Execution order:
+//  1. UserCheckCommand  — abort early if the target user does not exist.
+//  2. ValidateCommand   — check whether sudo can run non-interactively (sudo only).
+//  3. NonInteractiveRun — preferred path (no password required).
+//  4. InteractiveRun    — fallback requiring PTY + password injection.
+//  5. ProfileFallbackRun — last resort: source the user's login profile as the
+//     current SSH user (environment only, no user-context switch).
 func BuildPlan(method Method, user, command string) (Plan, error) {
 	method, ok := ParseMethod(string(method))
 	if !ok || method == MethodNone {
@@ -249,24 +259,43 @@ func BuildPlan(method Method, user, command string) (Plan, error) {
 	user = NormalizeUser(user)
 	quotedUser := executor.QuotePOSIX(user)
 	quotedCmd := executor.QuotePOSIX(command)
+
+	// Profile source fallback: runs as the current SSH user but loads the target
+	// user's login environment. Useful when neither sudo nor su is available.
+	profileFallback := fmt.Sprintf(
+		"bash -c 'homedir=$(getent passwd %s | cut -d: -f6); shell=$(getent passwd %s | cut -d: -f7); "+
+			"for f in \"$homedir/.bash_profile\" \"$homedir/.profile\" \"$homedir/.bashrc\"; do "+
+			"[ -r \"$f\" ] && source \"$f\" 2>/dev/null && break; done; %s'",
+		quotedUser, quotedUser, command,
+	)
+
 	switch method {
 	case MethodSudo:
 		promptToken := "__INFRACTL_PRIVILEGE_PASSWORD__"
 		return Plan{
-			Method:            method,
-			User:              user,
-			ValidateCommand:   fmt.Sprintf("sudo -n -u %s -v", quotedUser),
-			NonInteractiveRun: fmt.Sprintf("sudo -n -u %s -- bash -lc %s", quotedUser, quotedCmd),
-			InteractiveRun:    fmt.Sprintf("sudo -S -p %s -u %s -- bash -lc %s", executor.QuotePOSIX(promptToken), quotedUser, quotedCmd),
-			PromptToken:       promptToken,
-			RequirePTY:        true,
+			Method: method,
+			User:   user,
+			// id(1) is POSIX-portable and queries NSS (handles LDAP/AD users too).
+			UserCheckCommand:   fmt.Sprintf("id %s >/dev/null 2>&1", quotedUser),
+			ValidateCommand:    fmt.Sprintf("sudo -n -u %s -v 2>&1", quotedUser),
+			NonInteractiveRun:  fmt.Sprintf("sudo -n -u %s -- bash -l -c %s", quotedUser, quotedCmd),
+			InteractiveRun:     fmt.Sprintf("sudo -S -p %s -u %s -- bash -l -c %s", executor.QuotePOSIX(promptToken), quotedUser, quotedCmd),
+			ProfileFallbackRun: profileFallback,
+			PromptToken:        promptToken,
+			RequirePTY:         true,
 		}, nil
 	case MethodSU:
+		// su - already launches a login shell; no need to wrap with bash -lc.
+		// runuser(1) is preferred on systemd hosts (no password needed when root),
+		// but we keep su as the universal fallback.
 		return Plan{
-			Method:         method,
-			User:           user,
-			InteractiveRun: fmt.Sprintf("su - %s -c %s", quotedUser, executor.QuotePOSIX("bash -lc "+quotedCmd)),
-			RequirePTY:     true,
+			Method:             method,
+			User:               user,
+			UserCheckCommand:   fmt.Sprintf("id %s >/dev/null 2>&1", quotedUser),
+			NonInteractiveRun:  fmt.Sprintf("runuser -l %s -c %s", quotedUser, quotedCmd),
+			InteractiveRun:     fmt.Sprintf("su - %s -c %s", quotedUser, quotedCmd),
+			ProfileFallbackRun: profileFallback,
+			RequirePTY:         true,
 		}, nil
 	default:
 		return Plan{}, fmt.Errorf("unsupported privilege method: %q", method)
@@ -309,10 +338,10 @@ func IsAuthFailure(output string, promptCount int) bool {
 func CountPromptMatches(method Method, output string, promptToken string) int {
 	switch method {
 	case MethodSudo:
-		if promptToken == "" {
-			return 0
+		if promptToken != "" {
+			return strings.Count(output, promptToken)
 		}
-		return strings.Count(output, promptToken)
+		return len(passwordPromptRegex.FindAllStringIndex(output, -1))
 	case MethodSU:
 		return len(passwordPromptRegex.FindAllStringIndex(output, -1))
 	default:
@@ -327,7 +356,7 @@ func SanitizeOutput(method Method, output, promptToken string) string {
 	if promptToken != "" {
 		output = strings.ReplaceAll(output, promptToken, "")
 	}
-	if method == MethodSU {
+	if method == MethodSU || (method == MethodSudo && promptToken == "") {
 		output = passwordPromptRegex.ReplaceAllString(output, "")
 	}
 	return strings.TrimSpace(output)

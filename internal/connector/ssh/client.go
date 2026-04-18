@@ -1,34 +1,37 @@
 // Package ssh
 // File: client.go
-// Description: SSH 클라이언트 — 연결 관리, 명령 실행, keep-alive
-// Responsibility: SSH 연결 생명주기(연결, 재연결, keep-alive, 종료) 관리
+// Description: SSH 클라이언트 — 연결 수명 주기, 단일 명령 실행, 헬퍼 함수
+// Responsibility: SSH 연결 관리(connect/close)와 비스트리밍 명령 실행(Run) 제공
 
 package ssh
 
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
-	"io"
-	"log/slog"
 	"net"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"golang.org/x/crypto/ssh"
-
 	"github.com/yourorg/infractl/internal/executor"
+	"github.com/yourorg/infractl/internal/workspace"
+	gossh "golang.org/x/crypto/ssh"
 )
 
-const (
-	defaultKeepAlive = 30 * time.Second
-	defaultTimeout   = 30 * time.Second
-)
+const defaultTimeout = 30 * time.Second
 
-// RunResult는 원격 명령 실행 결과를 담는다.
+// Client represents an SSH client connection.
+type Client struct {
+	cfg       *Config
+	conn      *gossh.Client
+	mu        sync.Mutex
+	mgr       *SessionManager
+	lastError error
+}
+
+// RunResult captures the outcome of a non-streaming SSH command execution.
 type RunResult struct {
 	Stdout   string
 	Stderr   string
@@ -36,47 +39,87 @@ type RunResult struct {
 	Duration time.Duration
 }
 
-// Client는 단일 서버에 대한 SSH 연결을 관리한다.
-// 첫 Execute() 호출 시 Lazy 연결하며, 이후 keep-alive로 유지한다.
-type Client struct {
-	cfg       *Config
-	mu        sync.Mutex
-	conn      *ssh.Client
-	connected bool
-	stopKA    context.CancelFunc // keep-alive 고루틴 취소 함수
-
-	sessionMu sync.Mutex
-	stdinPipe io.WriteCloser // RunStream 실행 중에만 유효; InjectStdin이 사용
-	stdinPTY  bool
-
-	sessionMgr    *SessionManager // persistent shell 세션 풀 (lazy init)
-	sessionMgrMu  sync.Mutex
-	sessionMgrCtx context.CancelFunc // reaper 고루틴 취소 함수
-}
-
-// NewClient는 SSH 클라이언트를 생성한다. 아직 연결하지 않는다.
-func NewClient(cfg *Config) *Client {
-	if cfg.Timeout == 0 {
-		cfg.Timeout = defaultTimeout
+// NewClient creates a new SSH client with the given configuration.
+func NewClient(config *Config) *Client {
+	cfg := *config
+	cfg.WorkspaceDir = workspace.RemoteDirOrDefault(cfg.WorkspaceDir)
+	return &Client{
+		cfg: &cfg,
 	}
-	if cfg.KeepAlive == 0 {
-		cfg.KeepAlive = defaultKeepAlive
+}
+
+// ensureConnected establishes the SSH connection if not already connected.
+func (c *Client) ensureConnected(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn != nil {
+		return nil
 	}
-	return &Client{cfg: cfg}
+
+	port := c.cfg.Port
+	if port == 0 {
+		port = 22
+	}
+	addr := net.JoinHostPort(c.cfg.Host, fmt.Sprintf("%d", port))
+
+	sshConfig, err := buildSSHConfig(c.cfg)
+	if err != nil {
+		return fmt.Errorf("ssh config: %w", err)
+	}
+
+	timeout := c.cfg.Timeout
+	if timeout == 0 {
+		timeout = defaultTimeout
+	}
+	dialer := net.Dialer{Timeout: timeout}
+	netConn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		c.lastError = err
+		return fmt.Errorf("dial ssh %s: %w", addr, err)
+	}
+
+	clientConn, chans, reqs, err := gossh.NewClientConn(netConn, addr, sshConfig)
+	if err != nil {
+		_ = netConn.Close()
+		c.lastError = err
+		return fmt.Errorf("ssh new client conn %s: %w", addr, err)
+	}
+	c.conn = gossh.NewClient(clientConn, chans, reqs)
+	c.lastError = nil
+	return nil
 }
 
-// wrapLoginShell은 command를 login shell(bash -l)로 감싼다.
-// SSH exec request는 non-login shell이라 .bash_profile 등이 로드되지 않는다.
-// base64 인코딩으로 heredoc/single-quote 중첩 quoting 문제를 우회한다.
-func wrapLoginShell(command string) string {
-	encoded := base64.StdEncoding.EncodeToString([]byte(command))
-	return fmt.Sprintf("bash -l -c \"$(echo %s | base64 -d)\"", encoded)
+// Close closes the SSH client connection.
+func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn == nil {
+		return nil
+	}
+	err := c.conn.Close()
+	c.conn = nil
+	return err
 }
 
-// Run은 원격 서버에서 command를 실행하고 결과를 반환한다.
-// 출력은 64KB로 제한된다.
+// LastError returns the last error encountered during connection attempts.
+func (c *Client) LastError() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastError
+}
+
+// Host returns the configured host (IP or hostname).
+func (c *Client) Host() string {
+	return c.cfg.Host
+}
+
+// Run executes a command on the remote host without streaming.
 func (c *Client) Run(ctx context.Context, command string) (RunResult, error) {
-	start := time.Now()
+	if err := c.ensureConnected(ctx); err != nil {
+		return RunResult{}, err
+	}
 
 	session, err := c.newSession(ctx)
 	if err != nil {
@@ -88,441 +131,151 @@ func (c *Client) Run(ctx context.Context, command string) (RunResult, error) {
 	session.Stdout = &executor.LimitedWriter{Buf: &stdoutBuf, Limit: executor.MaxOutputBytes}
 	session.Stderr = &executor.LimitedWriter{Buf: &stderrBuf, Limit: executor.MaxOutputBytes}
 
-	runErr := session.Run(wrapLoginShell(command))
-	duration := time.Since(start)
+	start := time.Now()
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- session.Run(wrapLoginShell(command))
+	}()
 
-	exitCode := 0
+	var runErr error
+	select {
+	case runErr = <-runDone:
+	case <-ctx.Done():
+		_ = session.Close()
+		runErr = <-runDone
+		return RunResult{
+			Stdout:   stdoutBuf.String(),
+			Stderr:   stderrBuf.String(),
+			ExitCode: 124,
+			Duration: time.Since(start),
+		}, fmt.Errorf("ssh run command cancelled: %w", ctx.Err())
+	}
 	if runErr != nil {
-		if exitErr, ok := runErr.(*ssh.ExitError); ok {
-			exitCode = exitErr.ExitStatus()
-		} else {
-			return RunResult{}, fmt.Errorf("ssh run command: %w", runErr)
+		if exitErr, ok := runErr.(*gossh.ExitError); ok {
+			// Non-zero exit is an execution result, not a transport error.
+			// Matches local executor contract: ExitError → ExecResult, no error returned.
+			return RunResult{
+				Stdout:   stdoutBuf.String(),
+				Stderr:   stderrBuf.String(),
+				ExitCode: exitErr.ExitStatus(),
+				Duration: time.Since(start),
+			}, nil
 		}
+		return RunResult{}, fmt.Errorf("ssh run command: %w", runErr)
 	}
 
 	return RunResult{
-		Stdout:   executor.TruncateOutput(stdoutBuf.String(), executor.MaxOutputBytes),
-		Stderr:   executor.TruncateOutput(stderrBuf.String(), executor.MaxOutputBytes),
-		ExitCode: exitCode,
-		Duration: duration,
+		Stdout:   stdoutBuf.String(),
+		Stderr:   stderrBuf.String(),
+		ExitCode: 0,
+		Duration: time.Since(start),
 	}, nil
 }
 
-// RunStream은 command를 비블로킹으로 실행하며 stdout을 라인 단위로 스트리밍한다.
-// requirePTY: true이면 PTY를 할당하여 sudo/su/passwd 등 /dev/tty 프롬프트를 stdout으로 캡처한다.
-// onLine: 각 stdout 라인을 수신할 콜백. nil이면 무시.
-// onIdle: 출력이 defaultIdleThreshold(10초) 동안 없을 때 호출. nil이면 무시.
-// 출력은 64KB로 제한된다.
-func (c *Client) RunStream(
-	ctx context.Context,
-	command string,
-	requirePTY bool,
-	onLine func(string),
-	onIdle func(executor.StdinInjector),
-) (RunResult, error) {
-	start := time.Now()
-
-	session, err := c.newSession(ctx)
-	if err != nil {
-		return RunResult{}, err
-	}
-	defer session.Close()
-
-	if requirePTY {
-		modes := ssh.TerminalModes{
-			ssh.ECHO:          0, // 입력 에코 끄기 — 주입된 패스워드가 출력에 노출되지 않도록
-			ssh.TTY_OP_ISPEED: 14400,
-			ssh.TTY_OP_OSPEED: 14400,
-		}
-		if err := session.RequestPty("xterm", 80, 120, modes); err != nil {
-			return RunResult{}, fmt.Errorf("ssh request pty: %w", err)
-		}
-	}
-
-	stdinPipe, err := session.StdinPipe()
-	if err != nil {
-		return RunResult{}, fmt.Errorf("ssh stdin pipe: %w", err)
-	}
-	c.setStdinPipe(stdinPipe, requirePTY)
-	defer func() {
-		c.clearStdinPipe(stdinPipe)
-		stdinPipe.Close()
-	}()
-
-	stdoutPipe, err := session.StdoutPipe()
-	if err != nil {
-		return RunResult{}, fmt.Errorf("ssh stdout pipe: %w", err)
-	}
-
-	// PTY에서는 stderr가 stdout에 합쳐진다. PTY 없으면 별도 캡처.
-	var stderrBuf bytes.Buffer
-	if !requirePTY {
-		session.Stderr = &executor.LimitedWriter{Buf: &stderrBuf, Limit: executor.MaxOutputBytes}
-	}
-
-	if err := session.Start(wrapLoginShell(command)); err != nil {
-		return RunResult{}, fmt.Errorf("ssh start command: %w", err)
-	}
-
-	watcher := executor.NewIdleWatcher(0) // 0 = 기본 10초
-	watcher.Start(ctx)
-	defer watcher.Stop()
-
-	if onIdle != nil {
-		go func() {
-			select {
-			case <-watcher.Triggered():
-				onIdle(c)
-			case <-ctx.Done():
-			}
-		}()
-	}
-
-	// chunk 기반 라인 조립: "password:" 같은 \n 없는 프롬프트도 감지한다.
-	lineCh := executor.StartLineAssembler(executor.StartPipeReader(stdoutPipe))
-
-	var stdoutLines []string
-	for line := range lineCh {
-		if requirePTY {
-			line = executor.StripANSI(line)
-		}
-		watcher.Ping()
-		stdoutLines = append(stdoutLines, line)
-		if onLine != nil {
-			onLine(line)
-		}
-	}
-
-	waitErr := session.Wait()
-	duration := time.Since(start)
-
-	exitCode := 0
-	if waitErr != nil {
-		if exitErr, ok := waitErr.(*ssh.ExitError); ok {
-			exitCode = exitErr.ExitStatus()
-		} else {
-			return RunResult{}, fmt.Errorf("ssh wait command: %w", waitErr)
-		}
-	}
-
-	return RunResult{
-		Stdout:   executor.TruncateOutput(strings.Join(stdoutLines, "\n"), executor.MaxOutputBytes),
-		Stderr:   executor.TruncateOutput(stderrBuf.String(), executor.MaxOutputBytes),
-		ExitCode: exitCode,
-		Duration: duration,
-	}, nil
-}
-
-// RunInteractive executes an SSH command and streams raw terminal chunks.
-func (c *Client) RunInteractive(
-	ctx context.Context,
-	command string,
-	requirePTY bool,
-	onChunk func(string),
-) (RunResult, error) {
-	start := time.Now()
-
-	session, err := c.newSession(ctx)
-	if err != nil {
-		return RunResult{}, err
-	}
-	defer session.Close()
-
-	if requirePTY {
-		modes := ssh.TerminalModes{
-			ssh.ECHO:          1,
-			ssh.TTY_OP_ISPEED: 14400,
-			ssh.TTY_OP_OSPEED: 14400,
-		}
-		if err := session.RequestPty("xterm", 80, 120, modes); err != nil {
-			return RunResult{}, fmt.Errorf("ssh request pty: %w", err)
-		}
-	}
-
-	stdinPipe, err := session.StdinPipe()
-	if err != nil {
-		return RunResult{}, fmt.Errorf("ssh stdin pipe: %w", err)
-	}
-	c.setStdinPipe(stdinPipe, requirePTY)
-	defer func() {
-		c.clearStdinPipe(stdinPipe)
-		stdinPipe.Close()
-	}()
-
-	stdoutPipe, err := session.StdoutPipe()
-	if err != nil {
-		return RunResult{}, fmt.Errorf("ssh stdout pipe: %w", err)
-	}
-
-	if !requirePTY {
-		session.Stderr = &executor.LimitedWriter{Buf: &bytes.Buffer{}, Limit: executor.MaxOutputBytes}
-	}
-
-	if err := session.Start(wrapLoginShell(command)); err != nil {
-		return RunResult{}, fmt.Errorf("ssh start command: %w", err)
-	}
-
-	var outputBuf bytes.Buffer
-	readBuf := make([]byte, 1024)
-	for {
-		n, readErr := stdoutPipe.Read(readBuf)
-		if n > 0 {
-			chunk := string(readBuf[:n])
-			outputBuf.WriteString(chunk)
-			if onChunk != nil {
-				onChunk(chunk)
-			}
-		}
-		if readErr != nil {
-			if readErr == io.EOF {
-				break
-			}
-			return RunResult{}, fmt.Errorf("ssh interactive read: %w", readErr)
-		}
-	}
-
-	waitErr := session.Wait()
-	duration := time.Since(start)
-
-	exitCode := 0
-	if waitErr != nil {
-		if exitErr, ok := waitErr.(*ssh.ExitError); ok {
-			exitCode = exitErr.ExitStatus()
-		} else {
-			return RunResult{}, fmt.Errorf("ssh wait command: %w", waitErr)
-		}
-	}
-
-	return RunResult{
-		Stdout:   executor.TruncateOutput(outputBuf.String(), executor.MaxOutputBytes),
-		ExitCode: exitCode,
-		Duration: duration,
-	}, nil
-}
-
-// InjectStdin은 현재 RunStream으로 실행 중인 프로세스의 stdin에 line+"\n"을 쓴다.
-// executor.StdinInjector 인터페이스를 구현한다.
-func (c *Client) InjectStdin(line string) error {
-	c.sessionMu.Lock()
-	pipe := c.stdinPipe
-	c.sessionMu.Unlock()
-
-	if pipe == nil {
-		return fmt.Errorf("inject stdin: no active session stdin pipe")
-	}
-	if _, err := fmt.Fprintln(pipe, line); err != nil {
-		return fmt.Errorf("inject stdin: %w", err)
-	}
-	return nil
-}
-
-// SendEOF closes plain stdin pipes or injects Ctrl-D (EOT) into PTY-backed sessions.
-func (c *Client) SendEOF() error {
-	c.sessionMu.Lock()
-	pipe := c.stdinPipe
-	isPTY := c.stdinPTY
-	c.sessionMu.Unlock()
-
-	if pipe == nil {
-		return fmt.Errorf("send EOF: no active session stdin pipe")
-	}
-	if isPTY {
-		if _, err := pipe.Write([]byte{0x04}); err != nil {
-			return fmt.Errorf("send EOF: %w", err)
-		}
-		return nil
-	}
-	if err := pipe.Close(); err != nil {
-		return fmt.Errorf("send EOF: %w", err)
-	}
-	c.clearStdinPipe(pipe)
-	return nil
-}
-
-func (c *Client) setStdinPipe(pipe io.WriteCloser, isPTY bool) {
-	c.sessionMu.Lock()
-	defer c.sessionMu.Unlock()
-	c.stdinPipe = pipe
-	c.stdinPTY = isPTY
-}
-
-func (c *Client) clearStdinPipe(pipe io.WriteCloser) {
-	c.sessionMu.Lock()
-	defer c.sessionMu.Unlock()
-	if c.stdinPipe == pipe {
-		c.stdinPipe = nil
-		c.stdinPTY = false
-	}
-}
-
-// SessionMgr returns the SessionManager for this client, creating it lazily on first call.
-func (c *Client) SessionMgr() *SessionManager {
-	c.sessionMgrMu.Lock()
-	defer c.sessionMgrMu.Unlock()
-	if c.sessionMgr == nil {
-		ctx, cancel := context.WithCancel(context.Background())
-		c.sessionMgrCtx = cancel
-		c.sessionMgr = newSessionManager(ctx, c)
-	}
-	return c.sessionMgr
-}
-
-// Close는 persistent shell 세션, keep-alive 고루틴, SSH 연결을 순서대로 종료한다.
-func (c *Client) Close() error {
-	// 1. persistent shell 세션 전체 닫기
-	c.sessionMgrMu.Lock()
-	mgr := c.sessionMgr
-	cancelMgr := c.sessionMgrCtx
-	c.sessionMgr = nil
-	c.sessionMgrCtx = nil
-	c.sessionMgrMu.Unlock()
-
-	if cancelMgr != nil {
-		cancelMgr() // reaper 고루틴 종료
-	}
-	if mgr != nil {
-		mgr.CloseAll()
-	}
-
-	// 2. SSH 연결 닫기
+// newSession creates a new SSH session. Caller must not hold c.mu.
+func (c *Client) newSession(ctx context.Context) (*gossh.Session, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.stopKA != nil {
-		c.stopKA()
-		c.stopKA = nil
-	}
-	if c.conn != nil {
-		err := c.conn.Close()
-		c.conn = nil
-		c.connected = false
-		return err
-	}
-	return nil
-}
-
-// newSession은 연결을 보장하고 새 SSH 세션을 반환한다.
-// 세션 생성에 실패하면 한 번 재연결을 시도한다.
-func (c *Client) newSession(ctx context.Context) (*ssh.Session, error) {
-	if err := c.ensureConnected(ctx); err != nil {
-		return nil, fmt.Errorf("ssh connect %s: %w", c.cfg.Host, err)
+	if c.conn == nil {
+		if c.lastError != nil {
+			return nil, fmt.Errorf("ssh not connected (last error: %w)", c.lastError)
+		}
+		return nil, fmt.Errorf("ssh not connected")
 	}
 
 	session, err := c.conn.NewSession()
-	if err == nil {
-		return session, nil
-	}
-
-	// 세션 생성 실패 → 연결이 끊긴 것으로 간주하고 재연결 시도
-	c.markDisconnected()
-	if err2 := c.ensureConnected(ctx); err2 != nil {
-		return nil, fmt.Errorf("ssh reconnect %s: %w", c.cfg.Host, err2)
-	}
-	session, err = c.conn.NewSession()
 	if err != nil {
 		return nil, fmt.Errorf("ssh new session: %w", err)
 	}
 	return session, nil
 }
 
-// ensureConnected는 연결이 없으면 SSH 연결을 수립한다.
-func (c *Client) ensureConnected(ctx context.Context) error {
+// SessionMgr returns the session manager for persistent shell sessions.
+// The manager is created lazily on first access.
+func (c *Client) SessionMgr() *SessionManager {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	if c.connected && c.conn != nil {
-		return nil
+	if c.mgr == nil {
+		c.mgr = newSessionManager(context.Background(), c)
 	}
-	return c.connect(ctx)
+	return c.mgr
 }
 
-// connect는 SSH 연결을 수립한다. 호출 전 c.mu를 잠가야 한다.
-func (c *Client) connect(ctx context.Context) error {
-	authMethods, err := c.buildAuthMethods()
-	if err != nil {
-		return fmt.Errorf("build auth methods: %w", err)
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+// requestPTY allocates a pseudo-terminal on the SSH session.
+// ECHO is disabled (0) so that passwords injected via stdin are not echoed back to stdout.
+// All PTY-based execution in Infractl is agent-driven (no human typing), so echo is unnecessary.
+func requestPTY(session *gossh.Session) error {
+	modes := gossh.TerminalModes{
+		gossh.ECHO:          0,
+		gossh.TTY_OP_ISPEED: 14400,
+		gossh.TTY_OP_OSPEED: 14400,
 	}
-
-	sshCfg := &ssh.ClientConfig{
-		User:            c.cfg.User,
-		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // Phase 4에서 known_hosts 검증 추가
-		Timeout:         c.cfg.Timeout,
+	if err := session.RequestPty("xterm", 80, 120, modes); err != nil {
+		return fmt.Errorf("ssh request pty: %w", err)
 	}
-
-	dialer := &net.Dialer{Timeout: c.cfg.Timeout}
-	netConn, err := dialer.DialContext(ctx, "tcp", c.cfg.Addr())
-	if err != nil {
-		return fmt.Errorf("tcp dial %s: %w", c.cfg.Addr(), err)
-	}
-
-	sshConn, chans, reqs, err := ssh.NewClientConn(netConn, c.cfg.Addr(), sshCfg)
-	if err != nil {
-		netConn.Close()
-		return fmt.Errorf("ssh handshake %s: %w", c.cfg.Addr(), err)
-	}
-
-	c.conn = ssh.NewClient(sshConn, chans, reqs)
-	c.connected = true
-
-	kaCtx, kaCancel := context.WithCancel(context.Background())
-	c.stopKA = kaCancel
-	go c.keepalive(kaCtx)
-
-	slog.Info("ssh connected", "host", c.cfg.Host, "user", c.cfg.User)
 	return nil
 }
 
-// buildAuthMethods는 설정에 따라 SSH 인증 방법 목록을 구성한다.
-func (c *Client) buildAuthMethods() ([]ssh.AuthMethod, error) {
-	switch c.cfg.AuthType {
-	case "key":
-		keyData, err := os.ReadFile(c.cfg.KeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("read ssh key %s: %w", c.cfg.KeyPath, err)
-		}
-		signer, err := ssh.ParsePrivateKey(keyData)
-		if err != nil {
-			return nil, fmt.Errorf("parse ssh key: %w", err)
-		}
-		return []ssh.AuthMethod{ssh.PublicKeys(signer)}, nil
+// wrapLoginShell wraps the command with a login shell.
+func wrapLoginShell(command string) string {
+	if strings.HasPrefix(command, "sudo -i") || strings.HasPrefix(command, "su -") {
+		return command
+	}
+	if command == "bash -l" || command == "sh -l" || command == "pwsh -l" {
+		return command
+	}
+	return fmt.Sprintf("bash -l -c %s", sshQuote(command))
+}
+
+// sshQuote quotes a string for safe use within an SSH command.
+// Single quotes are escaped using the standard POSIX idiom: ' → '"'"'
+// (close quote, literal apostrophe in double-quotes, reopen quote).
+// This preserves all special characters ($, !, @, #, spaces, parentheses)
+// because the content of a single-quoted string is never interpreted by bash.
+func sshQuote(s string) string {
+	return `'` + strings.ReplaceAll(s, `'`, `'"'"'`) + `'`
+}
+
+// buildSSHConfig creates a gossh.ClientConfig from the application Config.
+func buildSSHConfig(cfg *Config) (*gossh.ClientConfig, error) {
+	sshCfg := &gossh.ClientConfig{
+		User:            cfg.User,
+		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+	}
+
+	timeout := cfg.Timeout
+	if timeout == 0 {
+		timeout = defaultTimeout
+	}
+	sshCfg.Timeout = timeout
+
+	switch cfg.AuthType {
 	case "password":
-		return []ssh.AuthMethod{ssh.Password(c.cfg.Password)}, nil
-	default:
-		return nil, fmt.Errorf("unknown auth type: %s", c.cfg.AuthType)
-	}
-}
-
-// keepalive는 주기적으로 keep-alive 요청을 보내 연결을 유지한다.
-func (c *Client) keepalive(ctx context.Context) {
-	ticker := time.NewTicker(c.cfg.KeepAlive)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			c.mu.Lock()
-			conn := c.conn
-			c.mu.Unlock()
-
-			if conn == nil {
-				return
-			}
-			_, _, err := conn.SendRequest("keepalive@openssh.com", true, nil)
-			if err != nil {
-				slog.Debug("ssh keepalive failed, marking disconnected", "host", c.cfg.Host)
-				c.markDisconnected()
-				return
-			}
+		sshCfg.Auth = []gossh.AuthMethod{
+			gossh.Password(cfg.Password),
 		}
+	case "key":
+		keyBytes, err := os.ReadFile(cfg.KeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("read ssh key %s: %w", cfg.KeyPath, err)
+		}
+		var signer gossh.Signer
+		if cfg.Password != "" {
+			signer, err = gossh.ParsePrivateKeyWithPassphrase(keyBytes, []byte(cfg.Password))
+		} else {
+			signer, err = gossh.ParsePrivateKey(keyBytes)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("parse ssh key %s: %w", cfg.KeyPath, err)
+		}
+		sshCfg.Auth = []gossh.AuthMethod{
+			gossh.PublicKeys(signer),
+		}
+	default:
+		return nil, fmt.Errorf("unsupported auth type: %s", cfg.AuthType)
 	}
-}
-
-// markDisconnected는 연결 상태를 끊긴 것으로 표시한다.
-func (c *Client) markDisconnected() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.connected = false
+	return sshCfg, nil
 }

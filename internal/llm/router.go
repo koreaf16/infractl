@@ -73,7 +73,7 @@ func buildSystemPrompt(hasReasoning, hasFast bool) string {
 Respond with exactly one word: "reasoning", "general", or "fast".
 - reasoning: multi-step analysis, complex debugging, architecture decisions, root cause analysis
 - general: standard operations, configuration, moderate complexity queries
-- fast: simple lookups, status checks, formatting, yes/no questions`
+- fast: simple lookups, status checks, formatting, yes/no questions, registration/CRUD with known parameters`
 	}
 	// 2대 모드: reasoning + general (fast 없음)
 	return `You are a task complexity classifier.

@@ -48,7 +48,7 @@ func renderPhaseView(phases []phase, items []progressItem) string {
 		b.WriteString("\n")
 
 		// 실행 중인 Phase만 도구 세부 정보 펼침
-		if ph.status == statusRunning {
+		if ph.status == statusRunning || ph.status == statusWaiting {
 			phaseTools := filterToolsByIDs(items, ph.tools)
 			for i, item := range phaseTools {
 				isLast := i == len(phaseTools)-1
@@ -81,6 +81,9 @@ func renderPhaseToolItem(item progressItem, isLast bool) string {
 	case statusDone:
 		elapsed := formatElapsedShort(item.duration)
 		b.WriteString(" " + StyleCmdBoxDim.Render("("+elapsed+")"))
+	case statusWaiting:
+		elapsed := formatElapsedShort(item.duration)
+		b.WriteString(" " + StyleCmdBoxDim.Render("(검증 대기, "+elapsed+")"))
 	case statusError:
 		elapsed := formatElapsedShort(item.duration)
 		b.WriteString(" " + StyleError.Render("✗") + " " +
@@ -101,6 +104,8 @@ func phaseStatusIcon(status progressStatus) string {
 		return phaseIconError
 	case statusRunning:
 		return phaseIconRunning
+	case statusWaiting:
+		return phaseIconPending
 	default:
 		return phaseIconPending
 	}
@@ -114,6 +119,8 @@ func phaseStatusStyle(status progressStatus) func(strs ...string) string {
 		return StyleError.Render
 	case statusRunning:
 		return StyleClaude().Render
+	case statusWaiting:
+		return StyleCmdBoxDim.Render
 	default:
 		return StyleCmdBoxDim.Render
 	}

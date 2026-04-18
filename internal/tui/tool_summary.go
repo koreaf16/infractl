@@ -17,7 +17,7 @@ const maxPreviewLines = 10 // 결과 본문 기본 미리보기 줄 수
 
 // toolSummary는 도구별 결과 요약 한 줄을 생성한다.
 // 형식: "  ⎿  Done (1.2s)" 또는 "  ⎿  Wrote 84 lines to statusbar.go (0.3s)"
-func toolSummary(toolName string, args map[string]any, result string, duration time.Duration, success bool) string {
+func toolSummary(toolName string, args map[string]any, result string, metadataJSON string, duration time.Duration, success bool) string {
 	prefix := StyleResponseBracket.Render("  ⎿  ")
 	dur := StyleCmdBoxDim.Render(" (" + formatElapsedShort(duration) + ")")
 
@@ -27,7 +27,15 @@ func toolSummary(toolName string, args map[string]any, result string, duration t
 	case "file_read":
 		return prefix + summaryFileRead(args, result) + dur
 	case "shell_exec":
-		return prefix + summaryShellExec(result, success) + dur
+		return prefix + summaryShellExec(args, result, metadataJSON, success) + dur
+	case "verify_complete":
+		if summary := taskProgressSummaryLine(toolName, args, metadataJSON, success, false); summary != "" {
+			return prefix + summary + dur
+		}
+		if success {
+			return prefix + "검증 완료" + dur
+		}
+		return prefix + "검증 실패" + dur
 	case "web_fetch":
 		return prefix + summaryWebFetch(result) + dur
 	case "web_search":
@@ -74,12 +82,16 @@ func summaryFileRead(args map[string]any, result string) string {
 	return fmt.Sprintf("Read %d lines from %s", lines, shortPath(path))
 }
 
-func summaryShellExec(result string, success bool) string {
+func summaryShellExec(args map[string]any, result string, metadataJSON string, success bool) string {
+	if summary := taskProgressSummaryLine("shell_exec", args, metadataJSON, success, false); summary != "" {
+		return summary
+	}
+
 	lines := len(shellResultOutputLines("shell_exec", result))
 	if success {
-		return fmt.Sprintf("%d lines output", lines)
+		return fmt.Sprintf("Shell command complete (%d lines)", lines)
 	}
-	return fmt.Sprintf("%d lines output (failed)", lines)
+	return fmt.Sprintf("Shell command failed (%d lines)", lines)
 }
 
 func summaryWebFetch(result string) string {
@@ -95,11 +107,51 @@ func summaryWebFetch(result string) string {
 
 func summaryWebSearch(args map[string]any, result string) string {
 	query := argString(args, "query")
-	lines := countLines(result)
+	sources := countWebSearchSources(result)
 	if query != "" {
-		return fmt.Sprintf("Found %d results for \"%s\"", lines, truncateStr(query, 40))
+		if sources > 0 {
+			return fmt.Sprintf("Searched \"%s\" — %d sources fetched", truncateStr(query, 40), sources)
+		}
+		return fmt.Sprintf("Searched \"%s\"", truncateStr(query, 40))
 	}
-	return fmt.Sprintf("Found %d results", lines)
+	if sources > 0 {
+		return fmt.Sprintf("Search complete — %d sources fetched", sources)
+	}
+	return "Search complete"
+}
+
+// countWebSearchSources는 renderWebResearchOutput 결과에서 "Sources:" 섹션의 항목 수를 센다.
+func countWebSearchSources(result string) int {
+	inSources := false
+	count := 0
+	for _, line := range strings.Split(result, "\n") {
+		if strings.TrimSpace(line) == "Sources:" {
+			inSources = true
+			continue
+		}
+		if inSources {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" {
+				continue
+			}
+			if strings.HasPrefix(trimmed, "- ") {
+				count++
+			} else if strings.HasPrefix(trimmed, "Warnings:") || strings.HasPrefix(trimmed, "Warning:") {
+				break
+			}
+		}
+	}
+	return count
+}
+
+// webSearchSourcesLine은 박스 내부에 표시할 소스 개수 요약 1줄을 반환한다.
+// Engine/Keywords는 renderWebSearchBox가 별도로 표시하므로 개수만 반환한다.
+func webSearchSourcesLine(result string) string {
+	n := countWebSearchSources(result)
+	if n > 0 {
+		return fmt.Sprintf("%d sources fetched", n)
+	}
+	return "No results"
 }
 
 func summarySearch(result string) string {
@@ -130,7 +182,7 @@ func toolBoxContent(name string, args map[string]any, result string, success boo
 	case "web_fetch":
 		return []string{summaryWebFetch(result)}
 	case "web_search":
-		return []string{summaryWebSearch(args, result)}
+		return []string{webSearchSourcesLine(result)}
 	case "knowledge_search":
 		return []string{summarySearch(result)}
 	default:

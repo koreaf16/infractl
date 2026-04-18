@@ -77,7 +77,11 @@ func (c *OracleConnector) GenerateTools(info conn.ServiceInfo, creds conn.Creden
 func execWithStream(ctx context.Context, exec executor.Executor, cmd string) (executor.ExecResult, error) {
 	if ct, ok := ctx.Value("tool").(*conn.ConnectorTool); ok && ct.OutputCb != nil {
 		if se, ok := exec.(executor.StreamExecutor); ok {
-			return se.ExecuteStream(ctx, cmd, ct.OutputCb)
+			session, err := se.ExecuteStream(ctx, cmd, ct.OutputCb)
+			if err != nil {
+				return executor.ExecResult{}, err
+			}
+			return session.Wait()
 		}
 	}
 	return exec.Execute(ctx, cmd)

@@ -38,11 +38,12 @@ type ToolStartMsg struct {
 
 // ToolEndMsg는 도구 실행이 완료되었음을 나타낸다.
 type ToolEndMsg struct {
-	ToolID   string
-	Name     string
-	Result   string
-	Duration time.Duration
-	Success  bool
+	ToolID       string
+	Name         string
+	Result       string
+	Duration     time.Duration
+	Success      bool
+	MetadataJSON string
 }
 
 // ResponseDoneMsg는 LLM의 최종 텍스트 응답이 완성되었음을 나타낸다.

@@ -355,7 +355,7 @@ func (m *MemoryService) SearchWithOptions(ctx context.Context, query string, opt
 		topK = 5
 	}
 	if opts.MinScore == 0 {
-		opts.MinScore = 0.05
+		opts.MinScore = 0.7
 	}
 
 	filter := store.MemoryQueryFilter{

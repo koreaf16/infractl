@@ -12,14 +12,15 @@ import (
 	"path/filepath"
 
 	"github.com/yourorg/infractl/internal/executor"
+	"github.com/yourorg/infractl/internal/workspace"
 )
 
 // ReadPlaceholderTool은 저장된 대규모 명령어 출력 원본을 읽어오는 도구이다.
 type ReadPlaceholderTool struct{}
 
-func (t *ReadPlaceholderTool) Name() string         { return "read_placeholder" }
-func (t *ReadPlaceholderTool) IsReadOnly() bool     { return true }
-func (t *ReadPlaceholderTool) IsEnabled() bool      { return true }
+func (t *ReadPlaceholderTool) Name() string     { return "read_placeholder" }
+func (t *ReadPlaceholderTool) IsReadOnly() bool { return true }
+func (t *ReadPlaceholderTool) IsEnabled() bool  { return true }
 
 func (t *ReadPlaceholderTool) Description() string {
 	return "Read the full content of a cached large command output. Use this when you see a placeholder like [Command Output #hash: +N lines] and you need to analyze the full text."
@@ -38,22 +39,22 @@ func (t *ReadPlaceholderTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *ReadPlaceholderTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
+func (t *ReadPlaceholderTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (ToolOutcome, error) {
 	hash, err := argString(args, "hash", true)
 	if err != nil {
-		return "", fmt.Errorf("missing or invalid hash: %w", err)
+		return ToolOutcome{}, fmt.Errorf("missing or invalid hash: %w", err)
 	}
 
-	home, err := os.UserHomeDir()
+	stateDir, err := workspace.StateDir()
 	if err != nil {
-		return "", fmt.Errorf("failed to get user home dir: %w", err)
+		return ToolOutcome{}, fmt.Errorf("failed to get workspace state dir: %w", err)
 	}
 
-	cacheFile := filepath.Join(home, ".infractl", "cache", hash+".txt")
+	cacheFile := filepath.Join(stateDir, "cache", hash+".txt")
 	content, err := os.ReadFile(cacheFile)
 	if err != nil {
-		return "", fmt.Errorf("failed to read placeholder cache (hash: %s): %w", hash, err)
+		return ToolOutcome{}, fmt.Errorf("failed to read placeholder cache (hash: %s): %w", hash, err)
 	}
 
-	return string(content), nil
+	return ToolOutcome{Content: string(content), Success: true}, nil
 }

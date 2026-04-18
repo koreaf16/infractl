@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // ANSI 이스케이프 시퀀스 상수
@@ -56,8 +58,11 @@ func (w *termWriter) PrintReplace(content string) {
 		fmt.Fprint(os.Stdout, "\n")
 	}
 
-	// 줄 수 기록
-	w.prevLines = strings.Count(content, "\n") + 1
+	// 줄 수 기록 (lipgloss.Height를 사용하여 줄 바꿈 고려)
+	w.prevLines = lipgloss.Height(content)
+	if !strings.HasSuffix(content, "\n") {
+		w.prevLines++
+	}
 }
 
 // ClearLive는 라이브 영역을 지우고 줄 카운트를 리셋한다.

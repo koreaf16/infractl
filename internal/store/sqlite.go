@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yourorg/infractl/internal/crypto"
+	"github.com/yourorg/infractl/internal/workspace"
 	_ "modernc.org/sqlite" // SQLite 드라이버 등록
 )
 
@@ -27,6 +28,7 @@ CREATE TABLE IF NOT EXISTS servers (
     credential  TEXT    NOT NULL,
     os          TEXT    DEFAULT '',
     env_profile TEXT    DEFAULT '',
+    workspace_dir TEXT  NOT NULL DEFAULT '~/.infractl/workspace',
     created_at  DATETIME NOT NULL
 );`
 
@@ -43,10 +45,15 @@ func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("derive crypto key: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %s: %w", dbPath, err)
 	}
+
+	// SQLite는 단일 파일 쓰기 기반이므로 MaxOpenConns를 1로 설정하여 경합을 방지한다.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(time.Hour)
 
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
@@ -59,13 +66,9 @@ func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
 	}
 
 	// 단순 스키마 마이그레이션: os, env_profile 칼럼이 없을 수도 있으므로 무시 처리하며 추가 시도
-	db.ExecContext(ctx, "ALTER TABLE servers ADD COLUMN os TEXT DEFAULT ''")
-	db.ExecContext(ctx, "ALTER TABLE servers ADD COLUMN env_profile TEXT DEFAULT ''")
-
-	// WAL 모드 활성화 — 동시 읽기/쓰기 성능 향상
-	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
-		slog.Warn("set WAL mode", "err", err)
-	}
+	_, _ = db.ExecContext(ctx, "ALTER TABLE servers ADD COLUMN os TEXT DEFAULT ''")
+	_, _ = db.ExecContext(ctx, "ALTER TABLE servers ADD COLUMN env_profile TEXT DEFAULT ''")
+	_, _ = db.ExecContext(ctx, "ALTER TABLE servers ADD COLUMN workspace_dir TEXT NOT NULL DEFAULT '~/.infractl/workspace'")
 
 	st := &SQLiteStore{db: db, cryptoKey: key}
 
@@ -100,7 +103,7 @@ func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
 // List는 등록된 모든 서버를 반환한다. 비밀번호 크리덴셜은 복호화하여 반환한다.
 func (s *SQLiteStore) List(ctx context.Context) ([]Server, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, host, port, user, auth_type, credential, os, env_profile, created_at FROM servers ORDER BY name`)
+		`SELECT id, name, host, port, user, auth_type, credential, os, env_profile, workspace_dir, created_at FROM servers ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list servers: %w", err)
 	}
@@ -123,7 +126,7 @@ func (s *SQLiteStore) List(ctx context.Context) ([]Server, error) {
 // Get은 이름으로 서버를 조회한다.
 func (s *SQLiteStore) Get(ctx context.Context, name string) (Server, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, host, port, user, auth_type, credential, os, env_profile, created_at FROM servers WHERE name = ?`, name)
+		`SELECT id, name, host, port, user, auth_type, credential, os, env_profile, workspace_dir, created_at FROM servers WHERE name = ?`, name)
 	srv, err := s.scanServer(row)
 	if err == sql.ErrNoRows {
 		return Server{}, fmt.Errorf("server not found: %s", name)
@@ -146,10 +149,11 @@ func (s *SQLiteStore) Add(ctx context.Context, server Server) error {
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO servers (name, host, port, user, auth_type, credential, os, env_profile, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO servers (name, host, port, user, auth_type, credential, os, env_profile, workspace_dir, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		server.Name, server.Host, server.Port, server.User,
-		string(server.AuthType), cred, server.OS, server.EnvProfile, time.Now().UTC(),
+		string(server.AuthType), cred, server.OS, server.EnvProfile,
+		workspace.RemoteDirOrDefault(server.WorkspaceDir), time.Now().UTC(),
 	)
 	if err != nil {
 		return fmt.Errorf("add server %s: %w", server.Name, err)
@@ -170,8 +174,9 @@ func (s *SQLiteStore) Update(ctx context.Context, server Server) error {
 	}
 
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE servers SET host = ?, port = ?, user = ?, auth_type = ?, credential = ?, os = ?, env_profile = ? WHERE name = ?`,
-		server.Host, server.Port, server.User, string(server.AuthType), cred, server.OS, server.EnvProfile, server.Name,
+		`UPDATE servers SET host = ?, port = ?, user = ?, auth_type = ?, credential = ?, os = ?, env_profile = ?, workspace_dir = ? WHERE name = ?`,
+		server.Host, server.Port, server.User, string(server.AuthType), cred, server.OS, server.EnvProfile,
+		workspace.RemoteDirOrDefault(server.WorkspaceDir), server.Name,
 	)
 	if err != nil {
 		return fmt.Errorf("update server %s: %w", server.Name, err)
@@ -215,11 +220,12 @@ func (s *SQLiteStore) scanServer(row scanner) (Server, error) {
 	var createdAt time.Time
 
 	if err := row.Scan(&srv.ID, &srv.Name, &srv.Host, &srv.Port, &srv.User,
-		&authType, &srv.Credential, &srv.OS, &srv.EnvProfile, &createdAt); err != nil {
+		&authType, &srv.Credential, &srv.OS, &srv.EnvProfile, &srv.WorkspaceDir, &createdAt); err != nil {
 		return Server{}, err
 	}
 
 	srv.AuthType = AuthType(authType)
+	srv.WorkspaceDir = workspace.RemoteDirOrDefault(srv.WorkspaceDir)
 	srv.CreatedAt = createdAt
 
 	if srv.AuthType == AuthTypePassword && srv.Credential != "" {

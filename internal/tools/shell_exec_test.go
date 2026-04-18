@@ -29,6 +29,34 @@ func (e shellExecTestExecutor) Target() string {
 	return e.target
 }
 
+func (e shellExecTestExecutor) Host() string {
+	return e.target
+}
+
+type recordingShellExecExecutor struct {
+	target   string
+	result   executor.ExecResult
+	err      error
+	commands []string
+}
+
+func (e *recordingShellExecExecutor) Execute(context.Context, string) (executor.ExecResult, error) {
+	return e.result, e.err
+}
+
+func (e *recordingShellExecExecutor) Target() string {
+	return e.target
+}
+
+func (e *recordingShellExecExecutor) Host() string {
+	return e.target
+}
+
+func (e *recordingShellExecExecutor) ExecuteStream(_ context.Context, command string, _ func(string)) (executor.ExecSession, error) {
+	e.commands = append(e.commands, command)
+	return &fakeExecSession{result: e.result}, e.err
+}
+
 type fakePrivilegePrompter struct {
 	password string
 	calls    int
@@ -63,6 +91,7 @@ func (e *fakePersistentPrivilegeExecutor) Execute(context.Context, string) (exec
 }
 
 func (e *fakePersistentPrivilegeExecutor) Target() string { return e.target }
+func (e *fakePersistentPrivilegeExecutor) Host() string   { return e.target }
 
 func (e *fakePersistentPrivilegeExecutor) Platform() executor.Platform {
 	if e.platform == "" {
@@ -104,14 +133,23 @@ func (e *fakeInteractiveExecutor) Execute(_ context.Context, command string) (ex
 	return executor.ExecResult{}, nil
 }
 
-func (e *fakeInteractiveExecutor) ExecuteInteractive(_ context.Context, spec executor.InteractiveSpec, onChunk func(string)) (executor.ExecResult, error) {
+func (e *fakeInteractiveExecutor) ExecuteInteractive(_ context.Context, spec executor.InteractiveSpec, onChunk func(string)) (executor.ExecSession, error) {
 	for _, chunk := range e.interactiveChunks {
 		if onChunk != nil {
 			onChunk(chunk)
 		}
 	}
-	return e.interactiveResult, nil
+	return &fakeExecSession{result: e.interactiveResult}, nil
 }
+
+// fakeExecSession is a test double for executor.ExecSession.
+type fakeExecSession struct {
+	result executor.ExecResult
+}
+
+func (s *fakeExecSession) InjectStdin(string) error           { return nil }
+func (s *fakeExecSession) SendEOF() error                     { return nil }
+func (s *fakeExecSession) Wait() (executor.ExecResult, error) { return s.result, nil }
 
 func (e *fakeInteractiveExecutor) InjectStdin(line string) error {
 	e.injected = append(e.injected, line)
@@ -119,6 +157,10 @@ func (e *fakeInteractiveExecutor) InjectStdin(line string) error {
 }
 
 func (e *fakeInteractiveExecutor) Target() string {
+	return e.target
+}
+
+func (e *fakeInteractiveExecutor) Host() string {
 	return e.target
 }
 
@@ -148,11 +190,11 @@ func TestShellExecToolPrefixesExecutionContextForLocalRuns(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	if !strings.Contains(out, "Execution Context: localhost ("+executor.LocalShellName()+")") {
-		t.Fatalf("missing local execution context in output:\n%s", out)
+	if !strings.Contains(out.Content, "Execution Context: localhost ("+executor.LocalShellName()+")") {
+		t.Fatalf("missing local execution context in output:\n%s", out.Content)
 	}
-	if !strings.Contains(out, "[Exit Code: 0]") {
-		t.Fatalf("missing exit code in output:\n%s", out)
+	if !strings.Contains(out.Content, "[Exit Code: 0]") {
+		t.Fatalf("missing exit code in output:\n%s", out.Content)
 	}
 }
 
@@ -171,8 +213,42 @@ func TestShellExecToolPrefixesExecutionContextForRemoteRuns(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	if !strings.Contains(out, "Execution Context: db-server (ssh)") {
-		t.Fatalf("missing remote execution context in output:\n%s", out)
+	if !strings.Contains(out.Content, "Execution Context: db-server (ssh)") {
+		t.Fatalf("missing remote execution context in output:\n%s", out.Content)
+	}
+}
+
+func TestShellExecToolEmitsTaskProgressMetadata(t *testing.T) {
+	tool := &ShellExecTool{}
+	out, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command":     "dnf install -y oracle-database-preinstall-19c",
+		"description": "Oracle 19c preinstall 설치",
+	}, shellExecTestExecutor{
+		target: "sandbox",
+		result: executor.ExecResult{
+			Stdout:   "Installed:\noracle-database-preinstall-19c",
+			ExitCode: 0,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	meta, ok := ParseTaskProgressMetadata(out.MetadataJSON)
+	if !ok {
+		t.Fatalf("expected task metadata, got %q", out.MetadataJSON)
+	}
+	if meta.TaskKind != "install" {
+		t.Fatalf("task kind = %q, want install", meta.TaskKind)
+	}
+	if meta.TaskSummary != "Oracle 19c preinstall 설치" {
+		t.Fatalf("task summary = %q", meta.TaskSummary)
+	}
+	if !meta.VerificationRequired {
+		t.Fatal("expected verification to be required for install work")
+	}
+	if meta.VerificationStatus != "pending" {
+		t.Fatalf("verification status = %q, want pending", meta.VerificationStatus)
 	}
 }
 
@@ -223,11 +299,11 @@ func TestShellExecToolCachesPrivilegePasswordInMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if !strings.Contains(out, "uid=0(root)") {
-		t.Fatalf("expected command output in result:\n%s", out)
+	if !strings.Contains(out.Content, "uid=0(root)") {
+		t.Fatalf("expected command output in result:\n%s", out.Content)
 	}
-	if strings.Contains(out, plan.PromptToken) {
-		t.Fatalf("expected sanitized prompt token, got:\n%s", out)
+	if strings.Contains(out.Content, plan.PromptToken) {
+		t.Fatalf("expected sanitized prompt token, got:\n%s", out.Content)
 	}
 	if got := len(exec1.injected); got != 1 || exec1.injected[0] != "secret123" {
 		t.Fatalf("expected one injected password, got %#v", exec1.injected)
@@ -254,8 +330,8 @@ func TestShellExecToolCachesPrivilegePasswordInMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Execute() error = %v", err)
 	}
-	if !strings.Contains(out, "cached-ok") {
-		t.Fatalf("expected cached execution output in result:\n%s", out)
+	if !strings.Contains(out.Content, "cached-ok") {
+		t.Fatalf("expected cached execution output in result:\n%s", out.Content)
 	}
 	if prompter.calls != 1 {
 		t.Fatalf("expected cached password to avoid a second prompt, got %d prompt calls", prompter.calls)
@@ -288,11 +364,11 @@ func TestShellExecToolReusesRootSessionForBecomeUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if !strings.Contains(out, "oracle-ok") {
-		t.Fatalf("expected session command output:\n%s", out)
+	if !strings.Contains(out.Content, "oracle-ok") {
+		t.Fatalf("expected session command output:\n%s", out.Content)
 	}
-	if !strings.Contains(out, "Privilege Reused: root session") {
-		t.Fatalf("expected privilege reuse note:\n%s", out)
+	if !strings.Contains(out.Content, "Privilege Reused: root session") {
+		t.Fatalf("expected privilege reuse note:\n%s", out.Content)
 	}
 	if len(exec.sessionCommands) == 0 || !strings.Contains(exec.sessionCommands[0], "su - 'oracle'") {
 		t.Fatalf("expected command to run through root su, got %#v", exec.sessionCommands)
@@ -321,13 +397,294 @@ func TestShellExecToolRetriesPlainPermissionFailureWithRootSession(t *testing.T)
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if !strings.Contains(out, "root-only-content") {
-		t.Fatalf("expected root retry output:\n%s", out)
+	if !strings.Contains(out.Content, "root-only-content") {
+		t.Fatalf("expected root retry output:\n%s", out.Content)
 	}
-	if !strings.Contains(out, "permission failure retried in root session") {
-		t.Fatalf("expected root retry note:\n%s", out)
+	if !strings.Contains(out.Content, "permission failure retried in root session") {
+		t.Fatalf("expected root retry note:\n%s", out.Content)
 	}
 	if len(exec.sessionCommands) != 1 || !strings.Contains(exec.sessionCommands[0], "cat /etc/shadow") {
 		t.Fatalf("expected one root session retry, got %#v", exec.sessionCommands)
+	}
+}
+
+func TestShellExecToolNormalizesLeadingSudoWrapper(t *testing.T) {
+	plan, err := privilege.BuildPlan(privilege.MethodSudo, "root", "id")
+	if err != nil {
+		t.Fatalf("BuildPlan() error = %v", err)
+	}
+
+	prompter := &fakePrivilegePrompter{password: "inline-secret"}
+	tool := &ShellExecTool{
+		PrivilegeCache: privilege.NewCache(),
+		PromptHandler:  prompter,
+	}
+
+	exec := &fakeInteractiveExecutor{
+		target:   "db-server",
+		platform: executor.PlatformLinux,
+		results: map[string]executor.ExecResult{
+			plan.ValidateCommand: {ExitCode: 1, Stderr: "sudo: a password is required"},
+		},
+		interactiveChunks: []string{plan.PromptToken, "inline-ok\n"},
+		interactiveResult: executor.ExecResult{ExitCode: 0},
+	}
+
+	out, runErr := tool.Execute(context.Background(), map[string]interface{}{
+		"command": "sudo id",
+	}, exec)
+	if runErr != nil {
+		t.Fatalf("Execute() error = %v", runErr)
+	}
+	if !out.Success {
+		t.Fatalf("expected success, got failure: %s", out.Content)
+	}
+	if !strings.Contains(out.Content, "inline-ok") {
+		t.Fatalf("expected inline sudo payload output, got:\n%s", out.Content)
+	}
+	if prompter.calls != 1 {
+		t.Fatalf("expected privilege prompt once, got %d", prompter.calls)
+	}
+	if got := len(exec.injected); got != 1 || exec.injected[0] != "inline-secret" {
+		t.Fatalf("expected password injection for normalized sudo, got %#v", exec.injected)
+	}
+}
+
+func TestShellExecToolBlocksEmbeddedPrivilegeWrapper(t *testing.T) {
+	tool := &ShellExecTool{}
+	out, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": "echo hi | sudo tee /tmp/demo.txt",
+	}, shellExecTestExecutor{
+		target: "db-server",
+		result: executor.ExecResult{ExitCode: 0},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if out.Success {
+		t.Fatalf("expected failure for embedded sudo wrapper, got success:\n%s", out.Content)
+	}
+	if !strings.Contains(strings.ToLower(out.Content), "embedded privilege wrapper") {
+		t.Fatalf("expected embedded wrapper error, got:\n%s", out.Content)
+	}
+}
+
+func TestShellExecToolRequestsConfirmationForEmbeddedPrivilegeWrapper(t *testing.T) {
+	tool := &ShellExecTool{}
+	exec := &recordingShellExecExecutor{
+		target: "db-server",
+		result: executor.ExecResult{Stdout: "inline-ok", ExitCode: 0},
+	}
+
+	var captured QuestionRequest
+	ctx := WithUICallbacks(context.Background(), func(ctx context.Context, req QuestionRequest) (QuestionResponse, error) {
+		captured = req
+		return QuestionResponse{SelectedIndex: 0, SelectedLabel: "Run Anyway"}, nil
+	}, nil)
+
+	command := "echo hi | sudo tee /tmp/demo.txt"
+	out, err := tool.Execute(ctx, map[string]interface{}{
+		"command": command,
+	}, exec)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !out.Success {
+		t.Fatalf("expected success, got failure: %s", out.Content)
+	}
+	if captured.Header != "Security Confirmation" {
+		t.Fatalf("expected security confirmation header, got %q", captured.Header)
+	}
+	if !strings.Contains(captured.Question, "inline privilege wrapper") {
+		t.Fatalf("expected question to explain inline wrapper risk, got:\n%s", captured.Question)
+	}
+	if len(exec.commands) != 1 || exec.commands[0] != command {
+		t.Fatalf("expected raw command execution, got %#v", exec.commands)
+	}
+	if !strings.Contains(out.Content, "[Security Override]") {
+		t.Fatalf("expected security override note, got:\n%s", out.Content)
+	}
+}
+
+func TestShellExecToolApprovedEmbeddedSudoUsesManagedPrivilegePrompt(t *testing.T) {
+	tool := &ShellExecTool{
+		PrivilegeCache: privilege.NewCache(),
+		PromptHandler:  &fakePrivilegePrompter{password: "embedded-secret"},
+	}
+	prompter := tool.PromptHandler.(*fakePrivilegePrompter)
+
+	ctx := WithUICallbacks(context.Background(), func(ctx context.Context, req QuestionRequest) (QuestionResponse, error) {
+		return QuestionResponse{SelectedIndex: 0, SelectedLabel: "Run Anyway"}, nil
+	}, nil)
+
+	exec1 := &fakeInteractiveExecutor{
+		target:            "db-server",
+		platform:          executor.PlatformLinux,
+		interactiveChunks: []string{"[sudo] password for sandbox:", "inline-ok\n"},
+		interactiveResult: executor.ExecResult{ExitCode: 0},
+	}
+
+	command := "echo hi | sudo tee /tmp/demo.txt"
+	out, err := tool.Execute(ctx, map[string]interface{}{
+		"command": command,
+	}, exec1)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !out.Success {
+		t.Fatalf("expected success, got failure: %s", out.Content)
+	}
+	if prompter.calls != 1 {
+		t.Fatalf("expected one privilege prompt, got %d", prompter.calls)
+	}
+	if got := len(exec1.injected); got != 1 || exec1.injected[0] != "embedded-secret" {
+		t.Fatalf("expected managed password injection, got %#v", exec1.injected)
+	}
+	if strings.Contains(out.Content, "[sudo] password") {
+		t.Fatalf("expected sudo prompt to be sanitized, got:\n%s", out.Content)
+	}
+	if !strings.Contains(out.Content, "inline-ok") {
+		t.Fatalf("expected command output, got:\n%s", out.Content)
+	}
+
+	exec2 := &fakeInteractiveExecutor{
+		target:            "db-server",
+		platform:          executor.PlatformLinux,
+		interactiveChunks: []string{"[sudo] password for sandbox:", "inline-cached\n"},
+		interactiveResult: executor.ExecResult{ExitCode: 0},
+	}
+
+	out, err = tool.Execute(ctx, map[string]interface{}{
+		"command": command,
+	}, exec2)
+	if err != nil {
+		t.Fatalf("second Execute() error = %v", err)
+	}
+	if !out.Success {
+		t.Fatalf("expected second success, got failure: %s", out.Content)
+	}
+	if prompter.calls != 1 {
+		t.Fatalf("expected cached password to avoid second prompt, got %d calls", prompter.calls)
+	}
+	if got := len(exec2.injected); got != 1 || exec2.injected[0] != "embedded-secret" {
+		t.Fatalf("expected cached password injection, got %#v", exec2.injected)
+	}
+	if !strings.Contains(out.Content, "inline-cached") {
+		t.Fatalf("expected cached command output, got:\n%s", out.Content)
+	}
+}
+
+func TestShellExecToolCancelsEmbeddedPrivilegeWrapperWhenUserDeclines(t *testing.T) {
+	tool := &ShellExecTool{}
+	exec := &recordingShellExecExecutor{
+		target: "db-server",
+		result: executor.ExecResult{Stdout: "should-not-run", ExitCode: 0},
+	}
+
+	ctx := WithUICallbacks(context.Background(), func(ctx context.Context, req QuestionRequest) (QuestionResponse, error) {
+		return QuestionResponse{SelectedIndex: 1, SelectedLabel: "Cancel"}, nil
+	}, nil)
+
+	out, err := tool.Execute(ctx, map[string]interface{}{
+		"command": "echo hi | sudo tee /tmp/demo.txt",
+	}, exec)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if out.Success {
+		t.Fatalf("expected failure when user declines, got success:\n%s", out.Content)
+	}
+	if len(exec.commands) != 0 {
+		t.Fatalf("expected no command execution after decline, got %#v", exec.commands)
+	}
+	if !strings.Contains(out.Content, "user declined") {
+		t.Fatalf("expected decline message, got:\n%s", out.Content)
+	}
+}
+
+func TestShellExecToolRejectsConflictingInlineAndExplicitPrivilege(t *testing.T) {
+	tool := &ShellExecTool{}
+	out, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command":       "sudo id",
+		"become_method": "su",
+	}, shellExecTestExecutor{
+		target: "db-server",
+		result: executor.ExecResult{ExitCode: 0},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if out.Success {
+		t.Fatalf("expected failure for conflicting privilege modes, got success:\n%s", out.Content)
+	}
+	if !strings.Contains(strings.ToLower(out.Content), "conflicting privilege method") {
+		t.Fatalf("expected conflict error, got:\n%s", out.Content)
+	}
+}
+
+func TestShellExecToolTreatsExpectedInactiveServiceVerificationAsSuccess(t *testing.T) {
+	tool := &ShellExecTool{}
+	command := "sudo systemctl stop firewalld && sudo systemctl disable firewalld && sudo systemctl status firewalld --no-pager"
+
+	out, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command":     command,
+		"description": "Firewalld disable",
+	}, shellExecTestExecutor{
+		target: "sandbox",
+		result: executor.ExecResult{
+			Stdout: "Removed \"/etc/systemd/system/dbus-org.fedoraproject.FirewallD1.service\".\n" +
+				"\u25cb firewalld.service - firewalld - dynamic firewall daemon\n" +
+				"     Loaded: loaded (/usr/lib/systemd/system/firewalld.service; disabled)\n" +
+				"     Active: inactive (dead)",
+			ExitCode: 3,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !out.Success {
+		t.Fatalf("expected success for expected inactive verification, got failure:\n%s", out.Content)
+	}
+	if out.ExitCode != 3 {
+		t.Fatalf("exit code = %d, want 3", out.ExitCode)
+	}
+	if !strings.Contains(out.Content, "[Verification Note]") {
+		t.Fatalf("expected verification note in output, got:\n%s", out.Content)
+	}
+
+	meta, ok := ParseTaskProgressMetadata(out.MetadataJSON)
+	if !ok {
+		t.Fatalf("expected task metadata, got %q", out.MetadataJSON)
+	}
+	if meta.ExecutionStatus != "succeeded" {
+		t.Fatalf("execution status = %q, want succeeded", meta.ExecutionStatus)
+	}
+	if meta.TaskSubject != "firewalld" {
+		t.Fatalf("task subject = %q, want firewalld", meta.TaskSubject)
+	}
+}
+
+func TestShellExecToolKeepsFailedServiceRestartAsFailure(t *testing.T) {
+	tool := &ShellExecTool{}
+	command := "sudo systemctl restart nginx && sudo systemctl status nginx --no-pager"
+
+	out, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": command,
+	}, shellExecTestExecutor{
+		target: "sandbox",
+		result: executor.ExecResult{
+			Stdout: "nginx.service - nginx web server\n" +
+				"     Active: failed (Result: exit-code)",
+			ExitCode: 3,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if out.Success {
+		t.Fatalf("expected failure for failed restart verification, got success:\n%s", out.Content)
+	}
+	if strings.Contains(out.Content, "[Verification Note]") {
+		t.Fatalf("did not expect verification note on real failure:\n%s", out.Content)
 	}
 }

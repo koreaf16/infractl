@@ -68,7 +68,7 @@ func (t *OSAuthProbeTool) IsReadOnly() bool { return true }
 func (t *OSAuthProbeTool) IsEnabled() bool  { return true }
 
 // Execute probes OS auth and activates connector on success.
-func (t *OSAuthProbeTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
+func (t *OSAuthProbeTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (tools.ToolOutcome, error) {
 	server, _ := args["server"].(string)
 	serviceType, _ := args["service_type"].(string)
 	serviceName, _ := args["service_name"].(string)
@@ -78,8 +78,12 @@ func (t *OSAuthProbeTool) Execute(ctx context.Context, args map[string]interface
 	serviceType = strings.ToLower(strings.TrimSpace(serviceType))
 	serviceName = strings.TrimSpace(serviceName)
 
+	fail := func(msg string) (tools.ToolOutcome, error) {
+		return tools.ToolOutcome{Content: msg, Success: false, ErrorMessage: msg}, nil
+	}
+
 	if server == "" || serviceType == "" || serviceName == "" {
-		return "server, service_type, service_name는 필수입니다", nil
+		return fail("server, service_type, service_name는 필수입니다")
 	}
 
 	if t.ServerStore != nil {
@@ -88,12 +92,12 @@ func (t *OSAuthProbeTool) Execute(ctx context.Context, args map[string]interface
 	}
 
 	if err := validateDiscoveryTarget(exec.Target(), server); err != nil {
-		return err.Error(), nil
+		return fail(err.Error())
 	}
 
 	entry, err := validateRecentDiscovery(ctx, t.DiscoveryStore, server, serviceType, serviceName)
 	if err != nil {
-		return err.Error(), nil
+		return fail(err.Error())
 	}
 
 	if strings.TrimSpace(saveModeStr) == "" {
@@ -104,15 +108,16 @@ func (t *OSAuthProbeTool) Execute(ctx context.Context, args map[string]interface
 
 	toolCount, err := t.Manager.ProbeAndActivate(ctx, info, exec, SaveMode(saveModeStr))
 	if err != nil {
-		return fmt.Sprintf(
+		return fail(fmt.Sprintf(
 			"✗ OS 인증 불가 (%s/%s): %s\n"+
 				"→ connector_activate 도구로 계정(username, password)을 입력해 접속하세요.",
 			info.ServiceType, info.Name, err,
-		), nil
+		))
 	}
 
-	return fmt.Sprintf(
+	msg := fmt.Sprintf(
 		"✓ OS 인증 성공 → %s %s 커넥터 활성화됨 (%d개 도구 등록)\n저장 방식: %s",
 		info.ServiceType, info.Name, toolCount, saveModeStr,
-	), nil
+	)
+	return tools.ToolOutcome{Content: msg, Success: true}, nil
 }

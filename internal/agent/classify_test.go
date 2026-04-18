@@ -10,24 +10,35 @@ import (
 type classifyModeProbeClient struct {
 	withInlineArgs []bool
 	chatCalled     bool
+	state          *classifyProbeState
 	resp           llm.Response
 }
 
-func (c *classifyModeProbeClient) Chat(_ context.Context, _ []llm.Message, _ []llm.ToolDef, _ interface{}) (llm.Response, error) {
+type classifyProbeState struct {
+	messages []llm.Message
+}
+
+func (c *classifyModeProbeClient) Chat(_ context.Context, messages []llm.Message, _ []llm.ToolDef, _ interface{}, _ ...llm.CallOption) (llm.Response, error) {
 	c.chatCalled = true
+	if c.state != nil {
+		c.state.messages = append([]llm.Message(nil), messages...)
+	}
 	return c.resp, nil
 }
 
-func (c *classifyModeProbeClient) ChatStream(_ context.Context, _ []llm.Message, _ []llm.ToolDef, _ interface{}, _ func(string), _ func(string)) (llm.Response, error) {
+func (c *classifyModeProbeClient) ChatStream(_ context.Context, messages []llm.Message, _ []llm.ToolDef, _ interface{}, _ func(string), _ func(string), _ ...llm.CallOption) (llm.Response, error) {
 	c.chatCalled = true
+	if c.state != nil {
+		c.state.messages = append([]llm.Message(nil), messages...)
+	}
 	return c.resp, nil
 }
 
 func (c *classifyModeProbeClient) WithInlineToolCalls(enabled bool) llm.Client {
 	c.withInlineArgs = append(c.withInlineArgs, enabled)
 	return &classifyModeProbeClient{
-		withInlineArgs: c.withInlineArgs,
-		resp:           c.resp,
+		state: c.state,
+		resp:  c.resp,
 	}
 }
 
@@ -68,5 +79,231 @@ func TestLLMClassifyDisablesInlineToolCallsForClassification(t *testing.T) {
 	}
 	if !result.NeedsTools {
 		t.Fatal("expected needs_tools=true")
+	}
+}
+
+func TestRunSelfClassificationAddsWebHintsForFreshnessQueries(t *testing.T) {
+	client := &classifyModeProbeClient{
+		resp: llm.Response{
+			ToolCalls: []llm.ToolCall{
+				{
+					Function: llm.FunctionCall{
+						Name:      "classify_request",
+						Arguments: `{"needs_tools":false,"tool_groups":["knowledge"],"prompt_sections":["safety"],"tier":"fast","reasoning":"needs current docs"}`,
+					},
+				},
+			},
+		},
+	}
+
+	agent := &Agent{
+		llmClient: client,
+		modelName: "general-model",
+	}
+
+	result, err := agent.runSelfClassification(context.Background(), "latest kubernetes docs for ingress")
+	if err != nil {
+		t.Fatalf("runSelfClassification() error = %v", err)
+	}
+	if !result.NeedsTools {
+		t.Fatal("expected needs_tools=true for web-backed query")
+	}
+	if result.Tier != "general" {
+		t.Fatalf("expected tier general, got %q", result.Tier)
+	}
+	if !hasString(result.ToolGroups, "web") {
+		t.Fatalf("expected web tool group, got %#v", result.ToolGroups)
+	}
+	if !hasString(result.PromptSections, "grounding") {
+		t.Fatalf("expected grounding section, got %#v", result.PromptSections)
+	}
+	if !hasString(result.PromptSections, "tool_selection") {
+		t.Fatalf("expected tool_selection section, got %#v", result.PromptSections)
+	}
+}
+
+func TestRunSelfClassificationAddsWebHintsForKoreanInternetRequests(t *testing.T) {
+	client := &classifyModeProbeClient{
+		resp: llm.Response{
+			ToolCalls: []llm.ToolCall{
+				{
+					Function: llm.FunctionCall{
+						Name:      "classify_request",
+						Arguments: `{"needs_tools":false,"tool_groups":["knowledge"],"prompt_sections":["safety"],"tier":"fast","reasoning":"needs current docs"}`,
+					},
+				},
+			},
+		},
+	}
+
+	agent := &Agent{
+		llmClient: client,
+		modelName: "general-model",
+	}
+
+	result, err := agent.runSelfClassification(context.Background(), "인터넷에서 최신 공식 문서 확인해줘")
+	if err != nil {
+		t.Fatalf("runSelfClassification() error = %v", err)
+	}
+	if !result.NeedsTools {
+		t.Fatal("expected needs_tools=true for Korean web-backed query")
+	}
+	if result.Tier != "general" {
+		t.Fatalf("expected tier general, got %q", result.Tier)
+	}
+	if !hasString(result.ToolGroups, "web") {
+		t.Fatalf("expected web tool group, got %#v", result.ToolGroups)
+	}
+	if !hasString(result.PromptSections, "grounding") {
+		t.Fatalf("expected grounding section, got %#v", result.PromptSections)
+	}
+}
+
+func TestRunSelfClassificationNormalizesReasoningTaskTypeFromInput(t *testing.T) {
+	client := &classifyModeProbeClient{
+		resp: llm.Response{
+			ToolCalls: []llm.ToolCall{
+				{
+					Function: llm.FunctionCall{
+						Name:      "classify_request",
+						Arguments: `{"needs_tools":true,"tool_groups":["shell"],"prompt_sections":["safety"],"tier":"reasoning","reasoning":"complex install task"}`,
+					},
+				},
+			},
+		},
+	}
+
+	agent := &Agent{
+		llmClient: client,
+		modelName: "general-model",
+	}
+
+	result, err := agent.runSelfClassification(context.Background(), "install oracle 19c and prepare rollout steps")
+	if err != nil {
+		t.Fatalf("runSelfClassification() error = %v", err)
+	}
+	if result.TaskType != string(TaskTypeInstall) {
+		t.Fatalf("expected task_type %q, got %q", TaskTypeInstall, result.TaskType)
+	}
+}
+
+func TestRunSelfClassificationNormalizesReasoningTaskTypeFallbackToPlan(t *testing.T) {
+	client := &classifyModeProbeClient{
+		resp: llm.Response{
+			ToolCalls: []llm.ToolCall{
+				{
+					Function: llm.FunctionCall{
+						Name:      "classify_request",
+						Arguments: `{"needs_tools":true,"tool_groups":["shell"],"prompt_sections":["safety"],"tier":"reasoning","reasoning":"needs deep reasoning"}`,
+					},
+				},
+			},
+		},
+	}
+
+	agent := &Agent{
+		llmClient: client,
+		modelName: "general-model",
+	}
+
+	result, err := agent.runSelfClassification(context.Background(), "please deeply reason about this request")
+	if err != nil {
+		t.Fatalf("runSelfClassification() error = %v", err)
+	}
+	if result.TaskType != string(TaskTypePlan) {
+		t.Fatalf("expected fallback task_type %q, got %q", TaskTypePlan, result.TaskType)
+	}
+}
+
+func TestRunSelfClassificationOracle19cInstallScenarioNormalizesTaskType(t *testing.T) {
+	client := &classifyModeProbeClient{
+		resp: llm.Response{
+			ToolCalls: []llm.ToolCall{
+				{
+					Function: llm.FunctionCall{
+						Name:      "classify_request",
+						Arguments: `{"needs_tools":true,"tool_groups":["web","shell"],"prompt_sections":["grounding","tool_selection"],"tier":"reasoning","reasoning":"설치와 계획이 포함된 복잡한 작업"}`,
+					},
+				},
+			},
+		},
+	}
+
+	agent := &Agent{
+		llmClient: client,
+		modelName: "general-model",
+	}
+
+	input := "Oracle 19c 설치를 위해 매뉴얼을 찾고 계획을 세워줘"
+	result, err := agent.runSelfClassification(context.Background(), input)
+	if err != nil {
+		t.Fatalf("runSelfClassification() error = %v", err)
+	}
+	if result.Tier != "reasoning" {
+		t.Fatalf("expected tier reasoning, got %q", result.Tier)
+	}
+	if result.TaskType != string(TaskTypeInstall) {
+		t.Fatalf("expected task_type %q, got %q", TaskTypeInstall, result.TaskType)
+	}
+	if !result.RequiresTaskProposal {
+		t.Fatalf("expected requires_task_proposal=true for complex reasoning install task")
+	}
+}
+
+func hasString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestShortChatPattern_YesFastPath는 shortChatPattern에 "예"가 포함되어
+// 분류 없이 fast-path로 처리됨을 검증한다 (P1 수정 사항).
+func TestShortChatPattern_YesFastPath(t *testing.T) {
+	agent := &Agent{
+		llmClient: &classifyModeProbeClient{
+			resp: llm.Response{},
+		},
+		modelName: "test-model",
+	}
+
+	// "예"는 shortChatPattern에 매칭되므로 LLM 호출 없이 fast-path 반환
+	result, err := agent.runSelfClassification(context.Background(), "예")
+	if err != nil {
+		t.Fatalf("runSelfClassification() error = %v", err)
+	}
+	if result.NeedsTools {
+		t.Error("'예' should fast-path as NeedsTools=false")
+	}
+	if result.Tier != "fast" {
+		t.Errorf("tier = %q, want fast", result.Tier)
+	}
+
+	client := agent.llmClient.(*classifyModeProbeClient)
+	if client.chatCalled {
+		t.Error("LLM should NOT be called for '예' shortChatPattern fast-path")
+	}
+}
+
+// TestShortChatPattern_YesVariants는 "예"의 다양한 변형이 모두 fast-path 처리됨을 검증한다.
+func TestShortChatPattern_YesVariants(t *testing.T) {
+	cases := []string{"예", "예!", "예."}
+	for _, input := range cases {
+		t.Run(input, func(t *testing.T) {
+			a := &Agent{
+				llmClient: &classifyModeProbeClient{resp: llm.Response{}},
+				modelName: "test-model",
+			}
+			result, err := a.runSelfClassification(context.Background(), input)
+			if err != nil {
+				t.Fatalf("error = %v", err)
+			}
+			if result.NeedsTools || result.Tier != "fast" {
+				t.Errorf("input=%q: expected fast-path NeedsTools=false, got tier=%s needs=%v",
+					input, result.Tier, result.NeedsTools)
+			}
+		})
 	}
 }

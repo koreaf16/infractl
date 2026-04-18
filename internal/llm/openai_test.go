@@ -54,7 +54,7 @@ func TestLogRequestJSONWritesAllSentContentToLLMLog(t *testing.T) {
 		`{"role":"assistant","content":"previous answer"},` +
 		`{"role":"tool","content":"tool result"}` +
 		`]}`)
-	logRequestJSON("test-model", raw)
+	LogRequestJSON("test-model", raw)
 
 	logText := readLLMLog(t, tmp)
 	for _, want := range []string{
@@ -76,7 +76,7 @@ func TestLogResponseJSONWritesOnlyResponseContentToLLMLog(t *testing.T) {
 	tmp := chdirTemp(t)
 
 	raw := []byte(`{"choices":[{"message":{"content":"\uc548\ub155\n\uc138\uacc4"}}]}`)
-	logResponseJSON("test-model", raw)
+	LogResponseJSON("test-model", raw)
 
 	logText := readLLMLog(t, tmp)
 	want := "\uc548\ub155\n\uc138\uacc4"

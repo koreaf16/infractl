@@ -43,9 +43,9 @@ func buildKnowledgeContext(ctx context.Context, ragMgr *rag.Manager, userInput, 
 	}
 
 	var sb strings.Builder
-	sb.WriteString("## Relevant Internal Memory\n")
-	sb.WriteString("Use the following scoped internal memory before issuing commands.\n")
-	sb.WriteString("Prefer concrete prior fixes only when the current target and session context still match.\n\n")
+	sb.WriteString("## 관련 내부 메모리\n")
+	sb.WriteString("명령 실행 전에 아래 범위별 내부 메모리를 참고한다.\n")
+	sb.WriteString("현재 대상과 세션 컨텍스트가 일치하는 경우에만 이전 해결책을 우선 적용한다.\n\n")
 
 	for i, r := range results {
 		sourceType := r.LocalSourceType
@@ -211,7 +211,7 @@ func buildColumnDiscoveryNote(toolCalls []llm.ToolCall, results []llm.Message) s
 	}
 
 	var sb strings.Builder
-	sb.WriteString("[SYSTEM: Column Error Recovery]\n")
+	sb.WriteString("[시스템: 컬럼 오류 복구]\n")
 	sb.WriteString("ORA-00904 (invalid identifier) 발생 — 쿼리하기 전에 실제 컬럼 목록을 먼저 확인하세요.\n\n")
 	sb.WriteString("아래 쿼리로 각 뷰의 실제 컬럼을 조회한 뒤 SQL을 재작성하세요:\n")
 	for _, t := range unique {
@@ -262,7 +262,7 @@ func (a *Agent) InjectPostToolKnowledge(ctx context.Context, toolCalls []llm.Too
 				slog.Debug("post-tool rag search failed", "err", err)
 			} else if len(ragResults) > 0 {
 				var sb strings.Builder
-				sb.WriteString("[SYSTEM: Relevant Knowledge]\n")
+				sb.WriteString("[시스템: 관련 지식]\n")
 				for _, r := range ragResults {
 					fmt.Fprintf(&sb, "- %s: %s\n", r.Title, truncateKnowledgeSnippet(r.Content, 300))
 				}
@@ -276,6 +276,10 @@ func (a *Agent) InjectPostToolKnowledge(ctx context.Context, toolCalls []llm.Too
 	}
 
 	combined := strings.Join(notes, "\n\n")
+	const maxCombinedNoteLen = 5000
+	if len(combined) > maxCombinedNoteLen {
+		combined = combined[:maxCombinedNoteLen] + "\n[... additional knowledge truncated ...]"
+	}
 	slog.Debug("injecting post-tool knowledge", "length", len(combined))
 
 	a.history = append(a.history, llm.Message{

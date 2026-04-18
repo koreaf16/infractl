@@ -24,6 +24,7 @@ type statusBar struct {
 	busy         bool
 	yoloMode     bool
 	planMode     bool
+	planPending  int           // Plan Mode 대기 중인 pending 명령 수
 	activeServer *store.Server // 현재 활성 서버 (nil이면 표시 안 함)
 
 	// 토큰/비용 추적 (UsageUpdateMsg로 갱신)
@@ -32,6 +33,10 @@ type statusBar struct {
 	outputTokens   int
 	contextPercent float64
 	turnDurationMs int64
+
+	// 활성 작업 요약 (Task · <summary> 형태로 우측에 표시)
+	taskSummary string
+	queueLen    int // 입력 큐 항목 수 (> 0이면 배지 표시)
 }
 
 // newStatusBar는 상태바를 생성한다.
@@ -74,8 +79,18 @@ func (s statusBar) View() string {
 
 	// 오른쪽: YOLO 표시 + 활성 서버 + 서버 수 + 버전
 	rightParts := []string{}
+	if s.queueLen > 0 {
+		rightParts = append(rightParts, StyleQueueCount.Render(fmt.Sprintf("📥 %d queued", s.queueLen)))
+	}
 	if s.planMode {
-		rightParts = append(rightParts, StyleSuccess.Render("📋 PLAN"))
+		badge := "📋 PLAN"
+		if s.planPending > 0 {
+			badge = fmt.Sprintf("📋 PLAN (%d pending)", s.planPending)
+		}
+		rightParts = append(rightParts, StyleSuccess.Render(badge))
+	}
+	if s.taskSummary != "" {
+		rightParts = append(rightParts, StyleTaskDim.Render("Task · "+s.taskSummary))
 	}
 	if s.yoloMode {
 		rightParts = append(rightParts, StyleWarning.Render("⚡YOLO"))
@@ -86,7 +101,7 @@ func (s statusBar) View() string {
 		rightParts = append(rightParts, dot+" "+name+" ("+s.activeServer.Host+")")
 	}
 	if s.serverCount > 0 {
-		rightParts = append(rightParts, fmt.Sprintf("%d servers", s.serverCount))
+		rightParts = append(rightParts, fmt.Sprintf("%d workspaces", s.serverCount))
 	}
 	rightParts = append(rightParts, "v"+tuiVersion)
 	right := StyleInfoBarDim.Render(strings.Join(rightParts, sep))
@@ -105,11 +120,14 @@ func (s statusBar) View() string {
 }
 
 func (s *statusBar) setWidth(w int)                    { s.width = w }
-func (s *statusBar) setServerCount(n int)               { s.serverCount = n }
-func (s *statusBar) setBusy(b bool)                     { s.busy = b }
-func (s *statusBar) setYoloMode(v bool)                 { s.yoloMode = v }
-func (s *statusBar) setPlanMode(v bool)                 { s.planMode = v }
-func (s *statusBar) setActiveServer(srv *store.Server)  { s.activeServer = srv }
+func (s *statusBar) setServerCount(n int)              { s.serverCount = n }
+func (s *statusBar) setBusy(b bool)                    { s.busy = b }
+func (s *statusBar) setYoloMode(v bool)                { s.yoloMode = v }
+func (s *statusBar) setPlanMode(v bool)                { s.planMode = v }
+func (s *statusBar) setPlanPending(n int)              { s.planPending = n }
+func (s *statusBar) setActiveServer(srv *store.Server) { s.activeServer = srv }
+func (s *statusBar) setTaskSummary(summary string)     { s.taskSummary = summary }
+func (s *statusBar) setQueueLen(n int)                 { s.queueLen = n }
 
 // updateUsage는 UsageUpdateMsg를 반영한다.
 func (s *statusBar) updateUsage(msg UsageUpdateMsg) {

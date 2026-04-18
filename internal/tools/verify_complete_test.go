@@ -6,36 +6,37 @@ import (
 	"testing"
 )
 
-func TestVerifyCompleteTool_Execute_Validation(t *testing.T) {
+func TestVerifyCompleteToolExecuteValidation(t *testing.T) {
 	tool := &VerifyCompleteTool{}
 	ctx := context.Background()
 
 	tests := []struct {
-		name    string
-		args    map[string]interface{}
-		wantErr bool
-		contains string
+		name     string
+		args     map[string]interface{}
+		wantText string
 	}{
 		{
-			name: "missing both args",
-			args: map[string]interface{}{},
-			contains: "Error: 'summary' 및 'verification_evidence' 인자가 비어 있습니다",
+			name:     "missing summary and evidence",
+			args:     map[string]interface{}{},
+			wantText: "Error: 'summary' and 'verification_evidence' are required",
 		},
 		{
-			name: "empty summary",
+			name: "accepts tool id",
 			args: map[string]interface{}{
-				"summary":               "",
-				"verification_evidence": "some evidence",
+				"tool_id":               "call_shell_1",
+				"summary":               "Oracle preinstall package is present",
+				"verification_evidence": "rpm -q oracle-database-preinstall-19c returned installed",
 			},
-			contains: "Error: 'summary' 및 'verification_evidence' 인자가 비어 있습니다",
+			wantText: "Verification recorded for call_shell_1",
 		},
 		{
-			name: "valid args",
+			name: "falls back to task key",
 			args: map[string]interface{}{
-				"summary":               "done something",
-				"verification_evidence": "looked at logs",
+				"task_key":              "oracle-preinstall",
+				"summary":               "Oracle preinstall package is present",
+				"verification_evidence": "rpm -q oracle-database-preinstall-19c returned installed",
 			},
-			contains: "작업 완료가 시스템에 공식 접수되었습니다",
+			wantText: "Verification recorded for oracle-preinstall",
 		},
 	}
 
@@ -45,9 +46,15 @@ func TestVerifyCompleteTool_Execute_Validation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if !strings.Contains(got, tt.contains) {
-				t.Errorf("Execute() got = %v, want to contain %v", got, tt.contains)
+			if !strings.Contains(got.Content, tt.wantText) {
+				t.Fatalf("content = %q, want substring %q", got.Content, tt.wantText)
 			}
 		})
+	}
+}
+
+func TestVerifyCompleteToolIsMutation(t *testing.T) {
+	if (&VerifyCompleteTool{}).IsReadOnly() {
+		t.Fatal("verify_complete should run as a mutation tool so verification state is serialized")
 	}
 }

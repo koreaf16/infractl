@@ -71,14 +71,14 @@ For destructive or service-stopping commands, backup_command is REQUIRED.`,
 	}
 }
 
-func (t *SaveLearnedSystemTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
+func (t *SaveLearnedSystemTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (ToolOutcome, error) {
 	serviceType, err := argString(args, "service_type", true)
 	if err != nil {
-		return "", err
+		return ToolOutcome{}, err
 	}
 	serverName, err := argString(args, "server_name", true)
 	if err != nil {
-		return "", err
+		return ToolOutcome{}, err
 	}
 	cliPath, _ := argString(args, "cli_path", false)
 	configPath, _ := argString(args, "config_path", false)
@@ -99,14 +99,14 @@ func (t *SaveLearnedSystemTool) Execute(ctx context.Context, args map[string]int
 
 	id, err := t.Store.SaveLearnedSystem(ctx, sys)
 	if err != nil {
-		return "", fmt.Errorf("save learned system: %w", err)
+		return ToolOutcome{}, fmt.Errorf("save learned system: %w", err)
 	}
 	sys.ID = id
 	if t.Memory != nil {
 		if err := t.Memory.IndexLearnedSystem(ctx, sys); err != nil {
-			return "", fmt.Errorf("index learned system: %w", err)
+			return ToolOutcome{}, fmt.Errorf("index learned system: %w", err)
 		}
 	}
 
-	return fmt.Sprintf("Saved learned system (ID: %d)\nService: %s @ %s", id, serviceType, serverName), nil
+	return ToolOutcome{Content: fmt.Sprintf("Saved learned system (ID: %d)\nService: %s @ %s", id, serviceType, serverName), Success: true}, nil
 }

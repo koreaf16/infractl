@@ -6,6 +6,7 @@
 package schedule
 
 import (
+	"github.com/yourorg/infractl/internal/tools"
 	"context"
 	"fmt"
 	"strings"
@@ -49,7 +50,7 @@ func (t *CreateTool) Parameters() map[string]interface{} {
 func (t *CreateTool) IsReadOnly() bool { return false }
 func (t *CreateTool) IsEnabled() bool  { return true }
 
-func (t *CreateTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
+func (t *CreateTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (tools.ToolOutcome, error) {
 	name, _ := args["name"].(string)
 	cronExpr, _ := args["cron_expr"].(string)
 	prompt, _ := args["prompt"].(string)
@@ -61,9 +62,9 @@ func (t *CreateTool) Execute(ctx context.Context, args map[string]interface{}, _
 		Enabled:  true,
 	})
 	if err != nil {
-		return "", fmt.Errorf("create schedule: %w", err)
+		return tools.ToolOutcome{}, fmt.Errorf("create schedule: %w", err)
 	}
-	return fmt.Sprintf("스케줄 '%s'가 등록되었습니다: %s", name, cronExpr), nil
+	return tools.ToolOutcome{Content: fmt.Sprintf("스케줄 '%s'가 등록되었습니다: %s", name, cronExpr), Success: true}, nil
 }
 
 // ListTool은 스케줄 목록을 조회한다.
@@ -84,13 +85,13 @@ func (t *ListTool) Parameters() map[string]interface{} {
 func (t *ListTool) IsReadOnly() bool { return true }
 func (t *ListTool) IsEnabled() bool  { return true }
 
-func (t *ListTool) Execute(ctx context.Context, _ map[string]interface{}, _ executor.Executor) (string, error) {
+func (t *ListTool) Execute(ctx context.Context, _ map[string]interface{}, _ executor.Executor) (tools.ToolOutcome, error) {
 	schedules, err := t.Scheduler.List(ctx)
 	if err != nil {
-		return "", fmt.Errorf("list schedules: %w", err)
+		return tools.ToolOutcome{}, fmt.Errorf("list schedules: %w", err)
 	}
 	if len(schedules) == 0 {
-		return "등록된 스케줄이 없습니다.", nil
+		return tools.ToolOutcome{Content: "등록된 스케줄이 없습니다.", Success: true}, nil
 	}
 
 	var sb strings.Builder
@@ -98,5 +99,5 @@ func (t *ListTool) Execute(ctx context.Context, _ map[string]interface{}, _ exec
 	for _, s := range schedules {
 		sb.WriteString(fmt.Sprintf("  - %s: %s (Prompt: %s)\n", s.Name, s.CronExpr, s.Prompt))
 	}
-	return sb.String(), nil
+	return tools.ToolOutcome{Content: sb.String(), Success: true}, nil
 }

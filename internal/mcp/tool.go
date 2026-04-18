@@ -11,6 +11,7 @@ import (
 
 	"github.com/yourorg/infractl/internal/connector"
 	"github.com/yourorg/infractl/internal/executor"
+	"github.com/yourorg/infractl/internal/tools"
 )
 
 // mcpTool은 MCP 서버 도구 하나를 tools.Tool 인터페이스로 래핑한다.
@@ -54,7 +55,7 @@ func (t *mcpTool) IsEnabled() bool {
 
 // Execute는 MCP 서버에 tools/call을 전송하고 결과를 반환한다.
 // executor.Executor 파라미터는 MCP 도구에서 사용하지 않는다.
-func (t *mcpTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
+func (t *mcpTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (tools.ToolOutcome, error) {
 	// "target" 키는 MCP 서버에 전달하지 않는다
 	cleanArgs := make(map[string]interface{}, len(args))
 	for k, v := range args {
@@ -62,5 +63,9 @@ func (t *mcpTool) Execute(ctx context.Context, args map[string]interface{}, _ ex
 			cleanArgs[k] = v
 		}
 	}
-	return t.client.CallTool(ctx, t.def.Name, cleanArgs)
+	result, err := t.client.CallTool(ctx, t.def.Name, cleanArgs)
+	if err != nil {
+		return tools.ToolOutcome{}, err
+	}
+	return tools.ToolOutcome{Content: result, Success: true}, nil
 }

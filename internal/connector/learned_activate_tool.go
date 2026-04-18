@@ -6,6 +6,7 @@
 package connector
 
 import (
+	"github.com/yourorg/infractl/internal/tools"
 	"context"
 	"fmt"
 
@@ -54,13 +55,13 @@ func (t *LearnedActivateTool) Parameters() map[string]interface{} {
 func (t *LearnedActivateTool) IsReadOnly() bool { return false }
 func (t *LearnedActivateTool) IsEnabled() bool  { return true }
 
-func (t *LearnedActivateTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
+func (t *LearnedActivateTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (tools.ToolOutcome, error) {
 	serviceType, _ := args["service_type"].(string)
 	serverName, _ := args["server_name"].(string)
 	serviceName, _ := args["service_name"].(string)
 	saveModeStr, _ := args["save_mode"].(string)
 	if serviceType == "" || serverName == "" {
-		return "service_type and server_name are required", nil
+		return tools.ToolOutcome{Content: "service_type and server_name are required", Success: true}, nil
 	}
 	if saveModeStr == "" {
 		saveModeStr = string(SaveSession)
@@ -71,7 +72,7 @@ func (t *LearnedActivateTool) Execute(ctx context.Context, args map[string]inter
 
 	sys, err := t.Store.GetLearnedSystem(ctx, serviceType, serverName)
 	if err != nil {
-		return "", fmt.Errorf("get learned system: %w", err)
+		return tools.ToolOutcome{}, fmt.Errorf("get learned system: %w", err)
 	}
 
 	info := ServiceInfo{
@@ -87,8 +88,8 @@ func (t *LearnedActivateTool) Execute(ctx context.Context, args map[string]inter
 		},
 	}
 	if err := t.Manager.Activate(ctx, info, Credentials{}, SaveMode(saveModeStr)); err != nil {
-		return "", fmt.Errorf("activate learned connector: %w", err)
+		return tools.ToolOutcome{}, fmt.Errorf("activate learned connector: %w", err)
 	}
-	return fmt.Sprintf("Activated learned generic connector for %s @ %s", serviceType, serverName), nil
+	return tools.ToolOutcome{Content: fmt.Sprintf("Activated learned generic connector for %s @ %s", serviceType, serverName), Success: true}, nil
 }
 

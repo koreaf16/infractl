@@ -163,13 +163,18 @@ func (m RichModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ToolEndMsg:
 		m.currentTool = ""
 		m.currentTarget = ""
-		m.progress.CompleteTool(msg.ToolID, msg.Duration, msg.Success)
+		m.progress.CompleteTool(msg.ToolID, msg.Duration, msg.Success, msg.MetadataJSON)
+		if msg.Name == "verify_complete" {
+			if meta, ok := parseTaskProgressMetadata(msg.MetadataJSON); ok && strings.TrimSpace(meta.VerifiedByToolID) != "" {
+				m.progress.UpdateTaskProgress(meta.VerifiedByToolID, msg.MetadataJSON)
+			}
+		}
 		label := m.thinkingLabel
 		if label == "" {
 			label = "thinking..."
 		}
 		m.shimmer.SetText(label)
-		m.chat.CompleteLastBox(msg.Result, msg.Duration, msg.Success)
+		m.chat.CompleteLastBox(msg.Result, msg.Duration, msg.Success, msg.MetadataJSON)
 
 	case ResponseDoneMsg:
 		m.shimmer.RecordActivity()
@@ -254,7 +259,7 @@ func PrintUserHeader(input string) {
 func PrintBanner(state *SessionState) {
 	title := StyleBannerTitle.Render("Infractl") + " " + StyleBannerInfo.Render("v1.0.0")
 	info := StyleInfoBarDim.Render(
-		fmt.Sprintf("model: %s · %d servers", state.Model, state.ServerCount))
+		fmt.Sprintf("model: %s | %d workspaces", state.Model, state.ServerCount))
 	fmt.Printf("\n  %s\n  %s\n\n", title, info)
 }
 

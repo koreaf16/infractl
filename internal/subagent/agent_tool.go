@@ -54,10 +54,10 @@ func (t *DelegateAgentTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *DelegateAgentTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
+func (t *DelegateAgentTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (tools.ToolOutcome, error) {
 	prompt, ok := args["prompt"].(string)
 	if !ok || strings.TrimSpace(prompt) == "" {
-		return "", fmt.Errorf("prompt is required")
+		return tools.ToolOutcome{}, fmt.Errorf("prompt is required")
 	}
 	server, _ := args["server"].(string)
 	allowedTools := parseStringSlice(args["allowed_tools"])
@@ -81,9 +81,9 @@ func (t *DelegateAgentTool) Execute(ctx context.Context, args map[string]interfa
 
 	result := localRunner.executeDelegate(ctx, cfg)
 	if result.Err != nil {
-		return "", fmt.Errorf("delegate_task: %w", result.Err)
+		return tools.ToolOutcome{}, fmt.Errorf("delegate_task: %w", result.Err)
 	}
-	return result.Answer, nil
+	return tools.ToolOutcome{Content: result.Answer, Success: true}, nil
 }
 
 // executeDelegate는 delegate_task용 간소화된 실행 루프이다.

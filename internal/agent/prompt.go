@@ -1,12 +1,10 @@
 // Package agent
 // File: prompt.go
-// Description: ?먯씠?꾪듃 ?쒖뒪???꾨＼?꾪듃 理쒖긽??議곕┰ ?⑥닔? INFRACTL.md 濡쒕뜑
-// Responsibility: BuildContextual濡?SectionSet 湲곕컲 ?숈쟻 ?쒖뒪???꾨＼?꾪듃瑜?議곕┰?섍퀬 LoadInfractlMD濡??ъ슜??吏?쒕? 濡쒕뱶
-
+// Description: ?쒖뒪???꾨＼?꾪듃 議고빀 ???쒕쾭 而⑦뀓?ㅽ듃, ?됰룞 洹쒖튃, ?뱀뀡 ?뚮뜑留? INFRACTL.md 濡쒕뱶
+// Responsibility: BuildContextual??SectionSet 湲곕컲 ?뱀뀡 議고빀, ?쒕쾭 而⑦뀓?ㅽ듃 ?뚮뜑留? LoadInfractlMD ?뚯씪 濡쒕뱶 諛?@include 泥섎━
 package agent
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -19,9 +17,10 @@ import (
 	"github.com/yourorg/infractl/internal/rag"
 	"github.com/yourorg/infractl/internal/store"
 	"github.com/yourorg/infractl/internal/tools"
+	"github.com/yourorg/infractl/internal/workspace"
 )
 
-// BuildContextual? SectionSet???ы븿???뱀뀡留?怨⑤씪 ?쒖뒪???꾨＼?꾪듃瑜?議곕┰?쒕떎.
+// BuildContextual?? SectionSet??????????????뚯떴???貫?????筌?痢????ш끽維???ш낄援θキ???釉뚰????筌먲퐢??
 func BuildContextual(
 	sections SectionSet,
 	toolList []tools.Tool,
@@ -33,219 +32,89 @@ func BuildContextual(
 	ragSources []store.RAGSource,
 	knowledgeStats *rag.KnowledgeStats,
 	modelName string,
-	knowledgeContext string, // ?낅젰 湲곕컲 愿??吏??(鍮꾨룞湲??꾨━?섏튂 寃곌낵)
+	knowledgeContext string,
 	taskMemoryContext string,
 ) string {
-	var sb strings.Builder
-
-	isQwen := strings.Contains(strings.ToLower(modelName), "qwen")
-
-	// --- SectionCore: ??긽 ?ы븿 ---
-	sb.WriteString("You are infractl, an AI infrastructure management agent.\n")
-	sb.WriteString("You help operators manage servers and infrastructure by executing shell commands and analyzing results.\n\n")
-
-	// --- Core Principles: ALWAYS INCLUDED ---
-	sb.WriteString("## Core Principles\n")
-	sb.WriteString("1. **Ask before acting if ambiguous:** If the user mentions a server name, DB name, or instance name that does NOT appear in the Known Servers Pool and does NOT match the active server, call `ask_user_question` FIRST to clarify.\n")
-	sb.WriteString("2. **Minimum necessary tools only:** Call only the tool(s) needed to directly answer the question. Once you have enough information, respond with text immediately — do NOT call additional tools 'to be thorough'.\n")
-	sb.WriteString("3. **Bounded DB Verification:** Treat database \"connect/login\" requests as bounded verification unless the user explicitly asks for an interactive session. Prefer server focus, connector activation, or one-shot commands such as `SELECT 1` plus `EXIT`; do NOT leave tools sitting at `SQL>`, `mysql>`, or `psql` prompts.\n\n")
-
-	// Qwen ?꾩슜 媛?대뱶?쇱씤 二쇱엯
-	if isQwen {
-		appendQwenToolGuideline(&sb)
-	}
-
-	now := time.Now()
-	sb.WriteString(fmt.Sprintf("## Current Date & Time\n**%s** (UTC%s)\n\n",
-		now.Format("2006-01-02 15:04:05 (Mon)"),
-		now.Format("-07:00"),
-	))
-
-	// --- SectionEnvironment: ??긽 ?ы븿 ---
-	if activeServer != nil {
-		appendActiveServerContext(&sb, activeServer)
-	} else {
-		hostname, _ := os.Hostname()
-		cwd, _ := os.Getwd()
-		appendLocalControllerContext(&sb, runtime.GOOS, runtime.GOARCH, hostname, cwd)
-	}
-	if strings.TrimSpace(taskMemoryContext) != "" {
-		sb.WriteString(taskMemoryContext)
-		sb.WriteString("\n\n")
-	}
-
-	// --- SectionTools ---
-	// Keep inline tool index only for Qwen prompt-based tool mode.
-	if sections.Has(SectionTools) && len(toolList) > 0 && isQwen {
-		sb.WriteString("## Available Tools\n")
-		sb.WriteString("Qwen inline-tool mode: minimal tool index.\n\n")
-		for _, t := range toolList {
-			sb.WriteString(fmt.Sprintf("- **%s**: %s\n", t.Name(), t.Description()))
-			schemaBytes, _ := json.Marshal(t.Parameters())
-			sb.WriteString(fmt.Sprintf("  Args JSON Schema: %s\n", string(schemaBytes)))
-		}
-		sb.WriteString("\n")
-	}
-
-	// --- SectionServers ---
-	if sections.Has(SectionServers) && len(servers) > 0 {
-		sb.WriteString("## Known Servers Pool (SSH Targets)\n")
-		sb.WriteString("These are registered SSH servers ??i.e., machines you can connect to.\n")
-		sb.WriteString("**IMPORTANT:** A server name is NOT the same as a service or DB instance name.\n")
-		sb.WriteString("  - Server (SSH target): the machine itself, e.g. 'oracle-db', 'web-server'\n")
-		sb.WriteString("  - Service/Instance: a process running ON a server, e.g. Oracle SID 'ORCL', MySQL database name\n")
-		sb.WriteString("If the user mentions a name that does NOT match any server below, it is likely a service/instance name.\n\n")
-		for _, srv := range servers {
-			sb.WriteString(fmt.Sprintf("- **%s** (%s@%s:%d)\n", srv.Name, srv.User, srv.Host, srv.Port))
-		}
-		sb.WriteString("\n")
-
-		if activeServer == nil {
-			sb.WriteString("When executing commands on a specific server, include `\"target\": \"<server_name>\"` in tool arguments.\n")
-			sb.WriteString("When no server is specified, omit target or use \"localhost\".\n")
-			sb.WriteString("Do not invent remote-only constraints when target is omitted.\n\n")
-		}
-	}
-
-	// --- SectionGuardrails ---
-	if sections.Has(SectionGuardrails) {
-		appendContextGuardrails(&sb, activeServer == nil)
-	}
-
-	// --- SectionServerFocus ---
-	if sections.Has(SectionServerFocus) {
-		appendServerFocusSection(&sb, activeServer, servers)
-	}
-
-	// --- SectionRAG ---
-	if sections.Has(SectionRAG) {
-		// ?낅젰怨?愿?⑤맂 吏?앹씠 ?꾨━?섏튂??寃쎌슦 癒쇱? ?몃씪?몄쑝濡?二쇱엯?쒕떎.
-		// LLM??rag_search瑜??몄텧?섍린 ?꾩뿉 ?대? 愿???댁슜???뚯븙?????덇쾶 ?쒕떎.
-		if knowledgeContext != "" {
-			sb.WriteString(knowledgeContext)
-			sb.WriteString("\n\n")
-		}
-		appendRAGSection(&sb, ragSources, knowledgeStats)
-	}
-
-	// --- SectionLearnedSystems ---
-	if sections.Has(SectionLearnedSystems) && len(learnedSystems) > 0 {
-		appendLearnedSystemsSection(&sb, learnedSystems)
-	}
-
-	// --- SectionConnectors ---
-	if sections.Has(SectionConnectors) && len(connectorStates) > 0 {
-		appendConnectorsSection(&sb, connectorStates)
-	}
-
-	// --- ?섎룄 湲곕컲 ?뱀뀡??---
-	if sections.Has(SectionToolPriority) {
-		appendDedicatedToolPriority(&sb)
-	}
-
-	if sections.Has(SectionToolSelection) {
-		appendToolSelectionGuidelines(&sb)
-	}
-
-	if sections.Has(SectionErrorRecovery) {
-		appendErrorRecoveryProtocol(&sb)
-	}
-
-	if sections.Has(SectionDiscovery) {
-		appendDiscoveryFlow(&sb)
-	}
-
-	if sections.Has(SectionTaskCompletion) {
-		appendTaskCompletionRules(&sb)
-	}
-
-	if sections.Has(SectionGrounding) {
-		appendGroundingRules(&sb)
-	}
-
-	// --- SectionBehavior ---
-	if sections.Has(SectionBehavior) {
-		appendBehaviorRules(&sb)
-	}
-
-	if sections.Has(SectionPhasePlanning) {
-		appendPhasePlanning(&sb)
-	}
-
-	// --- SectionInfractlMD ---
-	if sections.Has(SectionInfractlMD) && infractlMD != "" {
-		sb.WriteString("## Project-Specific Instructions\n")
-		sb.WriteString(infractlMD)
-		sb.WriteString("\n\n")
-	}
-
-	return strings.TrimSpace(sb.String())
+	layout := BuildContextualLayoutAt(
+		sections,
+		toolList,
+		infractlMD,
+		servers,
+		activeServer,
+		connectorStates,
+		learnedSystems,
+		ragSources,
+		knowledgeStats,
+		modelName,
+		time.Now(),
+	)
+	return layout.Render(taskMemoryContext, knowledgeContext)
 }
 
-// appendActiveServerContext???≫떚釉??쒕쾭 而⑦뀓?ㅽ듃瑜??꾨＼?꾪듃??異붽??쒕떎.
+// appendActiveServerContext renders the active remote workspace and the local workspace fallback.
 func appendActiveServerContext(sb *strings.Builder, srv *store.Server) {
-	sb.WriteString("## [ACTIVE SESSION CONTEXT]\n")
-	sb.WriteString(fmt.Sprintf("You are currently focused on a specific target server: **%s**.\n", srv.Name))
-	sb.WriteString("Do NOT require the user to explicitly specify the server name. Operate on this server by default unless directed otherwise.\n")
-	sb.WriteString("When an active server is set, do not refer to it as \"localhost\" or \"local server\".\n")
-	sb.WriteString(fmt.Sprintf("- OS/Distribution: %s\n", srv.OS))
+	sb.WriteString("## Active Workspace Context\n")
+	sb.WriteString(fmt.Sprintf("The current active workspace is **%s**. When a tool target is omitted, execute in this workspace unless the user explicitly asks for the local workspace.\n", srv.Name))
+	sb.WriteString(fmt.Sprintf("- SSH: %s@%s:%d\n", srv.User, srv.Host, srv.Port))
+	if srv.WorkspaceDir != "" {
+		sb.WriteString(fmt.Sprintf("- Workspace directory: `%s`\n", srv.WorkspaceDir))
+	}
+	if srv.OS != "" {
+		sb.WriteString(fmt.Sprintf("- OS/distribution: %s\n", srv.OS))
+	}
 	if srv.EnvProfile != "" {
-		sb.WriteString(fmt.Sprintf("- Detected Environment: %s\n", srv.EnvProfile))
+		sb.WriteString(fmt.Sprintf("- Environment profile: %s\n", srv.EnvProfile))
 	}
-	sb.WriteString("\n**Primary Command Guidelines For This System:**\n")
-	osLow := strings.ToLower(srv.OS)
-	switch {
-	case strings.Contains(osLow, "windows"):
-		sb.WriteString("- This is a Windows system. You MUST use PowerShell cmdlets or traditional command prompt syntax.\n")
-	case strings.Contains(osLow, "ubuntu"), strings.Contains(osLow, "debian"):
-		sb.WriteString("- This is a Debian-based Linux system. Prefer `apt`, `systemctl`, `journalctl`, and standard bash utilities.\n")
-	case strings.Contains(osLow, "centos"), strings.Contains(osLow, "redhat"), strings.Contains(osLow, "linux"):
-		sb.WriteString("- This is a Linux system. Use standard bash utilities, grep, awk, systemctl, etc.\n")
-	}
-	sb.WriteString("\n")
+	sb.WriteString("- Use `target: \"localhost\"` only when the user asks for this local controller or local files.\n")
+	sb.WriteString("- `localhost` means the machine running infractl and can be Windows, Linux, or macOS.\n\n")
 
 	hostname, _ := os.Hostname()
 	cwd, _ := os.Getwd()
-	sb.WriteString("## Local Controller (Always Available)\n")
+	sb.WriteString("## Local Workspace (Always Available)\n")
 	sb.WriteString(fmt.Sprintf("- Local OS: %s (%s)\n", runtime.GOOS, runtime.GOARCH))
-	sb.WriteString(fmt.Sprintf("- Local Hostname: %s\n", hostname))
-	sb.WriteString(fmt.Sprintf("- Local Working Directory: %s\n", cwd))
+	sb.WriteString(fmt.Sprintf("- Local hostname: %s\n", hostname))
+	sb.WriteString(fmt.Sprintf("- Local workspace root: %s\n", cwd))
 	switch runtime.GOOS {
 	case "windows":
-		sb.WriteString("- Local Shell: PowerShell\n")
+		sb.WriteString("- Local shell: PowerShell\n")
+		sb.WriteString("- Local Windows paths such as `C:\\...` can be inspected with PowerShell and `target: \"localhost\"`.\n")
 	default:
-		sb.WriteString("- Local Shell: bash\n")
+		sb.WriteString("- Local shell: bash/sh\n")
+		sb.WriteString("- Windows-style paths such as `C:\\...` are not readable from this local controller unless mounted or transferred first.\n")
 	}
-	sb.WriteString("**You can ALWAYS execute commands on this local machine by specifying `\"target\": \"localhost\"` in tool arguments.**\n")
-	sb.WriteString("Use `target: \"localhost\"` when the user asks about local paths, local files, or commands that must run on this PC.\n")
-	sb.WriteString("NEVER tell the user that local execution is impossible. Local execution is always available.\n\n")
+	sb.WriteString("Local execution is always possible through `target: \"localhost\"`. Do not claim local access is unavailable without trying the local workspace.\n\n")
 }
 
-// appendServerFocusSection? ?쒕쾭 ?ъ빱??洹쒖튃 ?뱀뀡??異붽??쒕떎.
+// appendServerFocusSection guides the model to select the current workspace when needed.
 func appendServerFocusSection(sb *strings.Builder, activeServer *store.Server, servers []store.Server) {
 	if activeServer != nil {
-		return // Already covered by [ACTIVE SESSION CONTEXT]
+		return
 	}
-	sb.WriteString("## Active Server Focus\n")
+	sb.WriteString("## Workspace Focus\n")
 	switch {
 	case len(servers) == 1:
-		sb.WriteString(fmt.Sprintf("Only one server registered: **%s**. Call `server_focus` to set it as active.\n", servers[0].Name))
+		sb.WriteString(fmt.Sprintf("One SSH workspace is registered: **%s**. Call `workspace_focus` (alias: `server_focus`) to make it the active workspace when the user wants remote execution.\n", servers[0].Name))
 	case len(servers) > 1:
-		sb.WriteString("Multiple servers registered. Rules:\n")
-		sb.WriteString("- If the user explicitly names a server, call `server_focus server=<name>`.\n")
-		sb.WriteString("- If you are unsure which server to use, call `server_focus` with no args to let the user choose.\n")
-		sb.WriteString("- Once an active server is set, omit the target parameter in tool calls unless the user overrides it.\n")
+		sb.WriteString("Multiple SSH workspaces are registered. Rules:\n")
+		sb.WriteString("- If the user names a workspace, call `workspace_focus workspace=<name>` before omitting target.\n")
+		sb.WriteString("- If it is unclear which workspace to use, call `workspace_focus` with no arguments so the user can choose.\n")
+		sb.WriteString("- After a workspace is active, omit target for tools that should run there. Use `target: \"localhost\"` only for the local workspace.\n")
 	default:
-		sb.WriteString("No active server is set. Localhost is the default target.\n")
+		sb.WriteString("No SSH workspaces are registered. The current workspace is the local workspace.\n")
 	}
 	sb.WriteString("\n")
 }
 
-// appendLearnedSystemsSection? ?숈뒿???쒖뒪??紐⑸줉 ?뱀뀡??異붽??쒕떎.
+// appendLearnedSystemsSection?? ?????????筌?痢??癲ル슢?꾤땟戮⑤뭄??????????⑤베堉???筌먲퐢??
 func appendLearnedSystemsSection(sb *strings.Builder, learnedSystems []store.LearnedSystem) {
-	sb.WriteString("## Previously Learned Systems\n")
-	sb.WriteString("The following systems were previously discovered via adaptive learning:\n")
-	for _, sys := range learnedSystems {
+	sb.WriteString("## ?댁쟾???숈뒿???쒖뒪??n")
+	sb.WriteString("?꾨옒 ?쒖뒪?쒖? ?곸쓳???숈뒿???듯빐 ?댁쟾???먯????뺣낫?낅땲??\n")
+	const maxDisplay = 10
+	for i, sys := range learnedSystems {
+		if i >= maxDisplay {
+			sb.WriteString(fmt.Sprintf("- ... ??%d媛쒖쓽 ?쒖뒪?쒖씠 ???숈뒿?섏뼱 ?덉쓬\n", len(learnedSystems)-maxDisplay))
+			break
+		}
 		sb.WriteString(fmt.Sprintf("- **%s** on `%s`", sys.ServiceType, sys.ServerName))
 		if sys.CLIPath != "" {
 			sb.WriteString(fmt.Sprintf(" | CLI: `%s`", sys.CLIPath))
@@ -255,111 +124,155 @@ func appendLearnedSystemsSection(sb *strings.Builder, learnedSystems []store.Lea
 		}
 		sb.WriteString("\n")
 	}
-	sb.WriteString("Use these paths directly instead of searching again.\n\n")
+	sb.WriteString("?ㅼ떆 寃?됲븯吏 留먭퀬 ??寃쎈줈瑜?吏곸젒 ?ъ슜?쒕떎.\n\n")
 }
 
-// appendConnectorsSection? ?쒖꽦 而ㅻ꽖??紐⑸줉 ?뱀뀡??異붽??쒕떎.
+// appendConnectorsSection?? ??筌?????節뗪콪???癲ル슢?꾤땟戮⑤뭄??????????⑤베堉???筌먲퐢??
 func appendConnectorsSection(sb *strings.Builder, connectorStates []connector.ConnectorState) {
-	sb.WriteString("## Active Connectors (Services/Instances)\n")
-	sb.WriteString("The following DB/app services are currently active. \n")
-	sb.WriteString("**NOTE:** These are NOT servers; they run ON the servers listed above. \n")
-	sb.WriteString("To interact with these, use the specific tools provided (e.g., `oracle_ORCL.tablespace`).\n\n")
-	for _, cs := range connectorStates {
+	sb.WriteString("## ?쒖꽦 而ㅻ꽖??(?쒕퉬???몄뒪?댁뒪)\n")
+	sb.WriteString("?꾩옱 ?쒖꽦?붾맂 DB/???쒕퉬??紐⑸줉?낅땲??\n")
+	sb.WriteString("**二쇱쓽:** ?닿쾬?ㅼ? ?쒕쾭媛 ?꾨땲???꾩뿉 ?섏뿴???쒕쾭 ?꾩뿉???ㅽ뻾?섎뒗 ?쒕퉬?ㅼ엯?덈떎.\n")
+	sb.WriteString("???쒕퉬?ㅼ? ?곹샇?묒슜?섎젮硫??꾩슜 ?꾧뎄瑜??ъ슜?섏꽭??(?? `oracle_ORCL.tablespace`).\n\n")
+	const maxDisplay = 15
+	for i, cs := range connectorStates {
+		if i >= maxDisplay {
+			sb.WriteString(fmt.Sprintf("- ... ??%d媛쒖쓽 ?쒖꽦 而ㅻ꽖?곌? ???덉쓬\n", len(connectorStates)-maxDisplay))
+			break
+		}
 		icon := connectorIcon(string(cs.Status))
 		sb.WriteString(fmt.Sprintf("%s %s/%s/%s -> %s (%d tools)\n",
 			icon, cs.ServerName, cs.Type, cs.ServiceName, cs.Status, len(cs.Tools)))
 	}
-	sb.WriteString("\nUse connector-specific tools when available instead of raw shell_exec.\n\n")
+	sb.WriteString("\n媛?ν븯硫?raw shell_exec ???而ㅻ꽖???꾩슜 ?꾧뎄瑜??ъ슜?쒕떎.\n\n")
 }
 
-// appendBehaviorRules??湲곕낯 ?숈옉 洹쒖튃 ?뱀뀡??異붽??쒕떎.
+// appendBehaviorRules????れ삀???????깃탾 ???獒???????????⑤베堉???筌먲퐢??
 func appendBehaviorRules(sb *strings.Builder) {
-	sb.WriteString("## Behavior Rules\n")
-	sb.WriteString("1. **Before executing any command:** verify the target is clear.\n")
-	sb.WriteString("   - If the active server is already set but the user's request references a DIFFERENT name (e.g. '26AI DB' when active server is 'oracle-db'), ask the user which server/instance they mean before executing.\n")
-	sb.WriteString("   - Do NOT silently assume ??unknown targets must be confirmed.\n")
-	sb.WriteString("2. Present results in a clean, readable format.\n")
-	sb.WriteString("3. Every tool call MUST include a short `description` argument in Korean explaining the reason for the step.\n")
-	sb.WriteString("4. If a tool fails, analyze the error output ??do NOT blindly retry the same approach.\n")
-	sb.WriteString("5. Distinguish \"not found by the current pattern\" from \"does not exist\" in summaries.\n")
-	sb.WriteString("6. You must converse in the language the user is speaking.\n")
-	sb.WriteString("7. **After a tool failure:** call `rag_search` with the error message FIRST. Only retry shell_exec if rag_search provides a new approach. If the same error repeats 3+ times with no progress, STOP and explain the situation to the user.\n")
-	sb.WriteString("8. Exploratory queries should use exactly one directory listing call unless the user explicitly asks to go deeper.\n")
-	sb.WriteString("9. Final answers must be concise: answer first, include only key evidence, and avoid re-listing every execution step.\n\n")
+	sb.WriteString("## ?됰룞 洹쒖튃\n")
+	sb.WriteString("1. **紐낅졊 ?ㅽ뻾 ?????target) ?뺤씤 ?꾩닔:**\n")
+	sb.WriteString("   - ?쒖꽦 ?쒕쾭媛 ?ㅼ젙?섏뼱 ?덈뒗???ъ슜???붿껌???ㅻⅨ ?대쫫???멸툒?섎뒗 寃쎌슦(?? ?쒖꽦 ?쒕쾭 'oracle-db'?몃뜲 '26AI DB' ?멸툒), ?ㅽ뻾 ??諛섎뱶???ъ슜?먯뿉寃??뺤씤?쒕떎.\n")
+	sb.WriteString("   - ???遺덈챸?????덈? ?꾩쓽濡?媛?뺥븯吏 ?딅뒗????諛섎뱶???뺤씤?쒕떎.\n")
+	sb.WriteString("2. 寃곌낵??源붾걫?섍퀬 ?쎄린 ?ъ슫 ?뺤떇?쇰줈 ?쒖떆?쒕떎.\n")
+	sb.WriteString("3. 紐⑤뱺 ?꾧뎄 ?몄텧?먮뒗 ?대떦 ?④퀎???댁쑀瑜??쒓뎅?대줈 媛꾨왂???ㅻ챸?섎뒗 `description` ?몄옄瑜?諛섎뱶???ы븿?쒕떎.\n")
+	sb.WriteString("4. ?꾧뎄 ?ㅽ뙣 ???ㅻ쪟 異쒕젰??遺꾩꽍?쒕떎 ???숈씪??諛⑸쾿??臾댁옉???ъ떆?꾪븯吏 ?딅뒗??\n")
+	sb.WriteString("5. ?붿빟 ??\"?꾩옱 ?⑦꽩?쇰줈 李얠? 紐삵븿\"怨?\"議댁옱?섏? ?딆쓬\"??紐낇솗??援щ퀎?쒕떎.\n")
+	sb.WriteString("6. ?ъ슜?먭? ?ъ슜?섎뒗 ?몄뼱濡???뷀븳??\n")
+	sb.WriteString("7. **?꾧뎄 ?ㅽ뙣 ??** ?ㅻ쪟 硫붿떆吏濡?`rag_search`瑜?癒쇱? ?몄텧?쒕떎. rag_search媛 ???묎렐踰뺤쓣 ?쒖떆?섎뒗 寃쎌슦?먮쭔 shell_exec瑜??ъ떆?꾪븳?? ?숈씪 ?ㅻ쪟媛 50???댁긽 諛섎났?섎㈃ 利됱떆 以묐떒?섍퀬 ?ъ슜?먯뿉寃??곹솴???ㅻ챸?쒕떎.\n")
+	sb.WriteString("8. ?먯깋??議고쉶???ъ슜?먭? ??源딆씠 ?먯깋?섎룄濡?紐낆떆?곸쑝濡??붿껌?섏? ?딅뒗 ???붾젆?좊━ 紐⑸줉 ?몄텧 1?뚮줈 ?쒗븳?쒕떎.\n")
+	sb.WriteString("9. 理쒖쥌 ?듬?? 媛꾧껐?섍쾶: ?듭쓣 癒쇱? ?쒖떆?섍퀬, ?듭떖 洹쇨굅留??ы븿?섎ŉ, 紐⑤뱺 ?ㅽ뻾 ?④퀎瑜??щ굹?댄븯吏 ?딅뒗??\n")
+	sb.WriteString("10. **?뚯씪 ?먯깋 ???꾩껜 紐⑸줉 ?곗꽑:** ?ъ슜?먭? ?뚯씪紐낆쓣 紐낆떆?섏? ?딆? 寃쎌슦, ?뱀젙 ?⑦꽩/?ㅼ썙?쒕줈 ?꾪꽣留곹븯吏 留먭퀬 ?대떦 ?붾젆?좊━??**紐⑤뱺 ?뚯씪??癒쇱? ?섏뿴**?쒕떎. ?꾩껜 紐⑸줉??蹂닿퀬 ?곹빀???뚯씪??吏곸젒 ?뚯븙?쒕떎. ?⑦꽩 寃??寃곌낵媛 ?녿뜑?쇰룄 \"?뚯씪 ?놁쓬\"?쇰줈 ?⑥젙吏볦? ?딅뒗?????뚯씪紐낆씠 ?덉긽 ?⑦꽩怨??ㅻ? ???덈떎.\n")
+	sb.WriteString("11. **蹂듭옟???ㅻ떒怨??묒뾽** ?섑뻾 ??`TodoWrite` ?꾧뎄瑜??ъ슜?섏뿬 ?④퀎瑜?湲곕줉?섍퀬 吏꾪뻾 ?곹솴??異붿쟻?쒕떎.\n\n")
 }
 
-// LoadInfractlMD??~/.infractl/INFRACTL.md ?뚯씪??濡쒕뱶?쒕떎.
+// LoadInfractlMD??~/.infractl/INFRACTL.md ???????棺??짆?삠궘??筌먲퐢??
+type infractlMDFileState struct {
+	Path        string
+	Size        int64
+	ModUnixNano int64
+}
+
 func LoadInfractlMD() string {
-	home, err := os.UserHomeDir()
+	content, _ := loadInfractlMDData()
+	return content
+}
+
+func loadInfractlMDData() (string, []infractlMDFileState) {
+	stateDir, err := workspace.StateDir()
 	if err != nil {
-		slog.Debug("get home dir for INFRACTL.md", "err", err)
-		return ""
+		slog.Debug("get workspace state dir for INFRACTL.md", "err", err)
+		return "", nil
 	}
 
-	path := filepath.Join(home, ".infractl", "INFRACTL.md")
+	path := filepath.Join(stateDir, "INFRACTL.md")
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", nil
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return "", nil
 	}
 
 	slog.Debug("loaded INFRACTL.md", "path", path)
 	baseDir := filepath.Dir(path)
-	return processIncludes(string(data), baseDir, 0)
+	content, states := processIncludesWithState(string(data), baseDir, 0)
+	root := infractlMDFileState{
+		Path:        path,
+		Size:        info.Size(),
+		ModUnixNano: info.ModTime().UnixNano(),
+	}
+	return content, append([]infractlMDFileState{root}, states...)
 }
 
-// BuildMinimalChat? needs_tools=false(?쒖닔 ????????ъ슜?섎뒗 理쒖냼 ?쒖뒪???꾨＼?꾪듃瑜?諛섑솚?쒕떎.
-// ?명봽??而⑦뀓?ㅽ듃? ?꾧뎄 紐⑸줉???쇱젅 ?ы븿?섏? ?딆븘 ?섏씠濡쒕뱶瑜?理쒖냼?뷀븯??
-// ?ъ슜???몄뼱 媛먯?? ?먯씠?꾪듃 identity???좎??쒕떎.
+// BuildMinimalChat?? needs_tools=false(??筌?鍮??????????????嚥▲꺂痢?癲ル슔?됭짆????筌?痢????ш끽維???ш낄援θキ???袁⑸즵????筌먲퐢??
+// ?嶺뚮ㅏ援??????爾?????덉쉐?? ??ш낄猷??癲ル슢?꾤땟戮⑤뭄????繹먮냱???????? ????깅떋 ???쒓낮??棺??짆?삠궘?袁ⓦ걫?癲ル슔?됭짆????????
+// ??????嶺뚮ㅎ?????좊즴???? ??????ш낄援θキ?identity???????筌먲퐢??
 func BuildMinimalChat(infractlMD string) string {
-	now := time.Now()
-	var sb strings.Builder
-	sb.WriteString("You are infractl, an AI infrastructure management agent.\n")
-	sb.WriteString(fmt.Sprintf("Current time: %s (UTC%s).\n\n",
-		now.Format("2006-01-02 15:04:05"),
+	return buildMinimalChatAt(infractlMD, time.Now())
+}
+func appendCurrentDateContext(sb *strings.Builder, now time.Time) {
+	sb.WriteString(fmt.Sprintf("## Current Date\n**%s** (UTC%s)\n\n",
+		now.Format("2006-01-02 (Mon)"),
 		now.Format("-07:00"),
 	))
-	sb.WriteString("Rules:\n")
-	sb.WriteString("- You must converse in the language the user is speaking.\n")
-	sb.WriteString("- Keep responses concise and friendly.\n")
-	sb.WriteString("- If the user needs infrastructure help (server commands, logs, system info), let them know you can assist.\n")
-	sb.WriteString("- Do NOT call any tools for greetings, thanks, or casual conversation.\n")
-	if infractlMD != "" {
-		sb.WriteString("\n## Project-Specific Instructions\n")
-		sb.WriteString(infractlMD)
-		sb.WriteString("\n")
-	}
-	return strings.TrimSpace(sb.String())
 }
 
 func processIncludes(content string, baseDir string, depth int) string {
+	rendered, _ := processIncludesWithState(content, baseDir, depth)
+	return rendered
+}
+
+func processIncludesWithState(content string, baseDir string, depth int) (string, []infractlMDFileState) {
 	if depth >= 5 {
-		return content
+		return content, nil
 	}
 
 	var result strings.Builder
+	var states []infractlMDFileState
+	totalSize := 0
+	const maxTotalMDSize = 50000 // 理쒕? 50KB
+
 	for _, line := range strings.Split(content, "\n") {
+		if totalSize > maxTotalMDSize {
+			result.WriteString("\n[... INFRACTL.md include limit reached ...]\n")
+			break
+		}
+
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "@include ") {
 			includePath := strings.TrimSpace(trimmed[len("@include "):])
 			if !filepath.IsAbs(includePath) {
 				includePath = filepath.Join(baseDir, includePath)
 			}
+			info, statErr := os.Stat(includePath)
+			if statErr == nil {
+				states = append(states, infractlMDFileState{
+					Path:        includePath,
+					Size:        info.Size(),
+					ModUnixNano: info.ModTime().UnixNano(),
+				})
+			}
 			data, err := os.ReadFile(includePath)
 			if err != nil {
 				slog.Debug("@include file not found", "path", includePath, "err", err)
 				result.WriteString(line + "\n")
+				totalSize += len(line) + 1
 				continue
 			}
 			slog.Debug("@include processed", "path", includePath)
 			includeBaseDir := filepath.Dir(includePath)
-			included := processIncludes(string(data), includeBaseDir, depth+1)
+			included, nestedStates := processIncludesWithState(string(data), includeBaseDir, depth+1)
+			states = append(states, nestedStates...)
 			result.WriteString(included)
+			totalSize += len(included)
 			if !strings.HasSuffix(included, "\n") {
 				result.WriteString("\n")
+				totalSize += 1
 			}
 			continue
 		}
 		result.WriteString(line + "\n")
+		totalSize += len(line) + 1
 	}
-	return strings.TrimSuffix(result.String(), "\n")
+	return strings.TrimSuffix(result.String(), "\n"), states
 }

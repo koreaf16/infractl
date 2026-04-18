@@ -5,15 +5,16 @@ import "time"
 const maxToolHistory = 200
 
 type toolHistoryEntry struct {
-	toolID     string
-	toolName   string
-	target     string
-	result     string
-	duration   time.Duration
-	success    bool
-	finishedAt time.Time
-	shellLines []string
-	shellTotal int
+	toolID       string
+	toolName     string
+	target       string
+	result       string
+	metadataJSON string
+	duration     time.Duration
+	success      bool
+	finishedAt   time.Time
+	shellLines   []string
+	shellTotal   int
 }
 
 type toolHistory struct {
@@ -46,4 +47,13 @@ func (h *toolHistory) LatestShell() (toolHistoryEntry, bool) {
 		}
 	}
 	return toolHistoryEntry{}, false
+}
+
+func (h *toolHistory) UpdateTaskProgress(toolID string, metadataJSON string) {
+	for i := len(h.entries) - 1; i >= 0; i-- {
+		if h.entries[i].toolID == toolID {
+			h.entries[i].metadataJSON = metadataJSON
+			return
+		}
+	}
 }

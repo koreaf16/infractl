@@ -22,6 +22,29 @@ func (m AppModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		if m.form.active {
 			switch msg.Type {
+			case tea.KeyUp:
+				if m.form.IsSelectField() {
+					m.form.SelectUp()
+					return m, nil // inputBar history 이동 차단
+				}
+			case tea.KeyDown:
+				if m.form.IsSelectField() {
+					m.form.SelectDown()
+					return m, nil // inputBar history 이동 차단
+				}
+			case tea.KeyEnter:
+				if m.form.IsSelectField() {
+					// SELECT 필드: 텍스트 입력 없이 즉시 다음 필드로
+					m.input.Reset()
+					if m.form.AdvanceToNext() {
+						return m.Update(FormResponseMsg{
+							Result:  m.form.BuildResult(),
+							ReplyCh: m.form.replyCh,
+						})
+					}
+					m.input.ti.Placeholder = m.form.CurrentPlaceholder()
+					return m, nil
+				}
 			case tea.KeyTab:
 				m.form.NextField()
 				m.input.Reset()
@@ -33,18 +56,12 @@ func (m AppModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.input.ti.Placeholder = m.form.CurrentPlaceholder()
 				return m, nil
 			case tea.KeyEsc:
-				if m.form.phase == formPhaseReview {
-					m.form.phase = formPhaseEdit
-					m.input.Reset()
-					m.input.ti.Placeholder = m.form.CurrentPlaceholder()
-					return m, nil
-				}
 				return m.Update(FormResponseMsg{
 					Result:  FormResult{Cancelled: true},
 					ReplyCh: m.form.replyCh,
 				})
 			}
-			// 나머지 키는 inputBar로 fall-through (일반 타이핑/Enter)
+			// 나머지 키는 inputBar로 fall-through (텍스트 필드 타이핑/Enter)
 		}
 
 		if m.privilege.active {
@@ -83,6 +100,15 @@ func (m AppModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		if msg.String() == "ctrl+l" {
+			return m, tea.ClearScreen
+		}
+
+		if msg.String() == "ctrl+r" && !m.busy {
+			m.input.advanceHistorySearch()
+			return m, nil
+		}
+
 		if msg.String() == "ctrl+b" && m.busy {
 			count := m.activeTools.BackgroundAll()
 			if count > 0 {
@@ -102,8 +128,26 @@ func (m AppModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.Type == tea.KeyShiftTab {
+			// Plan Mode 종료 시 pending 명령이 있으면 큐 내용을 알림으로 표시한다.
+			// 실제 승인/실행은 `infractl plan exit [--approve|--reject-all]` CLI 로 처리한다.
+			if m.planMode {
+				if ps := m.ag.PlanState(); ps != nil && ps.Queue().Len() > 0 {
+					pending := ps.Queue().Peek()
+					notice := fmt.Sprintf("📋 Plan Mode 종료: %d개의 보류 명령이 있습니다.\n", len(pending))
+					for i, p := range pending {
+						notice += fmt.Sprintf("  [%d] %s (id=%s)\n", i+1, p.Tool, p.ID)
+					}
+					notice += "승인: infractl plan exit --approve <id,...>  |  거부: infractl plan exit --reject-all"
+					m.planMode = m.ag.TogglePlanMode()
+					m.statusBar.setPlanMode(m.planMode)
+					m.statusBar.setPlanPending(0)
+					return m, func() tea.Msg { return SystemMsg(notice) }
+				}
+			}
 			m.planMode = m.ag.TogglePlanMode()
 			m.statusBar.setPlanMode(m.planMode)
+			// Plan Mode 진입 시 pending 수 초기화 (이미 0이지만 명시적으로)
+			m.statusBar.setPlanPending(0)
 			return m, nil
 		}
 
@@ -127,6 +171,8 @@ func (m AppModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.ctx = ctx
 			m.cancel = cancel
 			m.busy = false
+			m.input.SetBusy(false)
+			m.statusBar.setQueueLen(0)
 			queueLen := m.queue.Len()
 			m.queue.Clear()
 			m.streamTokens = ""
@@ -152,6 +198,6 @@ func (m AppModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func welcomeBanner(model string, serverCount int) string {
 	title := StyleBannerTitle.Render("Infractl") + " " + StyleBannerInfo.Render("v1.0.0")
-	info := StyleInfoBarDim.Render(fmt.Sprintf("model: %s | %d servers", model, serverCount))
+	info := StyleInfoBarDim.Render(fmt.Sprintf("model: %s | %d workspaces", model, serverCount))
 	return fmt.Sprintf("\n  %s\n  %s\n", title, info)
 }

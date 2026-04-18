@@ -67,18 +67,18 @@ func (t *KnowledgeAddTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *KnowledgeAddTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
+func (t *KnowledgeAddTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (ToolOutcome, error) {
 	category, err := argString(args, "category", true)
 	if err != nil {
-		return "", err
+		return ToolOutcome{}, err
 	}
 	title, err := argString(args, "title", true)
 	if err != nil {
-		return "", err
+		return ToolOutcome{}, err
 	}
 	resolution, err := argString(args, "resolution", true)
 	if err != nil {
-		return "", err
+		return ToolOutcome{}, err
 	}
 	situation, _ := argString(args, "situation", false)
 	errorPattern, _ := argString(args, "error_pattern", false)
@@ -98,7 +98,7 @@ func (t *KnowledgeAddTool) Execute(ctx context.Context, args map[string]interfac
 
 	id, err := t.Store.SaveKnowledge(ctx, entry)
 	if err != nil {
-		return "", fmt.Errorf("save knowledge: %w", err)
+		return ToolOutcome{}, fmt.Errorf("save knowledge: %w", err)
 	}
 	entry.ID = id
 	if t.Memory != nil {
@@ -107,5 +107,5 @@ func (t *KnowledgeAddTool) Execute(ctx context.Context, args map[string]interfac
 		}
 	}
 
-	return fmt.Sprintf("Saved knowledge entry (ID: %d)\nCategory: %s\nTitle: %s", id, category, title), nil
+	return ToolOutcome{Content: fmt.Sprintf("Saved knowledge entry (ID: %d)\nCategory: %s\nTitle: %s", id, category, title), Success: true}, nil
 }

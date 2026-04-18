@@ -15,6 +15,7 @@ import (
 
 	"github.com/yourorg/infractl/internal/executor"
 	"github.com/yourorg/infractl/internal/store"
+	"github.com/yourorg/infractl/internal/workspace"
 )
 
 // SessionContextTool exposes the current local/remote execution context.
@@ -29,7 +30,7 @@ func (t *SessionContextTool) Name() string { return "session_context" }
 func (t *SessionContextTool) Description() string {
 	return "Show the current execution context for this infractl session.\n" +
 		"Use this before claiming a request is local-only, remote-only, or inaccessible.\n" +
-		"It reports the local controller OS, shell, working directory, active server, acquired OS sessions, and default execution rule."
+		"It reports the current workspace, local state directory, active workspace, acquired OS sessions, and default execution rule."
 }
 
 func (t *SessionContextTool) IsReadOnly() bool { return true }
@@ -42,7 +43,7 @@ func (t *SessionContextTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *SessionContextTool) Execute(ctx context.Context, _ map[string]interface{}, _ executor.Executor) (string, error) {
+func (t *SessionContextTool) Execute(ctx context.Context, _ map[string]interface{}, _ executor.Executor) (ToolOutcome, error) {
 	hostname, err := os.Hostname()
 	if err != nil || strings.TrimSpace(hostname) == "" {
 		hostname = "(unknown)"
@@ -52,15 +53,23 @@ func (t *SessionContextTool) Execute(ctx context.Context, _ map[string]interface
 	if err != nil || strings.TrimSpace(cwd) == "" {
 		cwd = "(unknown)"
 	}
+	localRoot, err := workspace.LocalRoot()
+	if err != nil || strings.TrimSpace(localRoot) == "" {
+		localRoot = cwd
+	}
+	stateDir, err := workspace.StateDir()
+	if err != nil || strings.TrimSpace(stateDir) == "" {
+		stateDir = "(unknown)"
+	}
 
 	active := t.snapshotActiveServer()
-	mode := "local-controller"
-	defaultRule := "omit target => localhost"
-	activeLine := "(none)"
+	mode := "local-workspace"
+	defaultRule := "omit target => current local workspace"
+	activeLine := "(local workspace)"
 	if active != nil {
-		mode = "active-server"
-		defaultRule = fmt.Sprintf("omit target => active server %q", active.Name)
-		activeLine = formatServerLine(*active)
+		mode = "active-workspace"
+		defaultRule = fmt.Sprintf("omit target => active workspace %q", active.Name)
+		activeLine = formatWorkspaceLine(*active)
 	}
 
 	registered := "(none)"
@@ -69,15 +78,17 @@ func (t *SessionContextTool) Execute(ctx context.Context, _ map[string]interface
 		if listErr == nil && len(servers) > 0 {
 			lines := make([]string, 0, len(servers))
 			for _, srv := range servers {
-				lines = append(lines, "- "+formatServerLine(srv))
+				lines = append(lines, "- "+formatWorkspaceLine(srv))
 			}
 			registered = strings.Join(lines, "\n")
 		}
 	}
 
-	return fmt.Sprintf(
-		"Mode: %s\nLocal Target: localhost\nLocal OS: %s/%s\nLocal Shell: %s\nHostname: %s\nWorking Directory: %s\nActive Server: %s\nRegistered Servers:\n%s\nAcquired OS Sessions:\n%s\nDefault Execution Rule: %s",
+	return ToolOutcome{Content: fmt.Sprintf(
+		"Mode: %s\nCurrent Workspace: %s\nWorkspace State Dir: %s\nLocal Target: localhost\nLocal OS: %s/%s\nLocal Shell: %s\nHostname: %s\nWorking Directory: %s\nActive Workspace: %s\nRegistered Workspaces:\n%s\nAcquired OS Sessions:\n%s\nDefault Execution Rule: %s",
 		mode,
+		localRoot,
+		stateDir,
 		runtime.GOOS,
 		runtime.GOARCH,
 		executor.LocalShellName(),
@@ -87,7 +98,7 @@ func (t *SessionContextTool) Execute(ctx context.Context, _ map[string]interface
 		registered,
 		t.formatAcquiredSessions(),
 		defaultRule,
-	), nil
+	), Success: true}, nil
 }
 
 func (t *SessionContextTool) snapshotActiveServer() *store.Server {
@@ -102,8 +113,11 @@ func (t *SessionContextTool) snapshotActiveServer() *store.Server {
 	return &cp
 }
 
-func formatServerLine(srv store.Server) string {
+func formatWorkspaceLine(srv store.Server) string {
 	parts := []string{fmt.Sprintf("%s (%s@%s:%d)", srv.Name, srv.User, srv.Host, srv.Port)}
+	if srv.WorkspaceDir != "" {
+		parts = append(parts, "Workspace="+srv.WorkspaceDir)
+	}
 	if srv.OS != "" {
 		parts = append(parts, "OS="+srv.OS)
 	}

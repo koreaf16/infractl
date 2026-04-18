@@ -31,6 +31,7 @@ func NewManager(localExec Executor) *Manager {
 
 // Get은 target에 해당하는 Executor를 반환한다.
 // target이 빈 문자열, "localhost", "local"이면 로컬 executor를 반환한다.
+// target이 원격 서버 이름(Alias)이나 IP 주소와 일치하는지 확인한다.
 // 등록되지 않은 target이면 사용 가능한 서버 목록을 포함한 error를 반환한다.
 func (m *Manager) Get(target string) (Executor, error) {
 	if IsLocalTarget(target) {
@@ -40,12 +41,20 @@ func (m *Manager) Get(target string) (Executor, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	exec, ok := m.remotes[target]
-	if !ok {
-		available := m.listNamesLocked()
-		return nil, fmt.Errorf("server %q not found (available: %s)", target, strings.Join(available, ", "))
+	// 1. 이름(Alias)으로 검색
+	if exec, ok := m.remotes[target]; ok {
+		return exec, nil
 	}
-	return exec, nil
+
+	// 2. IP 주소(Host)로 검색 (Fallback)
+	for _, exec := range m.remotes {
+		if exec.Host() == target {
+			return exec, nil
+		}
+	}
+
+	available := m.listNamesLocked()
+	return nil, fmt.Errorf("workspace %q not found (available: %s)", target, strings.Join(available, ", "))
 }
 
 // Has reports whether a remote executor is currently registered.
@@ -81,7 +90,7 @@ func (m *Manager) Remove(name string) error {
 
 	exec, ok := m.remotes[name]
 	if !ok {
-		return fmt.Errorf("server %q not registered", name)
+		return fmt.Errorf("workspace %q not registered", name)
 	}
 
 	if closer, ok := exec.(io.Closer); ok {

@@ -55,12 +55,13 @@ func (t *DiskUsageTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *DiskUsageTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
+func (t *DiskUsageTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (ToolOutcome, error) {
 	path, _ := argString(args, "path", false)
 	if path == "" {
 		path = "/"
 	}
 	mode, _ := argString(args, "mode", false)
+	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode == "" {
 		mode = "summary"
 	}
@@ -71,12 +72,12 @@ func (t *DiskUsageTool) Execute(ctx context.Context, args map[string]interface{}
 
 	result, err := exec.Execute(ctx, cmd)
 	if err != nil {
-		return fmt.Sprintf("execution failed: %s", err), nil
+		return ToolOutcome{Content: fmt.Sprintf("execution failed: %s", err), Success: true}, nil
 	}
 	if result.ExitCode != 0 && result.Stdout == "" {
-		return fmt.Sprintf("error (exit %d):\n%s", result.ExitCode, result.Stderr), nil
+		return ToolOutcome{Content: fmt.Sprintf("error (exit %d):\n%s", result.ExitCode, result.Stderr), Success: true}, nil
 	}
-	return strings.TrimSpace(result.Stdout), nil
+	return ToolOutcome{Content: strings.TrimSpace(result.Stdout), Success: true}, nil
 }
 
 func buildDiskUsageCommand(path, mode string, depth int, platform executor.Platform) string {

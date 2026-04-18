@@ -19,17 +19,20 @@ import (
 
 // ClassifyResult는 LLM 분류 단계에서 결정된 도구·섹션·모델 선택 결과이다.
 type ClassifyResult struct {
-	NeedsTools     bool     `json:"needs_tools"`
-	ToolGroups     []string `json:"tool_groups"`
-	PromptSections []string `json:"prompt_sections"`
-	Tier           string   `json:"tier"` // "fast", "general", "reasoning"
+	NeedsTools           bool     `json:"needs_tools"`
+	ToolGroups           []string `json:"tool_groups"`
+	PromptSections       []string `json:"prompt_sections"`
+	Tier                 string   `json:"tier"`                             // "fast", "general", "reasoning"
+	TaskType             string   `json:"task_type,omitempty"`              // reasoning 작업 유형: "install", "troubleshoot", "configure", "analyze", "migrate", "plan"
+	Complexity           string   `json:"complexity,omitempty"`             // "simple" | "complex"
+	RequiresTaskProposal bool     `json:"requires_task_proposal,omitempty"` // true if complex task needs propose_task first
 }
 
 // classifySystemPrompt는 분류 단계의 시스템 프롬프트이다.
-const classifySystemPrompt = `You are infractl, an AI infrastructure management agent.
-Analyze the user's request and determine:
-1. TOOLS: Which tool groups and instruction sections are needed?
-2. MODEL: Which LLM tier is most suitable for execution?
+const classifySystemPrompt = `당신은 인프라 관리 AI 에이전트 infractl입니다.
+사용자 요청을 분석하여 아래 항목을 결정하세요:
+1. 도구: 어떤 도구 그룹과 지시 섹션이 필요한가?
+2. 모델: 실행에 가장 적합한 LLM 티어는 무엇인가?
 
 ## Model Tier Selection (CRITICAL — read carefully)
 
@@ -60,18 +63,42 @@ Analyze the user's request and determine:
 - 단순 조회/요약/포맷팅 → "fast"
 - 단순 접속/포커스 요청은 reasoning이 아닌 general 선택.
 
-## needs_tools 판단 기준 (CRITICAL)
-Set needs_tools=FALSE for:
-- Greetings, farewells: "하이", "안녕", "hi", "hello", "bye", "잘가"
-- Thanks/acknowledgement: "감사", "고마워", "thanks", "ㄱㅅ", "넵", "ㅎㅎ"
-- Casual chitchat with no infrastructure intent
-- Simple yes/no affirmations: "응", "네", "ok", "okay"
 
-Set needs_tools=TRUE only when the request requires:
-- Reading server/system state (CPU, memory, disk, processes, logs)
-- Executing commands or managing files on a server
-- Querying or modifying databases, services, or containers
-- Searching/registering knowledge, managing SSH servers
+## Task Type (tier=reasoning일 때만 설정)
+
+reasoning 티어를 선택한 경우, 작업 유형을 아래 중 하나로 반드시 지정하세요:
+- "install"      — 소프트웨어/패키지 설치, 배포, 구축: "nginx 설치해줘", "docker 깔아줘", "패키지 추가해줘"
+- "troubleshoot" — 문제 해결, 디버깅, 장애 대응: "왜 안 되지?", "서비스가 죽었어", "에러 원인 찾아줘", "연결이 안 돼"
+- "configure"    — 설정 변경, 구성, 수정: "nginx 설정 변경해줘", "방화벽 규칙 추가해줘", "config 수정"
+- "analyze"      — 분석, 점검, 진단: "성능 분석해줘", "보안 점검해줘", "로그 분석해줘"
+- "migrate"      — 마이그레이션, 업그레이드, 이전: "버전 업그레이드해줘", "DB 마이그레이션"
+- "plan"         — 계획 수립, 아키텍처 설계, 전략: "HA 구성 전략", "마이그레이션 계획 세워줘"
+
+task_type 판단 예시:
+- "nginx 설치해줘" → task_type: "install"
+- "왜 서비스가 죽었는지 분석해줘" → task_type: "troubleshoot"
+- "Oracle DB 설정 변경해줘" → task_type: "configure"
+- "CPU 성능 저하 원인 파악해줘" → task_type: "analyze"
+- "MySQL 8.0으로 업그레이드해줘" → task_type: "migrate"
+- "HA 이중화 아키텍처 계획 세워줘" → task_type: "plan"
+
+## needs_tools 판단 기준 (CRITICAL)
+needs_tools=FALSE 로 설정하는 경우:
+- 인사말, 작별인사: "하이", "안녕", "hi", "hello", "bye", "잘가"
+- 감사/인정: "감사", "고마워", "thanks", "ㄱㅅ", "넵", "ㅎㅎ"
+- 인프라 의도 없는 일상 대화
+- 단순 긍정/부정: "응", "네", "ok", "okay"
+
+다음의 경우에만 needs_tools=TRUE 로 설정한다:
+- 서버/시스템 상태 조회 (CPU, 메모리, 디스크, 프로세스, 로그)
+- 서버에서 명령 실행 또는 파일 관리
+- 데이터베이스, 서비스, 컨테이너 조회 또는 변경
+- 지식 검색/등록, SSH 서버 관리
+
+후속 메시지 처리:
+- 현재 입력이 짧은 연속 또는 확인이고, 최근 대화에서 이미 인프라 작업이 진행 중이었다면 해당 작업의 일부로 취급한다.
+- 작업 연속 예시: "가능하니깐 해줘", "직접 해줘", "그대로 진행해", "그걸로 해" 등.
+- 주변 컨텍스트가 명확히 운영 작업인 경우 이러한 후속 메시지를 일상 대화로 분류하지 않는다.
 
 Examples:
 - "하이?" → needs_tools: false, tier: fast
@@ -88,23 +115,40 @@ Examples:
 - "왜 서비스가 죽었는지 분석해줘" → needs_tools: true, tool_groups: ["file_ops","shell"], tier: reasoning
 - "결과 요약해줘" → needs_tools: false, tier: fast
 
-## Tool Groups
-- system_info: Read OS info, CPU/memory/disk usage, running processes
-- file_ops: Read/write files, transfer files, tail logs
-- shell: Execute shell commands on the currently focused & connected server
-- network: Network interface info, Kubernetes cluster queries
-- service_mgmt: Check/start/stop system services (systemd, etc.)
-- server_mgmt: SSH server management (list, add, focus); use this for "connect to server" or "switch server"
-- connector: DB/Service specific connection/activation; ONLY use this when user explicitly wants to login to DB, PDB, instance, or use sqlplus
-- discovery: Auto-detect services on a server, probe connector types
-- knowledge: Search/store knowledge base entries and RAG documents
-- web: Web search and URL fetch
-- orchestration: Background jobs, subagents, checkpoints, scheduling
+## 도구 그룹
+- system_info: OS 정보, CPU/메모리/디스크 사용량, 실행 중인 프로세스 조회
+- file_ops: 파일 읽기/쓰기, 파일 전송, 로그 tail
+- shell: 현재 포커스된 서버에서 셸 명령 실행
+- network: 네트워크 인터페이스 정보, Kubernetes 클러스터 조회
+- service_mgmt: 시스템 서비스 확인/시작/중지 (systemd 등)
+- server_mgmt: SSH 서버 관리 (목록, 추가, 포커스); "서버 접속" 또는 "서버 전환" 요청에 사용
+- connector: DB/서비스 연결/활성화; 사용자가 DB, PDB, 인스턴스 로그인 또는 sqlplus 사용을 명시적으로 요청할 때만 사용
+- discovery: 서버 서비스 자동 탐지, 커넥터 유형 프로브
+- knowledge: 지식 베이스 항목 검색/저장, RAG 문서 관리
+- web: 웹 검색 및 URL 조회; 최신 정보, 공식 문서, 릴리스 노트, 출처 검증에 사용
+- orchestration: 백그라운드 작업, 서브에이전트, 체크포인트, 스케줄링
+
+If the request depends on current facts, version-sensitive behavior, or external verification, include the web tool group even if local knowledge or RAG also has an answer.
+However, if the user explicitly asserts that something is already the latest or already verified (e.g. "최신이야", "이미 확인했어", "방금 받았어", "already the latest", "already checked"), do NOT include the web tool group — treat the user's statement as ground truth and proceed without web verification.
+
+## Complexity Classification (IMPORTANT)
+
+Complexity=complex 판정 기준 (다음 중 하나라도 해당하면 complex):
+- 2단계 이상 순서가 있는 작업
+- 파일/DB/서비스를 영구 변경(mutation)하는 작업
+- 다중 서버 대상
+- 서비스 재시작 또는 다운타임 포함
+- install/patch/migrate/backup 키워드 포함
+
+Complexity=simple: 단순 조회, 단일 명령, 상태 확인.
+
+requires_task_proposal=true: Complexity=complex AND tier=reasoning일 때 반드시 true 설정.
+→ 이 경우 LLM은 declare_task 직접 호출 금지. 반드시 propose_task를 먼저 호출해야 한다.
 
 Use the 'classify_request' tool to specify your requirements.`
 
 // shortChatPattern은 LLM 호출 없이 즉시 needs_tools=false로 판단할 수 있는 짧은 인사/잡담 패턴이다.
-var shortChatPattern = regexp.MustCompile(`(?i)^(하이|안녕|hi|hello|hey|ㅎㅇ|ㅎㅎ|감사|고마워|thank(s| you)?|ㄱㅅ|넵|네|응|ㅇㅇ|ok|okay|bye|ㅂㅂ|잘자|잘가|수고|좋아|알겠어|알겠습니다|오케이|굿)[?!.\s]*$`)
+var shortChatPattern = regexp.MustCompile(`(?i)^(하이|안녕|hi|hello|hey|ㅎㅇ|ㅎㅎ|감사|고마워|thank(s| you)?|ㄱㅅ|넵|네|예|응|ㅇㅇ|ok|okay|bye|ㅂㅂ|잘자|잘가|수고|좋아|알겠어|알겠습니다|오케이|굿)[?!.\s]*$`)
 
 // reasoningPattern은 LLM 분류 없이 reasoning 티어로 즉시 판단할 수 있는 키워드 패턴이다.
 // 설치, 트러블슈팅, 분석, 계획 등 고난도 작업을 감지한다.
@@ -127,6 +171,19 @@ var reasoningPattern = regexp.MustCompile(`(?i)(` +
 	`구성.*방법|how.*configure|how.*setup` +
 	`)`)
 
+// complexityPattern은 rule-based complex 복잡도 힌트 감지를 위한 패턴이다.
+// 설치·패치·마이그레이션·백업·업그레이드·멀티스텝·서비스 재시작 등을 감지한다.
+var complexityPattern = regexp.MustCompile(`(?i)(` +
+	`설치|install(ation)?|` +
+	`패치|patch(ing)?|` +
+	`마이그레이션|migrat(ion|e)|` +
+	`백업|backup|` +
+	`업그레이드|upgrade|` +
+	`2단계|멀티스텝|multi.?step|` +
+	`재시작.*서비스|서비스.*재시작|restart.*service|service.*restart|` +
+	`데이터.*이전|data.*transfer` +
+	`)`)
+
 // fastPattern은 LLM 분류 없이 fast 티어로 즉시 판단할 수 있는 키워드 패턴이다.
 // 단순 요약, 포맷팅, 목록 조회 등을 감지한다.
 var fastPattern = regexp.MustCompile(`(?i)(` +
@@ -135,6 +192,8 @@ var fastPattern = regexp.MustCompile(`(?i)(` +
 	`표로.*만들|format.*table|make.*table|` +
 	`json.*변환|yaml.*변환|convert.*to|` +
 	`목록.*보여|show.*list|list.*show|` +
+	`서버.*(추가|생성|접속|연결|전환|목록)|` +
+	`workspace.*(추가|생성|접속|연결|전환|목록)|` +
 	`뭐였|what was|무엇이었|` +
 	`몇 개|how many|개수|count` +
 	`)`)
@@ -146,10 +205,11 @@ var fastPattern = regexp.MustCompile(`(?i)(` +
 // 2. reasoning/fast 키워드 사전 감지 → tier 선결정
 // 3. LLM 분류 (tool_groups, prompt_sections, tierHint 없으면 tier도)
 // 4. tierHint가 있으면 LLM의 tier 판단을 오버라이드
-func (a *Agent) runSelfClassification(ctx context.Context, userInput string) (ClassifyResult, error) {
+func (a *Agent) runSelfClassification(ctx context.Context, userInput string, history ...llm.Message) (ClassifyResult, error) {
 	trimmed := strings.TrimSpace(userInput)
 
 	// 1단계: 인사/잡담 fast-path (LLM 호출 없이 즉시 반환)
+	// 히스토리 유무와 무관하게 명확한 인사/잡담 패턴은 LLM 없이 즉시 판단한다.
 	if len([]rune(trimmed)) <= 20 && shortChatPattern.MatchString(trimmed) {
 		slog.Debug("fast-path classification: greeting/chat detected", "input", trimmed)
 		llm.LogSystemEvent("Classification", "Fast-path triggered: greeting/chat detected.\nSelected Tier: fast\nNeedsTools: false")
@@ -167,11 +227,14 @@ func (a *Agent) runSelfClassification(ctx context.Context, userInput string) (Cl
 		slog.Debug("rule-based tier hint: fast", "input", trimmed)
 	}
 
+	// rule-based complexity hint: LLM 호출 전에 미리 판정해 두고 LLM 결과를 보완한다.
+	complexHint := complexityPattern.MatchString(trimmed)
+
 	// 3단계: LLM 분류 (tool_groups, prompt_sections 결정)
-	result, err := a.llmClassify(ctx, userInput)
+	result, err := a.llmClassify(ctx, userInput, history...)
 	if err != nil {
 		slog.Warn("llm classification failed, using rule-based fallback", "err", err, "tier_hint", tierHint)
-		return classifyFallback(tierHint), nil
+		result = classifyFallback(tierHint)
 	}
 
 	// 4단계: tierHint가 있으면 LLM의 tier 판단을 오버라이드
@@ -181,17 +244,50 @@ func (a *Agent) runSelfClassification(ctx context.Context, userInput string) (Cl
 		result.Tier = tierHint
 	}
 
+	// 5단계: rule-based complexity 폴백 적용
+	if complexHint && result.Complexity == "" {
+		result.Complexity = "complex"
+	}
+	if result.Complexity == "complex" && result.Tier == "reasoning" {
+		result.RequiresTaskProposal = true
+	}
+
+	if applyWebSearchHints(&result, trimmed) {
+		slog.Debug("rule-based web hint applied", "input", trimmed, "groups", result.ToolGroups, "sections", result.PromptSections)
+	}
+
+	// reasoning-tier 는 pre-flight intel 서브에이전트 실행을 위해 task_type 이 반드시 필요하다.
+	// 분류 모델이 task_type 을 누락하면 사용자 입력에서 재추론하고, 실패 시 plan 으로 안전 폴백한다.
+	if result.Tier == "reasoning" && strings.TrimSpace(result.TaskType) == "" {
+		taskType := classifyTaskType(trimmed)
+		inferredFromInput := taskType != ""
+		if taskType == "" {
+			taskType = TaskTypePlan
+		}
+		result.TaskType = string(taskType)
+		slog.Debug("normalized reasoning task_type",
+			"inferred", result.TaskType,
+			"from_input", inferredFromInput,
+		)
+	}
+
 	return result, nil
 }
 
-// llmClassify는 General LLM을 통해 분류 결과를 얻는다.
-func (a *Agent) llmClassify(ctx context.Context, userInput string) (ClassifyResult, error) {
-	client, _, modelName := a.resolveClientForTier("general")
+// llmClassify는 LLM을 통해 분류 결과를 얻는다.
+// fast 모델이 등록된 경우 fast를 우선 사용하고, 없으면 general로 폴백한다.
+func (a *Agent) llmClassify(ctx context.Context, userInput string, history ...llm.Message) (ClassifyResult, error) {
+	classifyTier := "general"
+	if a.llmRegistry != nil && a.llmRegistry.Has(llm.TierFast) {
+		classifyTier = "fast"
+	}
+	client, _, modelName := a.resolveClientForTier(classifyTier)
 	client = classificationClient(client)
 
+	prompt := buildClassificationPrompt(userInput, history)
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: classifySystemPrompt},
-		{Role: llm.RoleUser, Content: userInput},
+		{Role: llm.RoleUser, Content: prompt},
 	}
 
 	toolDefs := []llm.ToolDef{
@@ -199,17 +295,17 @@ func (a *Agent) llmClassify(ctx context.Context, userInput string) (ClassifyResu
 			Type: "function",
 			Function: llm.FunctionDef{
 				Name:        "classify_request",
-				Description: "Load specific tools, context sections, and select execution model for the current request.",
-				Parameters: map[string]interface{}{
+				Description: "현재 요청에 필요한 도구, 컨텍스트 섹션을 로드하고 실행 모델을 선택한다.",
+				Parameters: map[string]any{
 					"type": "object",
-					"properties": map[string]interface{}{
-						"needs_tools": map[string]interface{}{
+					"properties": map[string]any{
+						"needs_tools": map[string]any{
 							"type":        "boolean",
-							"description": "True if tools are needed to fulfill the request. False for greetings, chitchat, thanks, or simple conversation.",
+							"description": "요청 처리에 도구가 필요하면 true. 인사말, 잡담, 감사 표현, 단순 대화는 false.",
 						},
-						"tool_groups": map[string]interface{}{
+						"tool_groups": map[string]any{
 							"type": "array",
-							"items": map[string]interface{}{
+							"items": map[string]any{
 								"type": "string",
 								"enum": []string{
 									"system_info", "file_ops", "shell", "network",
@@ -218,25 +314,40 @@ func (a *Agent) llmClassify(ctx context.Context, userInput string) (ClassifyResu
 								},
 							},
 						},
-						"prompt_sections": map[string]interface{}{
+						"prompt_sections": map[string]any{
 							"type": "array",
-							"items": map[string]interface{}{
+							"items": map[string]any{
 								"type": "string",
 								"enum": []string{
-									"safety", "install", "error_recovery", "grounding",
+									"safety", "error_recovery", "grounding",
 									"tool_priority", "tool_selection", "task_completion",
-									"phase_planning", "discovery",
+									"phase_planning", "discovery", "rag", "behavior",
+									"servers", "connectors", "learned_systems",
 								},
 							},
 						},
-						"tier": map[string]interface{}{
+						"tier": map[string]any{
 							"type":        "string",
-							"description": "Select the execution LLM tier based on task complexity.",
+							"description": "작업 복잡도에 따라 실행 LLM 티어를 선택한다.",
 							"enum":        []string{"fast", "general", "reasoning"},
 						},
-						"reasoning": map[string]interface{}{
+						"task_type": map[string]any{
 							"type":        "string",
-							"description": "Why these resources and this model were selected.",
+							"description": "tier=reasoning일 때 필수. reasoning 작업 유형을 분류한다.",
+							"enum":        []string{"install", "troubleshoot", "configure", "analyze", "migrate", "plan"},
+						},
+						"complexity": map[string]any{
+							"type":        "string",
+							"enum":        []string{"simple", "complex"},
+							"description": "작업 복잡도. 2단계 이상·mutation·서비스 재시작·install·migrate 등이면 complex.",
+						},
+						"requires_task_proposal": map[string]any{
+							"type":        "boolean",
+							"description": "complexity=complex AND tier=reasoning일 때 true. propose_task를 먼저 호출해야 한다.",
+						},
+						"reasoning": map[string]any{
+							"type":        "string",
+							"description": "해당 도구·모델을 선택한 이유.",
 						},
 					},
 					"required": []string{"needs_tools", "tier", "reasoning"},
@@ -245,9 +356,9 @@ func (a *Agent) llmClassify(ctx context.Context, userInput string) (ClassifyResu
 		},
 	}
 
-	toolChoice := map[string]interface{}{
+	toolChoice := map[string]any{
 		"type":     "function",
-		"function": map[string]interface{}{"name": "classify_request"},
+		"function": map[string]any{"name": "classify_request"},
 	}
 
 	resp, err := client.Chat(ctx, messages, toolDefs, toolChoice)
@@ -277,7 +388,7 @@ func (a *Agent) llmClassify(ctx context.Context, userInput string) (ClassifyResu
 	))
 
 	slog.Info("LLM self-judgment", "needs_tools", result.NeedsTools, "groups", result.ToolGroups,
-		"sections", result.PromptSections, "tier", result.Tier)
+		"sections", result.PromptSections, "tier", result.Tier, "task_type", result.TaskType)
 	return result, nil
 }
 
@@ -301,6 +412,45 @@ func getReasoningFromRaw(raw string) string {
 	}
 	_ = json.Unmarshal([]byte(raw), &parsed)
 	return parsed.Reasoning
+}
+
+func buildClassificationPrompt(userInput string, history []llm.Message) string {
+	var recent []llm.Message
+	for i := len(history) - 1; i >= 0; i-- {
+		msg := history[i]
+		if msg.Role == llm.RoleSystem {
+			continue
+		}
+		if msg.Role == llm.RoleUser && strings.TrimSpace(msg.Content) == strings.TrimSpace(userInput) {
+			continue
+		}
+		recent = append(recent, msg)
+		if len(recent) >= 6 {
+			break
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("이 작업을 분류하세요 (reasoning/general/fast 중 하나로 응답):\n")
+	sb.WriteString("현재 사용자 입력:\n")
+	sb.WriteString(strings.TrimSpace(userInput))
+
+	if len(recent) > 0 {
+		sb.WriteString("\n\n최근 대화 컨텍스트:\n")
+		for i := len(recent) - 1; i >= 0; i-- {
+			msg := recent[i]
+			role := "어시스턴트"
+			if msg.Role == llm.RoleUser {
+				role = "사용자"
+			}
+			sb.WriteString(role)
+			sb.WriteString(": ")
+			sb.WriteString(strings.TrimSpace(msg.Content))
+			sb.WriteString("\n")
+		}
+	}
+
+	return sb.String()
 }
 
 func truncateClassifyContent(content string, maxLen int) string {

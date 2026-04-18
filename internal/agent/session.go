@@ -61,6 +61,10 @@ func (a *Agent) RestoreSession(ctx context.Context, sessionID int64) error {
 		}
 		a.history = append(a.history, llmMessageFromSession(sm))
 	}
+
+	// 복원 후 즉시 히스토리 정리 (maxHistory 준수)
+	a.trimHistory()
+
 	a.currentSessionID = sessionID
 	slog.Info("session restored", "id", sessionID, "messages", len(a.history))
 	return nil

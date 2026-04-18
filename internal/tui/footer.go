@@ -14,6 +14,7 @@ const (
 	footerSelection
 	footerSecretPrompt
 	footerForm
+	footerSlashMenu
 )
 
 func renderFooter(state footerState, width int) string {
@@ -26,6 +27,7 @@ func footerHints(state footerState) []string {
 		return []string{
 			hintKey("Esc") + " cancel",
 			hintKey("Ctrl+B") + " background",
+			hintKey("Ctrl+L") + " redraw",
 			hintKey("Ctrl+O") + " expand",
 			hintKey("Enter") + " queue input",
 		}
@@ -47,12 +49,20 @@ func footerHints(state footerState) []string {
 			hintKey("Enter") + " submit",
 			hintKey("Esc") + " cancel",
 		}
+	case footerSlashMenu:
+		return []string{
+			hintKey("Up/Down") + " move",
+			hintKey("Tab") + " accept",
+			hintKey("Enter") + " submit",
+			hintKey("Esc") + " close",
+		}
 	default:
 		return []string{
-			hintKey("Esc") + " cancel",
 			hintKey("Up/Down") + " history",
+			hintKey("Tab") + " autocomplete",
 			hintKey("Alt+Enter") + " newline",
 			hintKey("Shift+Tab") + " plan",
+			hintKey("Ctrl+T") + " tasks",
 			hintKey("/help") + " commands",
 		}
 	}

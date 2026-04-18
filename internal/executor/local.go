@@ -1,3 +1,8 @@
+// Package executor
+// File: local.go
+// Description: 로컬 명령어 실행기 — 구조체, 생성자, 동기 실행, stdin 제어
+// Responsibility: LocalExecutor의 핵심 정의와 동기 명령어 실행
+
 package executor
 
 import (
@@ -5,11 +10,17 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
 	"os/exec"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
+
+	_ "github.com/yourorg/infractl/internal/executor/shell/bash"       // auto-register bash provider
+	_ "github.com/yourorg/infractl/internal/executor/shell/powershell" // auto-register powershell provider
+
+	"github.com/yourorg/infractl/internal/executor/shell"
 )
 
 // stdinMode describes how the active stdin pipe should handle line endings for injection.
@@ -24,9 +35,8 @@ const defaultTimeout = 30 * time.Second
 
 // LocalExecutor runs commands on the local controller.
 type LocalExecutor struct {
-	timeout time.Duration
-
-	sessionMu       sync.Mutex
+	timeout         time.Duration
+	mu              sync.Mutex
 	activeStdin     io.WriteCloser
 	activeStdinMode stdinMode
 }
@@ -51,14 +61,16 @@ func (e *LocalExecutor) Execute(ctx context.Context, command string) (ExecResult
 	}
 	defer cancel()
 
-	cmd, err := buildCommand(ctx, command)
+	prepared, err := buildCommand(ctx, command)
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("build command: %w", err)
 	}
+	defer runCleanups(prepared.CleanupFns)
 
+	cmd := exec.CommandContext(ctx, prepared.Argv[0], prepared.Argv[1:]...)
 	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
+	cmd.Stdout = &LimitedWriter{Buf: &stdoutBuf, Limit: MaxOutputBytes}
+	cmd.Stderr = &LimitedWriter{Buf: &stderrBuf, Limit: MaxOutputBytes}
 
 	runErr := cmd.Run()
 	duration := time.Since(start)
@@ -85,6 +97,19 @@ func (e *LocalExecutor) Target() string {
 	return "localhost"
 }
 
+// Host returns "localhost" for the local executor.
+func (e *LocalExecutor) Host() string {
+	return "localhost"
+}
+
+func (e *LocalExecutor) WorkspaceDir() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return wd
+}
+
 // Platform returns the local controller platform.
 func (e *LocalExecutor) Platform() Platform {
 	return NormalizePlatform(runtime.GOOS)
@@ -95,190 +120,82 @@ func (e *LocalExecutor) ShellName() string {
 	return LocalShellName()
 }
 
-// ExecuteStream runs a command while streaming stdout and stderr line-by-line via onLine.
-// stderr는 password: 같은 프롬프트 감지를 위해 stdout과 동일한 partial-line 파이프라인으로 처리된다.
-func (e *LocalExecutor) ExecuteStream(ctx context.Context, command string, onLine func(string)) (ExecResult, error) {
-	start := time.Now()
-
-	var cancel context.CancelFunc
-	if _, ok := ctx.Deadline(); ok {
-		ctx, cancel = context.WithCancel(ctx)
-	} else {
-		ctx, cancel = context.WithTimeout(ctx, e.timeout)
-	}
-	defer cancel()
-
-	cmd, err := buildCommand(ctx, command)
-	if err != nil {
-		return ExecResult{}, fmt.Errorf("build command: %w", err)
-	}
-
-	stdinPipe, err := cmd.StdinPipe()
-	if err != nil {
-		return ExecResult{}, fmt.Errorf("create stdin pipe: %w", err)
-	}
-	e.sessionMu.Lock()
-	e.activeStdin = stdinPipe
-	e.activeStdinMode = stdinModePipe
-	e.sessionMu.Unlock()
-	defer func() {
-		e.clearActiveStdin(stdinPipe)
-		stdinPipe.Close()
-	}()
-
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return ExecResult{}, fmt.Errorf("create stdout pipe: %w", err)
-	}
-
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return ExecResult{}, fmt.Errorf("create stderr pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return ExecResult{}, fmt.Errorf("start command: %w", err)
-	}
-
-	lineCh := StartLineAssembler(StartPipeReader(stdoutPipe))
-	stderrLineCh := StartLineAssembler(StartPipeReader(stderrPipe))
-
-	// stderr를 별도 goroutine에서 수집하며 onLine으로 idle 감지(password 프롬프트)에도 전달한다.
-	stderrDone := make(chan []string, 1)
-	go func() {
-		var lines []string
-		for line := range stderrLineCh {
-			lines = append(lines, line)
-			if onLine != nil {
-				onLine(line)
-			}
-		}
-		stderrDone <- lines
-	}()
-
-	var stdoutLines []string
-	for line := range lineCh {
-		stdoutLines = append(stdoutLines, line)
-		if onLine != nil {
-			onLine(line)
-		}
-	}
-
-	stderrLines := <-stderrDone
-
-	waitErr := cmd.Wait()
-	duration := time.Since(start)
-
-	exitCode := 0
-	if waitErr != nil {
-		if exitErr, ok := waitErr.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			return ExecResult{}, fmt.Errorf("wait command: %w", waitErr)
-		}
-	}
-
-	return ExecResult{
-		Stdout:   TruncateOutput(strings.Join(stdoutLines, "\n"), MaxOutputBytes),
-		Stderr:   TruncateOutput(strings.Join(stderrLines, "\n"), MaxOutputBytes),
-		ExitCode: exitCode,
-		Duration: duration,
-	}, nil
-}
-
-// InjectStdin writes a line to the active command stdin.
-// On Windows with a ConPTY, uses CR+LF so the process receives a proper Enter keystroke.
-// On all other platforms (Unix PTY, regular pipe), uses LF only.
+// InjectStdin sends a line to the currently running command's stdin.
 func (e *LocalExecutor) InjectStdin(line string) error {
-	e.sessionMu.Lock()
-	pipe := e.activeStdin
+	e.mu.Lock()
+	stdin := e.activeStdin
 	mode := e.activeStdinMode
-	e.sessionMu.Unlock()
+	e.mu.Unlock()
 
-	if pipe == nil {
-		return fmt.Errorf("inject stdin: no active local stdin pipe")
+	if stdin == nil {
+		return fmt.Errorf("inject stdin: no active command")
 	}
-	var writeErr error
 	if mode == stdinModePTY && runtime.GOOS == "windows" {
-		// ConPTY VT emulator maps CR (0x0D) to the Enter key; LF alone is not enough.
-		_, writeErr = fmt.Fprintf(pipe, "%s\r\n", line)
-	} else {
-		_, writeErr = fmt.Fprintln(pipe, line)
+		_, err := fmt.Fprintf(stdin, "%s\r\n", line)
+		return err
 	}
-	if writeErr != nil {
-		return fmt.Errorf("inject stdin: %w", writeErr)
-	}
-	return nil
+	_, err := fmt.Fprintln(stdin, line)
+	return err
 }
 
-// SendEOF closes plain stdin pipes or injects Ctrl-D into PTY-backed sessions.
+// SendEOF signals EOF on the currently running command's stdin.
 func (e *LocalExecutor) SendEOF() error {
-	e.sessionMu.Lock()
-	pipe := e.activeStdin
+	e.mu.Lock()
+	stdin := e.activeStdin
 	mode := e.activeStdinMode
-	e.sessionMu.Unlock()
+	e.mu.Unlock()
 
-	if pipe == nil {
-		return fmt.Errorf("send EOF: no active local stdin pipe")
+	if stdin == nil {
+		return fmt.Errorf("send EOF: no active command")
 	}
 	if mode == stdinModePTY {
-		if _, err := pipe.Write([]byte{0x04}); err != nil {
-			return fmt.Errorf("send EOF: %w", err)
+		_, err := stdin.Write([]byte{0x04})
+		return err
+	}
+	err := stdin.Close()
+	if err == nil {
+		e.mu.Lock()
+		if e.activeStdin == stdin {
+			e.activeStdin = nil
 		}
-		return nil
+		e.mu.Unlock()
 	}
-	if err := pipe.Close(); err != nil {
-		return fmt.Errorf("send EOF: %w", err)
-	}
-	e.clearActiveStdin(pipe)
-	return nil
+	return err
 }
 
-// setActivePTY registers a PTY master as the active stdin (uses PTY line-ending mode).
+// setActivePTY registers a PTY file descriptor as the active stdin for the current command.
 func (e *LocalExecutor) setActivePTY(ptmx io.WriteCloser) {
-	e.sessionMu.Lock()
-	defer e.sessionMu.Unlock()
+	e.mu.Lock()
 	e.activeStdin = ptmx
 	e.activeStdinMode = stdinModePTY
+	e.mu.Unlock()
 }
 
-func (e *LocalExecutor) clearActiveStdin(key io.WriteCloser) {
-	e.sessionMu.Lock()
-	defer e.sessionMu.Unlock()
-	if e.activeStdin == key {
+// clearActiveStdin clears the active stdin if it matches the provided writer.
+func (e *LocalExecutor) clearActiveStdin(w io.WriteCloser) {
+	e.mu.Lock()
+	if e.activeStdin == w {
 		e.activeStdin = nil
-		e.activeStdinMode = stdinModePipe
 	}
+	e.mu.Unlock()
 }
 
-// resolveLocalShell finds the best available POSIX shell via PATH.
-// Tries bash first, then sh. Returns an error if neither is found.
-func resolveLocalShell() (string, error) {
-	for _, sh := range []string{"bash", "sh"} {
-		if path, err := exec.LookPath(sh); err == nil {
-			return path, nil
+// buildCommand uses the registered ShellProvider to prepare a command for execution.
+// On Windows the powershell provider is used; on other platforms, bash.
+// Ported from: claude_cli/src/utils/shell/bashProvider.ts:buildExecCommand
+func buildCommand(ctx context.Context, command string) (shell.PreparedCmd, error) {
+	p, err := shell.Resolve()
+	if err != nil {
+		return shell.PreparedCmd{}, fmt.Errorf("resolve shell provider: %w", err)
+	}
+	return p.Prepare(ctx, command)
+}
+
+// runCleanups executes all cleanup functions, logging but not propagating errors.
+func runCleanups(fns []func() error) {
+	for _, fn := range fns {
+		if err := fn(); err != nil {
+			slog.Warn("cleanup error", "err", err)
 		}
 	}
-	return "", fmt.Errorf("no shell found in PATH (tried: bash, sh): install bash or sh to run local commands")
-}
-
-// buildCommand returns the OS-specific command wrapper.
-// On Windows, uses powershell.exe (always available). On Linux/macOS, resolves
-// the shell via PATH — fails clearly if neither bash nor sh is installed.
-func buildCommand(ctx context.Context, command string) (*exec.Cmd, error) {
-	if runtime.GOOS == "windows" {
-		psCmd := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " +
-			"$OutputEncoding = [System.Text.Encoding]::UTF8; " + command
-		return exec.CommandContext(ctx,
-			"powershell.exe",
-			"-NoProfile",
-			"-NonInteractive",
-			"-Command", psCmd,
-		), nil
-	}
-	sh, err := resolveLocalShell()
-	if err != nil {
-		return nil, err
-	}
-	return exec.CommandContext(ctx, sh, "-c", command), nil
 }

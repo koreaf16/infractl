@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/yourorg/infractl/internal/cost"
@@ -79,11 +80,23 @@ func (r *Runner) Execute(ctx context.Context, cfg SubagentConfig) SubagentResult
 	filteredTools := r.filterTools(cfg.Type)
 	toolDefs := toToolDefs(filteredTools)
 
-	systemMsg := llm.Message{Role: llm.RoleSystem, Content: SystemPrompt(cfg.Type)}
+	systemMsg := llm.Message{Role: llm.RoleSystem, Content: SystemPrompt(cfg.Type, cfg.Server)}
 	userMsg := llm.Message{Role: llm.RoleUser, Content: cfg.Question}
-	messages := []llm.Message{systemMsg, userMsg}
 
 	client := r.resolveClient()
+
+	// Qwen 인라인 모드 대응: 클라이언트가 인라인 모드이면 시스템 프롬프트에 도구 인덱스 주입
+	if ic, ok := client.(llm.InlineToolCallModeClient); ok && ic.IsInlineToolCalls() {
+		var sb strings.Builder
+		sb.WriteString(systemMsg.Content)
+		sb.WriteString("\n\n")
+		tools.AppendQwenToolGuideline(&sb)
+		tools.AppendQwenToolIndex(&sb, filteredTools)
+		systemMsg.Content = sb.String()
+	}
+
+	messages := []llm.Message{systemMsg, userMsg}
+
 	for i := 0; i < maxSubagentIter; i++ {
 		resp, err := client.Chat(ctx, messages, toolDefs, nil)
 		if err != nil {
@@ -104,6 +117,34 @@ func (r *Runner) Execute(ctx context.Context, cfg SubagentConfig) SubagentResult
 		}
 
 		if len(resp.ToolCalls) == 0 {
+			// If no tool calls were made on the first iteration the model likely generated
+			// planning text or hallucinated results instead of executing tools.
+			// Nudge once to force actual tool execution before accepting the answer.
+			if i == 0 && result.ToolUses == 0 && cfg.Type == AgentTypeIntel {
+				slog.Warn("intel subagent returned text without tool calls on first iteration — nudging",
+					"content_len", len(resp.Content))
+				messages = append(messages, llm.Message{Role: llm.RoleAssistant, Content: resp.Content})
+				messages = append(messages, llm.Message{
+					Role: llm.RoleUser,
+					Content: "도구를 실제로 호출해야 합니다. 계획 텍스트나 가상 결과가 아닌, " +
+						"실제 system_info/disk_usage/shell_exec/web_search 도구를 지금 즉시 호출하세요.",
+				})
+				continue
+			}
+			// Intel subagent가 단 한 번도 실제 도구를 실행하지 않은 경우 —
+			// LLM이 JSON 계획 텍스트를 출력만 하고 도구를 호출하지 않은 것이므로
+			// 할루시네이션 출력을 폐기하여 상위 에이전트의 시스템 프롬프트를 오염시키지 않는다.
+			if cfg.Type == AgentTypeIntel && result.ToolUses == 0 {
+				slog.Warn("intel subagent: no tools executed — discarding hallucinated plan output",
+					"content_len", len(resp.Content))
+				result.Answer = ""
+				r.fire(Event{
+					Type: EventAgentDone, AgentType: cfg.Type, Server: cfg.Server,
+					ToolUses: 0, InputTokens: result.InputTokens,
+					OutputTokens: result.OutputTokens, Duration: time.Since(start), Success: false,
+				})
+				return result
+			}
 			result.Answer = resp.Content
 			r.fire(Event{
 				Type: EventAgentDone, AgentType: cfg.Type, Server: cfg.Server,
@@ -123,7 +164,18 @@ func (r *Runner) Execute(ctx context.Context, cfg SubagentConfig) SubagentResult
 				ToolArg:  tc.Function.Arguments,
 			})
 			toolResult := r.executeTool(ctx, tc, cfg.Server, filteredTools)
+			// 로그에는 원본 전체 내용을 기록
 			llm.LogToolResult(tc.Function.Name, toolResult.Content)
+
+			// 서브에이전트 컨텍스트 보호를 위해 길이 제한 (타이트하게 2000자)
+			const maxSubContextLen = 2000
+			if len(toolResult.Content) > maxSubContextLen {
+				toolResult.Content = toolResult.Content[:maxSubContextLen] +
+					"\n\n[... content truncated due to length ...]"
+				slog.Debug("truncated subagent tool result",
+					"agent", cfg.Type, "tool", tc.Function.Name, "original_len", len(toolResult.Content))
+			}
+
 			result.ToolUses++
 			messages = append(messages, toolResult)
 		}
@@ -195,7 +247,7 @@ func (r *Runner) executeTool(ctx context.Context, tc llm.ToolCall, server string
 			Content:    fmt.Sprintf("Error: %s", err),
 		}
 	}
-	return llm.Message{Role: llm.RoleTool, ToolCallID: tc.ID, Content: output}
+	return llm.Message{Role: llm.RoleTool, ToolCallID: tc.ID, Content: output.Content}
 }
 
 // toToolDefs는 도구 목록을 LLM API용 ToolDef로 변환한다.

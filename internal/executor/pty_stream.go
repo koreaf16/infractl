@@ -15,7 +15,7 @@ import (
 // instead of /dev/tty, enabling the idle handler to detect and auto-respond.
 type PTYStreamExecutor interface {
 	StreamExecutor
-	ExecuteStreamPTY(ctx context.Context, command string, onLine func(string)) (ExecResult, error)
+	ExecuteStreamPTY(ctx context.Context, command string, onLine func(string)) (ExecSession, error)
 }
 
 // ansiEscapeRegex matches common ANSI escape sequences from PTY output.

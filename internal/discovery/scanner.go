@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/yourorg/infractl/internal/executor"
+	"github.com/yourorg/infractl/internal/tools"
 )
 
 // Scanner performs process, port, and config-file discovery on a target host.
@@ -47,6 +48,7 @@ func (s *Scanner) Scan(ctx context.Context, exec executor.Executor) (*ScanResult
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		tools.EmitOutput(ctx, "task_start task=processes")
 		slog.Info("task_start", "task", "processes")
 		start := time.Now()
 		p, err := s.scanProcesses(ctx, exec)
@@ -54,9 +56,11 @@ func (s *Scanner) Scan(ctx context.Context, exec executor.Executor) (*ScanResult
 		defer mu.Unlock()
 		if err != nil {
 			errs = append(errs, fmt.Errorf("process scan: %w", err))
+			tools.EmitOutput(ctx, fmt.Sprintf("task_fail task=processes dur=%s", time.Since(start)))
 			slog.Info("task_fail", "task", "processes", "dur", time.Since(start))
 		} else {
 			processes = p
+			tools.EmitOutput(ctx, fmt.Sprintf("task_done task=processes dur=%s count=%d", time.Since(start), len(p)))
 			slog.Info("task_done", "task", "processes", "dur", time.Since(start), "count", len(p))
 		}
 	}()
@@ -65,6 +69,7 @@ func (s *Scanner) Scan(ctx context.Context, exec executor.Executor) (*ScanResult
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		tools.EmitOutput(ctx, "task_start task=ports")
 		slog.Info("task_start", "task", "ports")
 		start := time.Now()
 		p, err := s.scanPorts(ctx, exec)
@@ -72,9 +77,11 @@ func (s *Scanner) Scan(ctx context.Context, exec executor.Executor) (*ScanResult
 		defer mu.Unlock()
 		if err != nil {
 			errs = append(errs, fmt.Errorf("port scan: %w", err))
+			tools.EmitOutput(ctx, fmt.Sprintf("task_fail task=ports dur=%s", time.Since(start)))
 			slog.Info("task_fail", "task", "ports", "dur", time.Since(start))
 		} else {
 			ports = p
+			tools.EmitOutput(ctx, fmt.Sprintf("task_done task=ports dur=%s count=%d", time.Since(start), len(p)))
 			slog.Info("task_done", "task", "ports", "dur", time.Since(start), "count", len(p))
 		}
 	}()
@@ -84,6 +91,7 @@ func (s *Scanner) Scan(ctx context.Context, exec executor.Executor) (*ScanResult
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			tools.EmitOutput(ctx, "task_start task=systemd")
 			slog.Info("task_start", "task", "systemd")
 			start := time.Now()
 			svc, err := s.scanSystemd(ctx, exec)
@@ -91,8 +99,10 @@ func (s *Scanner) Scan(ctx context.Context, exec executor.Executor) (*ScanResult
 			defer mu.Unlock()
 			if err == nil && len(svc) > 0 {
 				others = append(others, svc...)
+				tools.EmitOutput(ctx, fmt.Sprintf("task_done task=systemd dur=%s count=%d", time.Since(start), len(svc)))
 				slog.Info("task_done", "task", "systemd", "dur", time.Since(start), "count", len(svc))
 			} else {
+				tools.EmitOutput(ctx, fmt.Sprintf("task_done task=systemd dur=%s count=0", time.Since(start)))
 				slog.Info("task_done", "task", "systemd", "dur", time.Since(start), "count", 0)
 			}
 		}()
@@ -101,6 +111,7 @@ func (s *Scanner) Scan(ctx context.Context, exec executor.Executor) (*ScanResult
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			tools.EmitOutput(ctx, "task_start task=docker")
 			slog.Info("task_start", "task", "docker")
 			start := time.Now()
 			svc, err := s.scanDocker(ctx, exec)
@@ -108,8 +119,10 @@ func (s *Scanner) Scan(ctx context.Context, exec executor.Executor) (*ScanResult
 			defer mu.Unlock()
 			if err == nil && len(svc) > 0 {
 				others = append(others, svc...)
+				tools.EmitOutput(ctx, fmt.Sprintf("task_done task=docker dur=%s count=%d", time.Since(start), len(svc)))
 				slog.Info("task_done", "task", "docker", "dur", time.Since(start), "count", len(svc))
 			} else {
+				tools.EmitOutput(ctx, fmt.Sprintf("task_done task=docker dur=%s count=0", time.Since(start)))
 				slog.Info("task_done", "task", "docker", "dur", time.Since(start), "count", 0)
 			}
 		}()
@@ -483,6 +496,7 @@ func (s *Scanner) ScanWeb(ctx context.Context, exec executor.Executor) (*ScanRes
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		tools.EmitOutput(ctx, "task_start task=web_servers")
 		slog.Info("task_start", "task", "web_servers")
 		start := time.Now()
 		p, err := s.scanProcesses(ctx, exec)
@@ -490,9 +504,11 @@ func (s *Scanner) ScanWeb(ctx context.Context, exec executor.Executor) (*ScanRes
 		defer mu.Unlock()
 		if err != nil {
 			errs = append(errs, err)
+			tools.EmitOutput(ctx, fmt.Sprintf("task_fail task=web_servers dur=%s", time.Since(start)))
 			slog.Info("task_fail", "task", "web_servers", "dur", time.Since(start))
 		} else {
 			processes = p
+			tools.EmitOutput(ctx, fmt.Sprintf("task_done task=web_servers dur=%s count=%d", time.Since(start), len(p)))
 			slog.Info("task_done", "task", "web_servers", "dur", time.Since(start), "count", len(p))
 		}
 	}()
@@ -501,6 +517,7 @@ func (s *Scanner) ScanWeb(ctx context.Context, exec executor.Executor) (*ScanRes
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		tools.EmitOutput(ctx, "task_start task=web_ports")
 		slog.Info("task_start", "task", "web_ports")
 		start := time.Now()
 		p, err := s.scanPorts(ctx, exec)
@@ -508,9 +525,11 @@ func (s *Scanner) ScanWeb(ctx context.Context, exec executor.Executor) (*ScanRes
 		defer mu.Unlock()
 		if err != nil {
 			errs = append(errs, err)
+			tools.EmitOutput(ctx, fmt.Sprintf("task_fail task=web_ports dur=%s", time.Since(start)))
 			slog.Info("task_fail", "task", "web_ports", "dur", time.Since(start))
 		} else {
 			ports = p
+			tools.EmitOutput(ctx, fmt.Sprintf("task_done task=web_ports dur=%s count=%d", time.Since(start), len(p)))
 			slog.Info("task_done", "task", "web_ports", "dur", time.Since(start), "count", len(p))
 		}
 	}()
@@ -519,6 +538,7 @@ func (s *Scanner) ScanWeb(ctx context.Context, exec executor.Executor) (*ScanRes
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		tools.EmitOutput(ctx, "task_start task=ssl_certs")
 		slog.Info("task_start", "task", "ssl_certs")
 		start := time.Now()
 		svc, err := s.scanSSL(ctx, exec)
@@ -527,6 +547,7 @@ func (s *Scanner) ScanWeb(ctx context.Context, exec executor.Executor) (*ScanRes
 		if err == nil && len(svc) > 0 {
 			others = append(others, svc...)
 		}
+		tools.EmitOutput(ctx, fmt.Sprintf("task_done task=ssl_certs dur=%s count=%d", time.Since(start), len(svc)))
 		slog.Info("task_done", "task", "ssl_certs", "dur", time.Since(start), "count", len(svc))
 	}()
 
@@ -534,6 +555,7 @@ func (s *Scanner) ScanWeb(ctx context.Context, exec executor.Executor) (*ScanRes
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		tools.EmitOutput(ctx, "task_start task=vhosts")
 		slog.Info("task_start", "task", "vhosts")
 		start := time.Now()
 		svc, err := s.scanVHosts(ctx, exec)
@@ -542,6 +564,7 @@ func (s *Scanner) ScanWeb(ctx context.Context, exec executor.Executor) (*ScanRes
 		if err == nil && len(svc) > 0 {
 			others = append(others, svc...)
 		}
+		tools.EmitOutput(ctx, fmt.Sprintf("task_done task=vhosts dur=%s count=%d", time.Since(start), len(svc)))
 		slog.Info("task_done", "task", "vhosts", "dur", time.Since(start), "count", len(svc))
 	}()
 
@@ -637,4 +660,3 @@ func truncate(s string, maxLen int) string {
 	}
 	return s[:maxLen] + "..."
 }
-

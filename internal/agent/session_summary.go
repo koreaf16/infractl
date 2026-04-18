@@ -58,11 +58,20 @@ type SessionSummaryManager struct {
 	preserved       []preservedItem // 원문 보존 항목 (document/config)
 	summarizedCount int             // 요약에 흡수된 라운드 수
 	llmClient       llm.Client
+	threshold       int // 요약 시작 라운드 수 기준 (0이면 mildCompactionThreshold 사용)
 }
 
 // NewSessionSummaryManager는 SessionSummaryManager를 생성한다.
 func NewSessionSummaryManager(client llm.Client) *SessionSummaryManager {
-	return &SessionSummaryManager{llmClient: client}
+	return &SessionSummaryManager{llmClient: client, threshold: mildCompactionThreshold}
+}
+
+// SetThreshold는 요약 시작 라운드 수 기준을 동적으로 설정한다.
+// maxHistory 메시지 수를 기준으로 avgMsgsPerRound(≈5)로 나눠 라운드 수를 추정한다.
+func (m *SessionSummaryManager) SetThreshold(rounds int) {
+	if rounds > 0 {
+		m.threshold = rounds
+	}
 }
 
 // GetSummary는 현재까지의 누적 요약 텍스트를 반환한다.
@@ -90,13 +99,13 @@ func (m *SessionSummaryManager) GetUnsummarizedRounds(history []llm.Message) []l
 	return flattenRounds(rounds[m.summarizedCount:])
 }
 
-// UpdateIfNeeded는 총 라운드 수가 mildCompactionThreshold를 초과하면
+// UpdateIfNeeded는 총 라운드 수가 threshold를 초과하면
 // 오래된 라운드를 요약에 흡수한다. 최근 preserveRecentRounds 라운드는 원문 유지.
 func (m *SessionSummaryManager) UpdateIfNeeded(ctx context.Context, history []llm.Message) {
 	rounds := groupByApiRound(history)
 	total := len(rounds)
 
-	if total <= mildCompactionThreshold {
+	if total <= m.threshold {
 		return // 아직 요약 불필요
 	}
 

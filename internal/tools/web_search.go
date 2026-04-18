@@ -1,8 +1,3 @@
-// Package tools
-// File: web_search.go
-// Description: SearXNG 웹 검색 도구
-// Responsibility: SearXNG 인스턴스 가용 시 웹 검색, 미가용 시 비활성화
-
 package tools
 
 import (
@@ -14,6 +9,7 @@ import (
 	"time"
 
 	"github.com/yourorg/infractl/internal/executor"
+	"github.com/yourorg/infractl/internal/llm"
 	"github.com/yourorg/infractl/internal/web"
 )
 
@@ -21,6 +17,7 @@ const (
 	internetCheckHost    = "192.168.0.3:30080"
 	internetCheckTTL     = 60 * time.Second
 	internetCheckTimeout = 5 * time.Second
+	webSearchMaxUses     = 8
 )
 
 var (
@@ -29,7 +26,7 @@ var (
 	internetLastCheckRes bool
 )
 
-// IsInternetAvailable는 SearXNG 인스턴스 가용 여부를 캐시하여 반환한다.
+// IsInternetAvailable caches SearXNG reachability.
 func IsInternetAvailable() bool {
 	internetCheckMu.Lock()
 	defer internetCheckMu.Unlock()
@@ -38,10 +35,9 @@ func IsInternetAvailable() bool {
 		return internetLastCheckRes
 	}
 
-	// SearXNG 가용 여부 체크 (TCP 연결)
 	conn, err := net.DialTimeout("tcp", internetCheckHost, internetCheckTimeout)
 	if err == nil {
-		conn.Close()
+		_ = conn.Close()
 		internetLastCheckRes = true
 	} else {
 		internetLastCheckRes = false
@@ -50,16 +46,37 @@ func IsInternetAvailable() bool {
 	return internetLastCheckRes
 }
 
-// WebSearchTool은 SearXNG를 통해 웹 검색을 수행하는 도구이다.
-type WebSearchTool struct{}
+// WebSearchTool performs multiple SearXNG searches in parallel and returns source links.
+type WebSearchTool struct {
+	Fetcher     *web.Fetcher
+	LLMClient   llm.Client
+	LLMRegistry *llm.Registry
+	SearchFn    func(ctx context.Context, query string, limit int, opts ...web.SearchOption) ([]web.SearchResult, error)
+}
 
-func (t *WebSearchTool) Name() string         { return "web_search" }
-func (t *WebSearchTool) IsReadOnly() bool {
+func (t *WebSearchTool) Name() string     { return "web_search" }
+func (t *WebSearchTool) IsReadOnly() bool { return true }
+func (t *WebSearchTool) IsEnabled() bool  { return true }
+
+func (t *WebSearchTool) IsConcurrencySafe(_ map[string]interface{}) bool {
 	return true
 }
 
 func (t *WebSearchTool) Description() string {
-	return "Search the web using SearXNG. Returns URLs and snippets for the query. Use this to find solutions for unknown errors, documentation for unfamiliar systems, or any information not available locally."
+	return "Search the web and return source links for current facts, docs, and release notes. Supports multiple parallel queries."
+}
+
+func (t *WebSearchTool) ModelPrompt() string {
+	currentYear := time.Now().Year()
+	return fmt.Sprintf(
+		"Use web_search for current facts, version-sensitive questions, official docs, release notes, and external verification. " +
+		"You can provide multiple queries in the 'queries' array to search in parallel. " +
+		"Use web_fetch for deeper inspection of a specific URL from results. " +
+		"Always include a Sources section with markdown links from results. " +
+		"Use allowed_domains or blocked_domains only when filtering is required. " +
+		"Current year: %d.",
+		currentYear,
+	)
 }
 
 func (t *WebSearchTool) Parameters() map[string]interface{} {
@@ -68,51 +85,176 @@ func (t *WebSearchTool) Parameters() map[string]interface{} {
 		"properties": map[string]interface{}{
 			"query": map[string]interface{}{
 				"type":        "string",
-				"description": "Search query (English preferred for better results)",
+				"description": "A single search query (deprecated, use 'queries' instead).",
 			},
-			"max_results": map[string]interface{}{
-				"type":        "integer",
-				"description": "Maximum number of results to return (default: 5, max: 10)",
-				"default":     5,
+			"queries": map[string]interface{}{
+				"type": "array",
+				"items": map[string]interface{}{
+					"type": "string",
+				},
+				"description": "Multiple search queries to be executed in parallel.",
+			},
+			"allowed_domains": map[string]interface{}{
+				"type":        "array",
+				"items":       map[string]interface{}{"type": "string"},
+				"description": "Only include search results from these domains.",
+			},
+			"blocked_domains": map[string]interface{}{
+				"type":        "array",
+				"items":       map[string]interface{}{"type": "string"},
+				"description": "Never include search results from these domains.",
 			},
 		},
-		"required": []string{"query"},
 	}
 }
 
-// IsEnabled는 항상 true를 반환한다.
-// 인터넷 가용성 체크는 Execute() 시점에서 수행되므로, toolDefs에는 항상 포함된다.
-// 이전 설계에서 IsEnabled()에서 체크했을 때 toolDefs에서 도구가 사라지면
-// LLM이 web_search를 호출하지 못하고 텍스트 응답만 생성하여 루프가 종료되는 문제가 있었다.
-func (t *WebSearchTool) IsEnabled() bool { return true }
+type queryResult struct {
+	query    string
+	results  []web.SearchResult
+	duration time.Duration
+	err      error
+}
 
-func (t *WebSearchTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
-	query, err := argString(args, "query", true)
-	if err != nil {
-		return "", err
-	}
-	limit := argInt(args, "max_results", 5)
-	if limit > 10 {
-		limit = 10
+func (t *WebSearchTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (ToolOutcome, error) {
+	var queries []string
+
+	// Handle 'queries' array
+	if qList, ok := args["queries"].([]interface{}); ok {
+		for _, q := range qList {
+			if s, ok := q.(string); ok && s != "" {
+				queries = append(queries, strings.TrimSpace(s))
+			}
+		}
 	}
 
-	results, err := web.Search(ctx, query, limit)
-	if err != nil {
-		return "", fmt.Errorf("web search %q: %w", query, err)
+	// Handle single 'query' for backward compatibility
+	if q, ok := args["query"].(string); ok && q != "" {
+		queries = append(queries, strings.TrimSpace(q))
 	}
-	if len(results) == 0 {
-		return fmt.Sprintf("No results found for: %q\n(Internet may be unavailable or no matching pages found)", query), nil
+
+	if len(queries) == 0 {
+		msg := "Error: at least one search query is required"
+		return ToolOutcome{Content: msg, Success: false, ErrorMessage: msg}, nil
 	}
+
+	// Deduplicate queries
+	queries = deduplicate(queries)
+
+	allowedDomains := argStringSlice(args, "allowed_domains")
+	blockedDomains := argStringSlice(args, "blocked_domains")
+	if len(allowedDomains) > 0 && len(blockedDomains) > 0 {
+		msg := "Error: cannot specify both allowed_domains and blocked_domains in the same request"
+		return ToolOutcome{Content: msg, Success: false, ErrorMessage: msg}, nil
+	}
+
+	searchFn := t.SearchFn
+	if searchFn == nil {
+		searchFn = web.Search
+	}
+
+	var wg sync.WaitGroup
+	resultsChan := make(chan queryResult, len(queries))
+
+	for _, q := range queries {
+		wg.Add(1)
+		go func(query string) {
+			defer wg.Done()
+			start := time.Now()
+			res, err := searchFn(
+				ctx,
+				query,
+				webSearchMaxUses,
+				web.WithAllowedDomains(allowedDomains...),
+				web.WithBlockedDomains(blockedDomains...),
+			)
+			resultsChan <- queryResult{
+				query:    query,
+				results:  res,
+				duration: time.Since(start),
+				err:      err,
+			}
+		}(q)
+	}
+
+	wg.Wait()
+	close(resultsChan)
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Web search results for: %q\n\n", query))
-	for i, r := range results {
-		sb.WriteString(fmt.Sprintf("%d. **%s**\n   URL: %s\n", i+1, r.Title, r.URL))
-		if r.Snippet != "" {
-			sb.WriteString(fmt.Sprintf("   %s\n", strings.TrimSpace(r.Snippet)))
+	totalResults := 0
+	var firstErr error
+
+	for res := range resultsChan {
+		if res.err != nil {
+			if firstErr == nil {
+				firstErr = res.err
+			}
+			continue
 		}
-		sb.WriteString("\n")
+		totalResults += len(res.results)
+		sb.WriteString(formatWebSearchResults(res.query, res.results, res.duration))
+		sb.WriteString("\n\n---\n\n")
 	}
-	sb.WriteString("Use web_fetch with a URL above to get the full content of a page.")
-	return sb.String(), nil
+
+	if totalResults == 0 && firstErr != nil {
+		return ToolOutcome{}, fmt.Errorf("web search failed: %w", firstErr)
+	}
+
+	content := strings.TrimSpace(sb.String())
+	if content == "" {
+		content = "No results found for the provided queries."
+	}
+
+	return ToolOutcome{
+		Content: content,
+		Success: true,
+	}, nil
+}
+
+func deduplicate(in []string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, s := range in {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func formatWebSearchResults(query string, results []web.SearchResult, duration time.Duration) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Web search results for query: %q\n", query))
+	sb.WriteString(fmt.Sprintf("Found %d results in %s\n\n", len(results), formatSearchDuration(duration)))
+
+	if len(results) > 0 {
+		sb.WriteString("Sources:\n")
+		for _, r := range results {
+			sb.WriteString(fmt.Sprintf("- [%s](%s)\n", markdownSafeText(nonEmpty(r.Title, r.URL)), r.URL))
+		}
+	}
+
+	return sb.String()
+}
+
+func formatSearchDuration(d time.Duration) string {
+	if d >= time.Second {
+		return fmt.Sprintf("%ds", int(d.Round(time.Second)/time.Second))
+	}
+	return fmt.Sprintf("%dms", int(d.Round(time.Millisecond)/time.Millisecond))
+}
+
+func markdownSafeText(in string) string {
+	s := strings.ReplaceAll(in, "[", "(")
+	s = strings.ReplaceAll(s, "]", ")")
+	return strings.TrimSpace(s)
+}
+
+func nonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }

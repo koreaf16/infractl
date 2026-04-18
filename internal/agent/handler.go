@@ -32,14 +32,14 @@ type EventHandler interface {
 	// OnToolStart는 도구 실행이 시작될 때 호출된다.
 	// toolID는 LLM이 부여한 도구 호출 식별자 (병렬 실행 라우팅용).
 	// target은 실행 대상 서버 이름 ("" 또는 "localhost"이면 로컬).
-	OnToolStart(toolID string, toolName string, target string, args map[string]interface{})
+	OnToolStart(toolID string, toolName string, target string, args map[string]any)
 
 	// OnToolOutput은 도구 실행 중 stdout 라인을 수신했을 때 호출된다.
 	// shell_exec 등 스트리밍 출력을 지원하는 도구에서 사용된다.
 	OnToolOutput(toolID string, line string)
 
 	// OnToolEnd는 도구 실행이 완료되었을 때 호출된다.
-	OnToolEnd(toolID string, toolName string, result string, duration time.Duration, success bool)
+	OnToolEnd(toolID string, toolName string, result string, duration time.Duration, success bool, metadataJSON string)
 
 	// OnResponse는 LLM의 최종 텍스트 응답이 완성되었을 때 호출된다.
 	OnResponse(content string)
@@ -56,6 +56,7 @@ type EventHandler interface {
 	// OnRAGContext는 내부 지식(knowledge/learned_system)이 시스템 프롬프트에 주입될 때 호출된다.
 	// count는 주입된 항목 수이다.
 	OnRAGContext(count int)
+
 }
 
 // IdleInputRequest는 명령 실행 중 유휴 상태가 감지되었을 때의 요청 정보이다.
@@ -88,4 +89,22 @@ type QuestionHandler interface {
 	RequestQuestion(ctx context.Context, req tools.QuestionRequest) (tools.QuestionResponse, error)
 	// RequestForm은 사용자에게 다중 필드 폼 입력을 요청하고 결과를 대기한다.
 	RequestForm(ctx context.Context, req tools.FormRequest) (tools.FormResponse, error)
+}
+
+// TaskEventSink is an optional extension of EventHandler for task lifecycle events.
+// Handlers that support task context display implement this interface.
+// Agent checks with type assertion: if s, ok := a.handler.(TaskEventSink); ok { ... }
+type TaskEventSink interface {
+	// OnTaskProposed is called when propose_task creates a PendingProposal.
+	OnTaskProposed(title, kind, server, account string)
+	// OnTaskDeclared is called when a TaskContext is declared.
+	OnTaskDeclared(taskID, title, kind string)
+	// OnTaskStepAdvanced is called when the LLM advances to a new plan step.
+	OnTaskStepAdvanced(taskID string, stepIndex, total int, description string)
+	// OnTaskEnded is called when the task ends (completed/failed/aborted).
+	OnTaskEnded(taskID, status, summary string)
+	// OnElevationChanged is called when the current user changes in a session.
+	OnElevationChanged(host, sessionID, currentUser string)
+	// OnGuardViolation is called when TaskGuard blocks or warns about a tool call.
+	OnGuardViolation(toolName, reason string, blocked bool)
 }

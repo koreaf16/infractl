@@ -89,16 +89,16 @@ func buildTaskMemoryContext(
 	}
 
 	var sb strings.Builder
-	sb.WriteString("## Relevant Task Memory\n")
-	sb.WriteString("Use these prior outcomes as guidance before issuing new commands.\n\n")
+	sb.WriteString("## 관련 작업 메모리\n")
+	sb.WriteString("새 명령 실행 전에 이전 결과를 참고 자료로 활용한다.\n\n")
 	if latestSuccess != nil {
-		sb.WriteString(fmt.Sprintf("- Previously successful approach: `%s` on `%s`.\n",
+		sb.WriteString(fmt.Sprintf("- 이전 성공 방법: `%s` on `%s`.\n",
 			nonEmpty(latestSuccess.CommandKey, latestSuccess.ToolName),
 			nonEmpty(latestSuccess.TargetServer, "localhost"),
 		))
 	}
 	for _, f := range failures {
-		sb.WriteString(fmt.Sprintf("- Avoid failed pattern: `%s` -> `%s`.\n",
+		sb.WriteString(fmt.Sprintf("- 실패 패턴 회피: `%s` -> `%s`.\n",
 			nonEmpty(f.CommandKey, f.ToolName),
 			nonEmpty(f.FailureSig, f.ErrorMessage),
 		))
@@ -130,14 +130,14 @@ func buildTaskMemoryFromKnowledge(
 	}
 
 	var sb strings.Builder
-	sb.WriteString("## Relevant Task Memory\n")
-	sb.WriteString("Use these prior outcomes as guidance before issuing new commands.\n\n")
+	sb.WriteString("## 관련 작업 메모리\n")
+	sb.WriteString("새 명령 실행 전에 이전 결과를 참고 자료로 활용한다.\n\n")
 	for _, s := range successes {
 		cmd := strings.TrimSpace(s.SuccessCommand)
 		if cmd == "" {
 			cmd = nonEmpty(s.CommandKey, s.ToolName)
 		}
-		sb.WriteString(fmt.Sprintf("- Previously successful approach: `%s` on `%s`.\n",
+		sb.WriteString(fmt.Sprintf("- 이전 성공 방법: `%s` on `%s`.\n",
 			cmd,
 			nonEmpty(s.ServerName, "localhost"),
 		))
@@ -147,7 +147,7 @@ func buildTaskMemoryFromKnowledge(
 		if pattern == "" {
 			pattern = strings.TrimSpace(f.Resolution)
 		}
-		sb.WriteString(fmt.Sprintf("- Avoid failed pattern: `%s` -> `%s`.\n",
+		sb.WriteString(fmt.Sprintf("- 실패 패턴 회피: `%s` -> `%s`.\n",
 			nonEmpty(f.CommandKey, f.ToolName),
 			nonEmpty(pattern, "known failure"),
 		))

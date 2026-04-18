@@ -22,6 +22,9 @@ func (t *FileReadTool) Name() string { return "file_read" }
 func (t *FileReadTool) Description() string {
 	return "Read the contents of a file on the target system.\n" +
 		"Use for: reading config files, log files, scripts, or any text file.\n" +
+		"If the path is a directory, automatically lists its contents instead.\n" +
+		"Do NOT use this tool for directory listings — use shell_exec with ls or Get-ChildItem if you need full control over listing options.\n" +
+		"`localhost` is the controller machine and is not always Windows; Windows-style paths such as C:\\... require a Windows target.\n" +
 		"Supports line limit to avoid reading oversized files."
 }
 
@@ -42,17 +45,17 @@ func (t *FileReadTool) Parameters() map[string]interface{} {
 			},
 			"target": map[string]interface{}{
 				"type":        "string",
-				"description": "Target server name. Omit or use 'localhost' for local execution.",
+				"description": "Workspace alias. Omit or use 'localhost' for the local workspace.",
 			},
 		},
 		"required": []string{"path"},
 	}
 }
 
-func (t *FileReadTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
+func (t *FileReadTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (ToolOutcome, error) {
 	path, err := argString(args, "path", true)
 	if err != nil {
-		return fmt.Sprintf("Error: %s", err), nil
+		return ToolOutcome{Content: fmt.Sprintf("Error: %s", err), Success: true}, nil
 	}
 
 	lines := argInt(args, "lines", 0)
@@ -63,41 +66,43 @@ func (t *FileReadTool) Execute(ctx context.Context, args map[string]interface{},
 	cmd := buildReadCommand(exec, path, lines)
 	result, err := exec.Execute(ctx, cmd)
 	if err != nil {
-		return fmt.Sprintf("Execution failed: %s", err), nil
+		return ToolOutcome{Content: fmt.Sprintf("Execution failed: %s", err), Success: true}, nil
 	}
 
 	if result.ExitCode != 0 {
 		if isPermissionFailure(result, nil) {
 			if retryResult, ok := executePlainViaAcquiredRoot(ctx, exec, cmd); ok && retryResult.ExitCode == 0 {
-				return stripPrivilegeReuseNote(retryResult.Stdout), nil
+				return ToolOutcome{Content: stripPrivilegeReuseNote(retryResult.Stdout), Success: true}, nil
 			}
 		}
-		return fmt.Sprintf("Error reading file (exit %d):\n%s", result.ExitCode, result.Stderr), nil
+		return ToolOutcome{Content: fmt.Sprintf("Error reading file (exit %d):\n%s", result.ExitCode, result.Stderr), Success: true}, nil
 	}
-	return result.Stdout, nil
+	return ToolOutcome{Content: result.Stdout, Success: true}, nil
 }
 
 func buildReadCommand(exec executor.Executor, path string, lines int) string {
 	platform := executor.CommandPlatform(exec)
 	switch platform {
 	case executor.PlatformWindows:
-		script := ""
+		quoted := executor.QuotePowerShell(path)
+		var script string
 		if lines > 0 {
 			script = fmt.Sprintf(
-				"Get-Content -LiteralPath %s -TotalCount %d",
-				executor.QuotePowerShell(path), lines,
+				"if (Test-Path -PathType Container %s) { Get-ChildItem %s } else { Get-Content -LiteralPath %s -TotalCount %d }",
+				quoted, quoted, quoted, lines,
 			)
 		} else {
 			script = fmt.Sprintf(
-				"Get-Content -LiteralPath %s",
-				executor.QuotePowerShell(path),
+				"if (Test-Path -PathType Container %s) { Get-ChildItem %s } else { Get-Content -LiteralPath %s }",
+				quoted, quoted, quoted,
 			)
 		}
 		return executor.PowerShellCommand(exec, script)
 	default:
+		quoted := executor.QuotePOSIX(path)
 		if lines > 0 {
-			return fmt.Sprintf("head -n %d %s", lines, executor.QuotePOSIX(path))
+			return fmt.Sprintf("if [ -d %s ]; then ls -la %s; else head -n %d %s; fi", quoted, quoted, lines, quoted)
 		}
-		return fmt.Sprintf("cat %s", executor.QuotePOSIX(path))
+		return fmt.Sprintf("if [ -d %s ]; then ls -la %s; else cat %s; fi", quoted, quoted, quoted)
 	}
 }

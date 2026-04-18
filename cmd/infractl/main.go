@@ -25,6 +25,7 @@ import (
 	"github.com/yourorg/infractl/internal/executor"
 	"github.com/yourorg/infractl/internal/hooks"
 	infrainit "github.com/yourorg/infractl/internal/infrainit"
+	"github.com/yourorg/infractl/internal/lifecycle"
 	"github.com/yourorg/infractl/internal/llm"
 	"github.com/yourorg/infractl/internal/mcp"
 	"github.com/yourorg/infractl/internal/privilege"
@@ -71,11 +72,15 @@ func run() error {
 	case "help", "--help", "-h":
 		printUsage()
 		return nil
+	case "hooks":
+		return runHooks(filtered[1:])
+	case "plan":
+		return runPlan(filtered[1:])
 	case "daemon":
-		fmt.Println("daemon 筌뤴뫀諭??Phase 7?癒?퐣 ?닌뗭겱??몃빍??")
+		fmt.Println("daemon 모드는 Phase 7에서 구현 예정입니다")
 		return nil
 	default:
-		fmt.Fprintf(os.Stderr, "??????용뮉 筌뤿굝議? %s\n\n", filtered[0])
+		fmt.Fprintf(os.Stderr, "알 수 없는 서브커맨드: %s\n\n", filtered[0])
 		printUsage()
 		return nil
 	}
@@ -122,8 +127,9 @@ type deps struct {
 	costTracker   *cost.Tracker
 	bgManager     *background.Manager
 	checkpointMgr *checkpoint.Manager
-	hooksMgr      *hooks.Manager
+	hooksMgr      *lifecycle.Manager
 	scheduler     *schedule.Scheduler
+	subRunner     *subagent.Runner
 }
 
 // buildDeps???⑤벏????뤵?源놁뱽 鈺곌퀡???뺣뼄.
@@ -174,6 +180,7 @@ func buildDeps(ctx context.Context) (*deps, error) {
 	if isQwen(generalCfg.Model) {
 		generalClient.SetUseInlineToolCalls(true)
 	}
+	generalClient.SetTemperature(generalCfg.Temperature)
 	llmReg.Register(llm.TierGeneral, generalClient, generalCfg.Model)
 
 	if cfg.Models.Reasoning != nil {
@@ -182,6 +189,7 @@ func buildDeps(ctx context.Context) (*deps, error) {
 		if isQwen(rc.Model) {
 			reasoningClient.SetUseInlineToolCalls(true)
 		}
+		reasoningClient.SetTemperature(rc.Temperature)
 		llmReg.Register(llm.TierReasoning, reasoningClient, rc.Model)
 	}
 	if cfg.Models.Fast != nil {
@@ -190,6 +198,7 @@ func buildDeps(ctx context.Context) (*deps, error) {
 		if isQwen(fc.Model) {
 			fastClient.SetUseInlineToolCalls(true)
 		}
+		fastClient.SetTemperature(fc.Temperature)
 		llmReg.Register(llm.TierFast, fastClient, fc.Model)
 	}
 
@@ -203,7 +212,7 @@ func buildDeps(ctx context.Context) (*deps, error) {
 	// Phase 6: ??????袁㏓럡 筌띲끇??? (??쎄쾿?깆????遺얠젂?醫듼봺: ~/.infractl/scripts)
 	scriptsDir := filepath.Join(configDir, "scripts")
 	userToolMgr := tools.NewUserToolManager(sqliteStore, registry, scriptsDir)
-	bgMgr := background.NewManager()
+	bgMgr := background.NewManager(cfg.Background.StorageDir, cfg.Background.MaxFileSize)
 
 	// Phase 7: ??? CPU 筌롫뗀?덄뵳?+ ?紐? RAG 野꺜???┛ ??밴쉐
 	externalEmbedder := rag.NewEmbeddingGenerator(cfg.Embedding)
@@ -214,15 +223,22 @@ func buildDeps(ctx context.Context) (*deps, error) {
 
 	// Phase 8: 筌ｋ똾寃?????+ ??+ ??뺥닏?癒?뵠?袁る뱜 + ???餓?筌띲끇??? ??밴쉐 (defaultTools??雅뚯눘???袁⑹뒄)
 	cpMgr := checkpoint.NewManager(sqliteStore)
-	hooksMgr := hooks.NewManager(sqliteStore)
+	hooksMgr := lifecycle.NewManager(sqliteStore)
 	subRunner := subagent.NewRunner(llmClient, registry, execMgr, nil) // costTracker???袁⑸퓠 雅뚯눘??
 	subRunner.SetLLMRegistry(llmReg)                                   // fast ?怨쀫선 ?怨쀪퐨 ????
 	subOrchestrator := subagent.NewOrchestrator(subRunner)
-	scheduler := schedule.NewScheduler(sqliteStore, func(ctx context.Context, prompt string) (string, error) {
-		return "(???餓???쎈뻬?? daemon 筌뤴뫀諭?癒?퐣筌?筌왖?癒?쭢??덈뼄)", nil
+	subOrchestrator.SetMaxParallel(cfg.Subagent.MaxParallel) // Phase F: errgroup 동시성 제한
+	scheduleLogger := schedule.NewLogger(cfg.Schedule.Log.Path, cfg.Schedule.Log.MaxSize)
+	// Phase F.8 완료 전 placeholder — daemon AgentRunner 연결 후 교체
+	scheduleRunner := schedule.AgentRunner(func(ctx context.Context, prompt string) (string, error) {
+		return "(스케줄 실행: daemon AgentRunner 미연결 — Phase F.8 완료 후 교체)", nil
 	})
+	scheduler := schedule.NewScheduler(sqliteStore, scheduleRunner)
+	scheduler.SetLogger(scheduleLogger)
+	oneshotMgr := schedule.NewOneshotManager(sqliteStore, scheduleRunner, scheduleLogger)
+	scheduler.SetOneshotManager(oneshotMgr)
 
-	for _, t := range defaultTools(sqliteStore, sqliteStore, sqliteStore, sqliteStore, userToolMgr, execMgr, connectorMgr, llmClient, llmReg, ragMgr, sqliteStore, memoryService, cpMgr, hooksMgr, subOrchestrator, scheduler) {
+	for _, t := range defaultTools(sqliteStore, sqliteStore, sqliteStore, sqliteStore, userToolMgr, execMgr, connectorMgr, llmClient, llmReg, ragMgr, sqliteStore, externalEmbedder, memoryService, cpMgr, hooksMgr, subOrchestrator, scheduler) {
 		if err := registry.Register(t); err != nil {
 			return nil, fmt.Errorf("register tool: %w", err)
 		}
@@ -250,9 +266,23 @@ func buildDeps(ctx context.Context) (*deps, error) {
 
 	// Phase 8: 獄쏄퉫???깆뒲???臾믩씜 筌띲끇??? ??밴쉐
 
-	// Phase 8: BackgroundTool ?源낆쨯
-	if err := registry.Register(&background.ManageTool{Manager: bgMgr}); err != nil {
-		slog.Warn("register background tool", "err", err)
+	// Phase F: BackgroundManageTool + OutputTool 등록
+	if err := registry.Register(&tools.BackgroundManageTool{Manager: bgMgr}); err != nil {
+		slog.Warn("register background_jobs tool", "err", err)
+	}
+	if err := registry.Register(&tools.OutputTool{
+		Manager:    bgMgr,
+		MaxPerCall: cfg.Monitor.MaxPerCall,
+		MaxCumul:   cfg.Monitor.MaxCumulative,
+	}); err != nil {
+		slog.Warn("register background_output tool", "err", err)
+	}
+	if err := registry.Register(&tools.MonitorTool{
+		Manager:    bgMgr,
+		MaxPerCall: cfg.Monitor.MaxPerCall,
+		MaxCumul:   cfg.Monitor.MaxCumulative,
+	}); err != nil {
+		slog.Warn("register monitor tool", "err", err)
 	}
 
 	// Phase 8: ??뺥닏?癒?뵠?袁る뱜 ??쑴???곕뗄?삥묾?雅뚯눘??(costTracker ??밴쉐 ??
@@ -260,8 +290,8 @@ func buildDeps(ctx context.Context) (*deps, error) {
 
 	// Phase 8: on_connect ???怨뚭퍙
 	connectorMgr.SetConnectHook(func(ctx context.Context, server, serviceType string) {
-		hooksMgr.Fire(ctx, hooks.HookContext{
-			Event:       hooks.EventOnConnect,
+		hooksMgr.Fire(ctx, lifecycle.HookContext{
+			Event:       lifecycle.EventOnConnect,
 			Server:      server,
 			ServiceType: serviceType,
 		})
@@ -297,6 +327,7 @@ func buildDeps(ctx context.Context) (*deps, error) {
 		hooksMgr:         hooksMgr,
 		scheduleStore:    sqliteStore,
 		scheduler:        scheduler,
+		subRunner:        subRunner,
 	}, nil
 }
 
@@ -337,22 +368,46 @@ func runTUI() error {
 	// 筌렺??LLM ?????쎈뱜??+ ??깆뒭??雅뚯눘??
 	ag.SetLLMRegistry(d.llmRegistry)
 	ag.SetBackgroundManager(d.bgManager)
+	ag.SetPromotionThreshold(d.cfg.Background.PromotionDuration())
 	ag.SetCostTracker(d.costTracker)
 	ag.SetModelName(d.cfg.GeneralLLM().Model)
 	ag.SetCheckpointManager(d.checkpointMgr)
-	ag.SetHooksManager(d.hooksMgr)
-	// 프로그레시브 컨텍스트 요약 관리자 주입
-	ag.SetSessionSummary(agent.NewSessionSummaryManager(d.llmClient))
+	// hooks.yaml 스냅샷 캡처 + hookRunner 주입 (Phase D: 최초 실행 시 default yaml + builtins 부트스트랩)
+	if cfgDir, err := config.DefaultConfigDir(); err == nil {
+		if bsErr := infrainit.BootstrapHooks(cfgDir); bsErr != nil {
+			slog.Warn("hooks bootstrap failed", "err", bsErr)
+		}
+		hooksYAML := filepath.Join(cfgDir, "hooks.yaml")
+		if snapErr := hooks.CaptureSnapshot(hooksYAML); snapErr != nil {
+			slog.Warn("hooks.yaml load failed", "err", snapErr)
+		}
+		// Phase G: hooks.yaml 핫리로드 감시 (ctx 취소 시 goroutine 정리)
+		go func() {
+			if err := hooks.Watch(ctx, hooksYAML); err != nil {
+				slog.Warn("hooks.yaml watcher exited", "err", err)
+			}
+		}()
+	}
+	hookRunner := hooks.NewRunner(d.llmRegistry)
+	hookRunner.SetAgentRunner(subagent.NewHookAgentRunner(d.subRunner))
+	ag.SetHookRunner(hookRunner)
+	ag.SetSubagentRunner(d.subRunner)
+	// 프로그레시브 컨텍스트 요약 관리자 주입 (maxHistory/5 라운드 기준으로 동적 임계값 설정)
+	sessionSummaryMgr := agent.NewSessionSummaryManager(d.llmClient)
+	sessionSummaryMgr.SetThreshold(50 / 5) // defaultMaxHistory=50, avgMsgsPerRound≈5
+	ag.SetSessionSummary(sessionSummaryMgr)
 	d.memoryService.SubmitBackfill(ctx)
 	if ct, ok := d.registry.Get("session_context"); ok {
 		if tool, ok2 := ct.(*tools.SessionContextTool); ok2 {
 			tool.ActiveServer = ag.ActiveServerSnapshot
 		}
 	}
-	if rt, ok := d.registry.Get("server_remove"); ok {
-		if tool, ok2 := rt.(*tools.ServerRemoveTool); ok2 {
-			tool.ActiveServer = ag.ActiveServerSnapshot
-			tool.OnActiveServerClear = ag.ClearActiveServer
+	for _, name := range []string{"server_remove", "workspace_remove"} {
+		if rt, ok := d.registry.Get(name); ok {
+			if tool, ok2 := rt.(*tools.ServerRemoveTool); ok2 {
+				tool.ActiveServer = ag.ActiveServerSnapshot
+				tool.OnActiveServerClear = ag.ClearActiveServer
+			}
 		}
 	}
 
@@ -395,6 +450,10 @@ func runTUI() error {
 	p := tea.NewProgram(app, tea.WithOutput(parker))
 	box.Set(p) // p.Run() ?袁⑸퓠 ??쇱젟 ??Send()?? ?????怨뺣굡????곸벉
 	handler.SetProgram(p)
+	// query.Engine 이벤트(스트리밍 토큰/도구 결과/종료)를 TUI 메시지로 변환해 전달
+	querySink := tui.NewTUIQueryEventSink()
+	querySink.SetProgram(p)
+	ag.SetQueryEventSink(querySink)
 	d.bgManager.SetNotifyFunc(handler.OnJobComplete)
 	ag.SetActiveServerNotifier(func(srv *store.Server) {
 		p.Send(tui.ActiveServerMsg{Server: srv})
@@ -416,22 +475,30 @@ func runTUI() error {
 		}
 	}
 	// server_focus ?꾧뎄???쒖꽦 ?쒕쾭 肄쒕갚 + ?좏깮 UI ?곌껐
-	if ft, ok := d.registry.Get("server_focus"); ok {
-		if tool, ok2 := ft.(*tools.ServerFocusTool); ok2 {
-			tool.OnChange = func(srv *store.Server) {
-				if srv == nil {
-					ag.ClearActiveServer()
-				} else {
-					ag.SetActiveServer(*srv)
+	for _, name := range []string{"server_focus", "workspace_focus"} {
+		if ft, ok := d.registry.Get(name); ok {
+			if tool, ok2 := ft.(*tools.ServerFocusTool); ok2 {
+				tool.OnChange = func(srv *store.Server) {
+					if srv == nil {
+						ag.ClearActiveServer()
+					} else {
+						ag.SetActiveServer(*srv)
+					}
 				}
+				tool.SelectFn = tuiFocusSelectAdapter(selectHandler)
 			}
-			tool.SelectFn = tuiFocusSelectAdapter(selectHandler)
 		}
 	}
 	// subagent_analyze ?꾧뎄???ㅼ떆媛??대깽??肄쒕갚 ?곌껐
 	if at, ok := d.registry.Get("subagent_analyze"); ok {
 		if analyzeTool, ok2 := at.(*subagent.AnalyzeTool); ok2 {
 			analyzeTool.EventCb = handler.SubagentEventCallback()
+		}
+	}
+	// delegate_task 도구 실시간 이벤트 콜백 연결 (서브에이전트 내부 도구 진행 상황을 TUI에 표시)
+	if dt, ok := d.registry.Get("delegate_task"); ok {
+		if delegateTool, ok2 := dt.(*subagent.DelegateAgentTool); ok2 {
+			delegateTool.EventCb = handler.SubagentEventCallback()
 		}
 	}
 	// Phase 5: TUI 확인 핸들러 대신 QuestionHandler 사용 (이미 SetQuestionHandler로 등록됨)
@@ -441,6 +508,12 @@ func runTUI() error {
 		if tool, ok2 := sh.(*tools.ShellExecTool); ok2 {
 			tool.PrivilegeCache = privCache
 			tool.PromptHandler = newStorePrivilegeHandler(d.serverStore, tui.NewPrivilegePromptHandler(p))
+			tool.IsYoloMode = ag.IsYOROMode
+		}
+	}
+	if aq, ok := d.registry.Get("ask_user_question"); ok {
+		if tool, ok2 := aq.(*tools.AskUserQuestionTool); ok2 {
+			tool.IsYoroMode = ag.IsYOROMode
 		}
 	}
 
@@ -457,5 +530,7 @@ func printUsage() {
 	fmt.Println("  infractl init      Initialize configuration")
 	fmt.Println("  infractl version   Show version")
 	fmt.Println("  infractl help      Show help")
+	fmt.Println("  infractl hooks     Hook 관리 (list/test/validate/reload)")
+	fmt.Println("  infractl plan      Plan Mode 관리 (enter/exit/status)")
 	fmt.Println("  infractl daemon    Run daemon mode (Phase 7)")
 }

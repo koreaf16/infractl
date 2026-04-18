@@ -18,6 +18,11 @@ func (m AppModel) handleToolMsg(msg tea.Msg) (AppModel, tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case ToolStartMsg:
 		m.activeTools.Add(msg.ToolID, msg.Name, msg.Target, msg.Args)
+		shimLabel := toolShimmerLabel(msg.Name, msg.Args)
+		if msg.Target != "" {
+			shimLabel += " @" + msg.Target
+		}
+		m.shimmer.SetText(shimLabel)
 		desc, _ := msg.Args["description"].(string)
 		if phaseID, phaseName, ok := parsePhaseFromDescription(desc); ok {
 			m.progress.AddToolWithPhase(msg.ToolID, msg.Name, msg.Target, phaseID, phaseName, msg.Args)
@@ -59,17 +64,24 @@ func (m AppModel) handleToolMsg(msg tea.Msg) (AppModel, tea.Cmd, bool) {
 			capturedLines, totalLines = resolveShellBoxOutput(msg.Name, capturedLines, totalLines, msg.Result)
 		}
 		m.activeTools.Remove(msg.ToolID)
-		m.progress.CompleteTool(msg.ToolID, msg.Duration, msg.Success)
+		m.progress.CompleteTool(msg.ToolID, msg.Duration, msg.Success, msg.MetadataJSON)
 		m.shimmer.bgCount = m.activeTools.BackgroundCount()
 		m.stats.AddToolUse()
+		if msg.Name == "verify_complete" {
+			if meta, ok := parseTaskProgressMetadata(msg.MetadataJSON); ok && strings.TrimSpace(meta.VerifiedByToolID) != "" {
+				m.history.UpdateTaskProgress(meta.VerifiedByToolID, msg.MetadataJSON)
+				m.progress.UpdateTaskProgress(meta.VerifiedByToolID, msg.MetadataJSON)
+			}
+		}
 		m.history.Add(toolHistoryEntry{
-			toolID:     msg.ToolID,
-			toolName:   msg.Name,
-			result:     msg.Result,
-			duration:   msg.Duration,
-			success:    msg.Success,
-			shellLines: capturedLines,
-			shellTotal: totalLines,
+			toolID:       msg.ToolID,
+			toolName:     msg.Name,
+			result:       msg.Result,
+			metadataJSON: msg.MetadataJSON,
+			duration:     msg.Duration,
+			success:      msg.Success,
+			shellLines:   capturedLines,
+			shellTotal:   totalLines,
 		})
 		if m.activeTools.RunningCount() == 0 {
 			label := m.thinkingLabel
@@ -78,23 +90,27 @@ func (m AppModel) handleToolMsg(msg tea.Msg) (AppModel, tea.Cmd, bool) {
 			}
 			m.shimmer.SetText(label)
 			m.streamLines = nil
+		} else if st := m.activeTools.MostRecentForeground(); st != nil {
+			shimLabel := toolShimmerLabel(st.toolName, st.args)
+			if st.target != "" {
+				shimLabel += " @" + st.target
+			}
+			m.shimmer.SetText(shimLabel)
 		}
 		if m.box != nil {
 			if isBackground {
 				m.box.Println(renderBackgroundDone(msg.Name, msg.Duration, msg.Success))
 			} else {
 				var args map[string]any
-				for _, item := range m.progress.items {
-					if item.toolID == msg.ToolID {
-						args = item.args
+				for i := len(m.progress.items) - 1; i >= 0; i-- {
+					if m.progress.items[i].toolID == msg.ToolID {
+						args = m.progress.items[i].args
 						break
 					}
 				}
-				contentLines := capturedLines
-				if !isShellBoxTool(msg.Name) {
-					contentLines = toolBoxContent(msg.Name, args, msg.Result, msg.Success)
-				}
-				m.box.Println(renderShellBoxCompleted(msg.Name, args, contentLines, totalLines, msg.Duration, msg.Success, m.width))
+				contentLines, resolvedTotal := resolveToolBoxContent(msg.Name, args, capturedLines, totalLines, msg.Result, msg.Success)
+				totalLines = resolvedTotal
+				m.box.Println(renderShellBoxCompleted(msg.Name, args, contentLines, totalLines, msg.Duration, msg.Success, m.width, msg.MetadataJSON))
 			}
 		}
 		return m, nil, true
@@ -117,6 +133,8 @@ func (m AppModel) handleToolMsg(msg tea.Msg) (AppModel, tea.Cmd, bool) {
 			m.box.Println(renderErrorLine(msg.Err))
 		}
 		m.busy = false
+		m.input.SetBusy(false)
+		m.statusBar.setQueueLen(0)
 		m.shimmer.Stop()
 		return m, nil, true
 
@@ -152,6 +170,14 @@ func (m AppModel) handleToolMsg(msg tea.Msg) (AppModel, tea.Cmd, bool) {
 			return m, tea.Batch(m.runAgent(entry.expandedInput), m.sp.Tick, shimmerCmd), true
 		}
 		m.busy = false
+		m.input.SetBusy(false)
+		m.statusBar.setQueueLen(0)
+		// Plan Mode 중이면 pending 수를 statusbar 에 반영한다.
+		if m.planMode {
+			if ps := m.ag.PlanState(); ps != nil {
+				m.statusBar.setPlanPending(ps.Queue().Len())
+			}
+		}
 		return m, nil, true
 
 	case SubagentEventMsg:

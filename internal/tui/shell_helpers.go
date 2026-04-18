@@ -1,13 +1,25 @@
+// Package tui
+// File: shell_helpers.go
+// Description: shell 박스 렌더링 공통 헬퍼 — 라인 추출, 상태 라인 구성, 텍스트 트런케이션
+// Responsibility: shell_box / web_search_box / shell_box_parallel 에서 공유하는 유틸리티
+
 package tui
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/yourorg/infractl/internal/tools"
+)
 
 func shellTaskLabel(name string, args map[string]any) string {
 	if args != nil {
 		keys := []string{"description", "reason", "thought", "explanation", "step", "action"}
 		for _, key := range keys {
 			if val, ok := args[key].(string); ok && strings.TrimSpace(val) != "" {
-				return truncateStr(strings.TrimSpace(val), 100)
+				return truncateStr(tools.NormalizeTaskSummary(val), 100)
 			}
 		}
 	}
@@ -102,4 +114,107 @@ func resolveShellBoxOutput(name string, streamed []string, streamedTotal int, re
 
 	lines := shellResultOutputLines(name, result)
 	return lines, len(lines)
+}
+
+// extractField는 "key=value" 형태의 필드 값을 공백 분리된 라인에서 추출한다.
+func extractField(line, key string) string {
+	parts := strings.Split(line, " ")
+	for _, p := range parts {
+		if strings.HasPrefix(p, key+"=") {
+			return strings.Trim(strings.TrimPrefix(p, key+"="), "\"")
+		}
+	}
+	return ""
+}
+
+// shellBoxStatusLine은 도구 박스의 상태 요약 줄을 렌더링한다.
+func shellBoxStatusLine(name string, args map[string]any, totalLines int, icon boxIcon, dur time.Duration, metadataJSON string) string {
+	var iconStr string
+	switch icon {
+	case boxIconRunning:
+		iconStr = StyleClaude().Render("●")
+	case boxIconDone:
+		iconStr = StyleSuccess.Render("\u221a")
+	case boxIconFailed:
+		iconStr = StyleError.Render("x")
+	}
+
+	line := iconStr + " " + StyleCmdBoxToolName.Render(toolDisplayName(name))
+	if desc := shellBoxDescLine(name, args, metadataJSON); desc != "" {
+		line += StyleCmdBoxDim.Render(" -> ") + StyleClaude().Render(desc)
+	}
+	if name == "shell_exec" {
+		if status := taskProgressStateLine(metadataJSON, icon != boxIconFailed, icon == boxIconRunning); status != "" {
+			line += StyleCmdBoxDim.Render(" -> ") + StyleCmdBoxDim.Render(status)
+		}
+	} else if isShellBoxTool(name) {
+		line += StyleCmdBoxDim.Render(" -> ") + StyleCmdBoxDim.Render(fmt.Sprintf("%d lines", totalLines))
+	}
+	if dur > 0 {
+		line += " " + StyleCmdBoxDim.Render("(" + formatElapsedShort(dur) + ")")
+	}
+	return line
+}
+
+// shellBoxDescLine은 도구 종류별 설명 문자열을 반환한다.
+func shellBoxDescLine(name string, args map[string]any, metadataJSON string) string {
+	if name == "shell_exec" {
+		return taskProgressLabel(name, args, metadataJSON)
+	}
+	return shellTaskLabel(name, args)
+}
+
+// buildRoundedBorderTitleLine은 타이틀이 인라인으로 들어간 상단 테두리 줄을 반환한다.
+func buildRoundedBorderTitleLine(totalWidth int, title string) string {
+	if totalWidth < 4 || title == "" {
+		return ""
+	}
+
+	titleStr := StyleCmdBoxToolName.Render(title)
+	innerWidth := totalWidth - 2
+	titleWidth := lipgloss.Width(titleStr)
+	if titleWidth >= innerWidth {
+		plain := truncateStr(title, max(1, innerWidth-2))
+		titleStr = StyleCmdBoxToolName.Render(plain)
+		titleWidth = lipgloss.Width(titleStr)
+	}
+
+	leftFill := 1
+	rightFill := innerWidth - leftFill - titleWidth
+	if rightFill < 1 {
+		rightFill = 1
+		leftFill = max(0, innerWidth-rightFill-titleWidth)
+	}
+	if leftFill < 1 {
+		leftFill = 1
+	}
+
+	borderStyle := lipgloss.NewStyle().Foreground(ColorSubtle)
+	left := borderStyle.Render("\u256d" + strings.Repeat("-", leftFill))
+	right := borderStyle.Render(strings.Repeat("-", max(0, rightFill)) + "\u256e")
+	return left + titleStr + right
+}
+
+// appendShellLine은 lines에 line을 추가하고 max 초과 시 앞부터 잘라낸다.
+func appendShellLine(lines []string, line string, max int) []string {
+	lines = append(lines, line)
+	if len(lines) > max {
+		lines = lines[len(lines)-max:]
+	}
+	return lines
+}
+
+// truncateShellLine은 라인을 maxWidth rune 수로 잘라 "..."을 붙인다.
+func truncateShellLine(line string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	runes := []rune(line)
+	if len(runes) <= maxWidth {
+		return line
+	}
+	if maxWidth <= 3 {
+		return string(runes[:maxWidth])
+	}
+	return string(runes[:maxWidth-3]) + "..."
 }

@@ -1,8 +1,3 @@
-// Package agent
-// File: active_server.go
-// Description: active server helpers (focus apply + input alias resolution)
-// Responsibility: keep active-server transitions deterministic and reusable
-
 package agent
 
 import (
@@ -14,14 +9,13 @@ import (
 	"github.com/yourorg/infractl/internal/store"
 )
 
-var serverDirectiveKeyword = regexp.MustCompile(`(?i)\b(ssh|server|host)\b|서버|접속|로그인`)
+var serverDirectiveKeyword = regexp.MustCompile(`(?i)\b(ssh|server|host|workspace)\b|워크스페이스|서버|접속|로그인`)
 
 func (a *Agent) applyActiveServer(next *store.Server) {
 	if sameActiveServer(a.activeServer, next) {
 		return
 	}
 
-	// 서버가 실제로 다른 서버로 전환될 때만 마커 삽입 (nil→server, server→nil은 제외)
 	if a.sessionSummary != nil && a.activeServer != nil && next != nil {
 		a.sessionSummary.MarkServerTransition(a.activeServer.Name, next.Name)
 	}
@@ -31,6 +25,9 @@ func (a *Agent) applyActiveServer(next *store.Server) {
 	} else {
 		cp := *next
 		a.activeServer = &cp
+	}
+	if a.promptCache != nil {
+		a.promptCache.Clear()
 	}
 
 	if a.activeServerNotify != nil {
@@ -92,6 +89,8 @@ func hasServerDirectiveSignal(input, alias string) bool {
 		lowerAlias + " 에서",
 		lowerAlias + "로",
 		lowerAlias + " 로",
+		"workspace " + lowerAlias,
+		"workspace=" + lowerAlias,
 	}
 	for _, p := range patterns {
 		if strings.Contains(lowerInput, p) {

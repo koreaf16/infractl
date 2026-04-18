@@ -28,7 +28,8 @@ type Config struct {
 	// Timeout은 연결 및 명령 실행 타임아웃이다.
 	Timeout time.Duration
 	// KeepAlive는 keep-alive 전송 간격이다 (0이면 비활성화).
-	KeepAlive time.Duration
+	KeepAlive    time.Duration
+	WorkspaceDir string
 }
 
 // Addr는 host:port 형식 주소를 반환한다.

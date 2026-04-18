@@ -244,4 +244,46 @@ var (
 				BorderForeground(ColorGeminiBox).
 				PaddingLeft(1).
 				PaddingRight(1)
+
+	// Phase 11: Task proposal UI colors
+	ColorPlanRequest  = lipgloss.Color("#6366F1") // indigo — task proposal waiting
+	ColorPlanApproved = ColorSuccess               // reuse
+	ColorPlanRejected = ColorError                 // reuse
+	ColorSubagent     = lipgloss.Color("#22D3EE") // cyan — future subagent
+
+	// Task proposal card styles
+	StyleTaskProposalOuter = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(ColorPlanRequest).
+				PaddingLeft(1).
+				PaddingRight(1).
+				MarginTop(1).
+				MarginBottom(1)
+
+	StyleTaskProposalInner = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(ColorSubtle).
+				PaddingLeft(1).
+				PaddingRight(1)
+
+	StyleTaskProposalOK = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(ColorPlanApproved).
+				PaddingLeft(1).
+				PaddingRight(1).
+				MarginTop(1).
+				MarginBottom(1)
+
+	StyleTaskProposalDeny = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(ColorPlanRejected).
+				PaddingLeft(1).
+				PaddingRight(1).
+				MarginTop(1).
+				MarginBottom(1)
+
+	StyleTaskBadgeRoot    = lipgloss.NewStyle().Background(ColorError).Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Padding(0, 1)
+	StyleTaskBadgeAccount = lipgloss.NewStyle().Background(ColorWarning).Foreground(lipgloss.Color("#000000")).Bold(true).Padding(0, 1)
+	StyleTaskTitle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF"))
+	StyleTaskDim          = lipgloss.NewStyle().Foreground(ColorDim)
 )

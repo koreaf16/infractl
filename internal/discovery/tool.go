@@ -50,20 +50,21 @@ func (t *DiscoverServicesTool) IsReadOnly() bool { return true }
 func (t *DiscoverServicesTool) IsEnabled() bool  { return true }
 
 // Execute scans the target server and returns the formatted result.
-func (t *DiscoverServicesTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
+func (t *DiscoverServicesTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (tools.ToolOutcome, error) {
 	serverName := exec.Target()
 	slog.Info("service_discovery_start", "server", serverName)
 
 	result, err := t.Scanner.Scan(ctx, exec)
 	if err != nil {
 		slog.Error("service_discovery_failed", "server", serverName, "err", err)
-		return fmt.Sprintf("서비스 탐지 실패: %s", err), nil
+		msg := fmt.Sprintf("서비스 탐지 실패: %s", err)
+		return tools.ToolOutcome{Content: msg, Success: false, ErrorMessage: msg}, nil
 	}
 
 	slog.Info("service_discovery_complete", "server", serverName, "found", len(result.Services))
 
 	if len(result.Services) == 0 {
-		return fmt.Sprintf("[%s] 탐지된 서비스 없음", result.ServerName), nil
+		return tools.ToolOutcome{Content: fmt.Sprintf("[%s] 탐지된 서비스 없음", result.ServerName), Success: true}, nil
 	}
 
 	if t.Store != nil {
@@ -93,7 +94,7 @@ func (t *DiscoverServicesTool) Execute(ctx context.Context, args map[string]inte
 		}
 	}
 
-	return output, nil
+	return tools.ToolOutcome{Content: output, Success: true}, nil
 }
 
 // detectServerNameConflicts emits warnings only for real ambiguity cases.

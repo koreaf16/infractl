@@ -30,6 +30,7 @@ type SessionManager struct {
 	mu          sync.Mutex
 	idleTimeout time.Duration
 	maxSessions int
+	sink        ElevationEventSink
 }
 
 // newSessionManager creates a SessionManager for client and starts the idle reaper.
@@ -42,6 +43,14 @@ func newSessionManager(ctx context.Context, client *Client) *SessionManager {
 	}
 	go m.reaper(ctx)
 	return m
+}
+
+// SetSink wires an ElevationEventSink that receives lifecycle events for all
+// sessions managed by this SessionManager.
+func (m *SessionManager) SetSink(sink ElevationEventSink) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sink = sink
 }
 
 // GetOrCreate returns the PersistentShell for sessionID, creating it if needed.
@@ -71,6 +80,10 @@ func (m *SessionManager) GetOrCreate(ctx context.Context, sessionID string) (*Pe
 	}
 	m.sessions[sessionID] = sh
 	slog.Info("session manager: session created", "session", sessionID, "target", m.client.cfg.Host)
+	sh.SetSink(m.sink, m.client.cfg.Host, sessionID)
+	if m.sink != nil {
+		m.sink.OnSessionCreated(m.client.cfg.Host, sessionID, "")
+	}
 	return sh, nil
 }
 
@@ -133,6 +146,9 @@ func (m *SessionManager) Close(sessionID string) error {
 		m.mu.Unlock()
 		return nil
 	}
+	if m.sink != nil {
+		m.sink.OnSessionClosed(m.client.cfg.Host, sessionID)
+	}
 	delete(m.sessions, sessionID)
 	m.mu.Unlock()
 
@@ -185,6 +201,9 @@ func (m *SessionManager) reapOnce() {
 				reason = "dead"
 			}
 			slog.Info("session manager: reaping session", "session", id, "reason", reason)
+			if m.sink != nil {
+				m.sink.OnSessionClosed(m.client.cfg.Host, id)
+			}
 			delete(m.sessions, id)
 			go sh.Close() // close without blocking the reaper
 		}

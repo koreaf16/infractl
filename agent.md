@@ -97,7 +97,7 @@
 ### 11. 바이너리 출력 경로
 
 - 컴파일 시 반드시 **`bin/` 디렉토리**에 출력한다.
-- 올바른 명령: `go build -o bin/infractl ./cmd/infractl/`
+- 올바른 명령: `go build -o bin/infractl.exe ./cmd/infractl/`
 - 프로젝트 루트 또는 기타 경로에 바이너리를 직접 생성하지 않는다.
 
 ---

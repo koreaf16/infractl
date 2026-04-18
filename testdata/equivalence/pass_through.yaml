@@ -1,0 +1,51 @@
+# pass_through.yaml — 비 bash 도구들은 system_risk 패스스루 (10개)
+cases:
+  - id: pt_01
+    tool: file_read
+    command: ""
+    expect_deny: false
+
+  - id: pt_02
+    tool: file_write
+    command: ""
+    expect_deny: false
+
+  - id: pt_03
+    tool: glob
+    command: ""
+    expect_deny: false
+
+  - id: pt_04
+    tool: grep
+    command: ""
+    expect_deny: false
+
+  - id: pt_05
+    tool: web_search
+    command: ""
+    expect_deny: false
+
+  - id: pt_06
+    tool: http_fetch
+    command: ""
+    expect_deny: false
+
+  - id: pt_07
+    tool: shell_exec
+    command: "ls -la"
+    expect_deny: false
+
+  - id: pt_08
+    tool: shell_exec
+    command: "rm -rf /"
+    expect_deny: true
+
+  - id: pt_09
+    tool: exec
+    command: "dd if=/dev/zero of=/dev/sda"
+    expect_deny: true
+
+  - id: pt_10
+    tool: shell
+    command: "iptables -F"
+    expect_deny: true

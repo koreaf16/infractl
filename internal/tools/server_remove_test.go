@@ -40,6 +40,7 @@ func (e *removableExec) Execute(context.Context, string) (executor.ExecResult, e
 }
 
 func (e *removableExec) Target() string { return e.target }
+func (e *removableExec) Host() string   { return e.target }
 
 type cleanupStub struct {
 	calledWith string
@@ -87,8 +88,8 @@ func TestServerRemoveToolClearsRuntimeAndActiveServer(t *testing.T) {
 	if !cleared {
 		t.Fatalf("expected active server to be cleared")
 	}
-	if !strings.Contains(out, "db-prod") {
-		t.Fatalf("expected success output to mention server, got %q", out)
+	if !strings.Contains(out.Content, "db-prod") {
+		t.Fatalf("expected success output to mention server, got %q", out.Content)
 	}
 }
 
@@ -109,8 +110,8 @@ func TestServerRemoveToolStopsOnConnectorCleanupFailure(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	if !strings.Contains(out, "cleanup failed") {
-		t.Fatalf("expected cleanup failure output, got %q", out)
+	if !strings.Contains(out.Content, "cleanup failed") {
+		t.Fatalf("expected cleanup failure output, got %q", out.Content)
 	}
 	if storeStub.removed != "" {
 		t.Fatalf("expected store removal to be skipped on cleanup failure")

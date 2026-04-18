@@ -52,17 +52,18 @@ func (t *UserDefinedTool) Parameters() map[string]interface{} {
 // Execute는 스크립트를 실행한다.
 // LLM 인자는 INFRACTL_ARGS_B64 환경변수로 base64-encoded JSON 형태로 전달되며,
 // 사용자 입력이 명령 문자열에 직접 삽입되지 않으므로 셸 인젝션 위험이 없다.
-func (t *UserDefinedTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
+func (t *UserDefinedTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (ToolOutcome, error) {
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
-		return "", fmt.Errorf("marshal args: %w", err)
+		return ToolOutcome{}, fmt.Errorf("marshal args: %w", err)
 	}
 	argsB64 := base64.StdEncoding.EncodeToString(argsJSON)
 	cmd := fmt.Sprintf("INFRACTL_ARGS_B64=%s bash %s", argsB64, t.entry.ScriptPath)
 
 	result, err := exec.Execute(ctx, cmd)
 	if err != nil {
-		return fmt.Sprintf("script execution failed: %s", err), nil
+		msg := fmt.Sprintf("script execution failed: %s", err)
+		return ToolOutcome{Content: msg, Success: false, ErrorMessage: msg}, nil
 	}
 
 	output := result.Stdout
@@ -72,5 +73,5 @@ func (t *UserDefinedTool) Execute(ctx context.Context, args map[string]interface
 	if result.ExitCode != 0 {
 		output = fmt.Sprintf("[Exit Code: %d]\n%s", result.ExitCode, output)
 	}
-	return output, nil
+	return ToolOutcome{Content: output, Success: result.ExitCode == 0, ExitCode: result.ExitCode}, nil
 }

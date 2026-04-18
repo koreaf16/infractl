@@ -97,7 +97,7 @@ func (t *ActivateTool) IsReadOnly() bool { return false }
 func (t *ActivateTool) IsEnabled() bool  { return true }
 
 // Execute validates request consistency, hydrates discovery data, and activates connector.
-func (t *ActivateTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
+func (t *ActivateTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (tools.ToolOutcome, error) {
 	server, _ := args["server"].(string)
 	serviceType, _ := args["service_type"].(string)
 	serviceName, _ := args["service_name"].(string)
@@ -110,8 +110,15 @@ func (t *ActivateTool) Execute(ctx context.Context, args map[string]interface{},
 	serviceName = strings.TrimSpace(serviceName)
 	subInstance = strings.TrimSpace(subInstance)
 
+	ok := func(msg string) (tools.ToolOutcome, error) {
+		return tools.ToolOutcome{Content: msg, Success: true}, nil
+	}
+	fail := func(msg string) (tools.ToolOutcome, error) {
+		return tools.ToolOutcome{Content: msg, Success: false, ErrorMessage: msg}, nil
+	}
+
 	if server == "" || serviceType == "" || serviceName == "" {
-		return "server, service_type, service_name는 필수입니다", nil
+		return fail("server, service_type, service_name는 필수입니다")
 	}
 
 	if t.ServerStore != nil {
@@ -121,36 +128,36 @@ func (t *ActivateTool) Execute(ctx context.Context, args map[string]interface{},
 
 	// 크리덴셜이 없을 때: 저장된 커넥터로 자동 재연결 시도
 	if username == "" && password == "" {
-		if savedInfo, savedCreds, ok := t.Manager.GetSavedConnector(ctx, server, serviceType, serviceName, subInstance); ok {
+		if savedInfo, savedCreds, okConn := t.Manager.GetSavedConnector(ctx, server, serviceType, serviceName, subInstance); okConn {
 			if err := t.Manager.Activate(ctx, savedInfo, savedCreds, SavePermanent); err != nil {
-				return fmt.Sprintf("저장된 크리덴셜로 재연결 실패: %s\nusername/password를 직접 입력하세요.", err), nil
+				return fail(fmt.Sprintf("저장된 크리덴셜로 재연결 실패: %s\nusername/password를 직접 입력하세요.", err))
 			}
 			states := t.Manager.States()
 			for _, s := range states {
 				key := connectorKey(savedInfo.ServerName, savedInfo.ServiceType, savedInfo.Name, savedInfo.SubInstance)
 				if s.Name == key {
-					return fmt.Sprintf("✓ %s %s — 저장된 크리덴셜로 자동 재연결 완료 (%d개 도구 등록)\n활성 도구: %v",
-						savedInfo.ServiceType, savedInfo.Name, len(s.Tools), s.Tools), nil
+					return ok(fmt.Sprintf("✓ %s %s — 저장된 크리덴셜로 자동 재연결 완료 (%d개 도구 등록)\n활성 도구: %v",
+						savedInfo.ServiceType, savedInfo.Name, len(s.Tools), s.Tools))
 				}
 			}
-			return fmt.Sprintf("✓ %s %s — 저장된 크리덴셜로 자동 재연결 완료", serviceType, serviceName), nil
+			return ok(fmt.Sprintf("✓ %s %s — 저장된 크리덴셜로 자동 재연결 완료", serviceType, serviceName))
 		}
 	}
 
 	if err := validateDiscoveryTarget(exec.Target(), server); err != nil {
-		return err.Error(), nil
+		return fail(err.Error())
 	}
 
 	entry, err := validateRecentDiscovery(ctx, t.DiscoveryStore, server, serviceType, serviceName)
 	if err != nil {
 		if t.Scanner != nil && t.DiscoveryStore != nil {
 			if scanErr := t.Scanner.ScanAndSave(ctx, exec, server, t.DiscoveryStore); scanErr != nil {
-				return fmt.Sprintf("자동 탐지 실패: %s", scanErr), nil
+				return fail(fmt.Sprintf("자동 탐지 실패: %s", scanErr))
 			}
 			entry, err = validateRecentDiscovery(ctx, t.DiscoveryStore, server, serviceType, serviceName)
 		}
 		if err != nil {
-			return err.Error(), nil
+			return fail(err.Error())
 		}
 	}
 
@@ -171,18 +178,18 @@ func (t *ActivateTool) Execute(ctx context.Context, args map[string]interface{},
 	saveMode := SaveMode(saveModeStr)
 
 	if err := t.Manager.Activate(ctx, info, creds, saveMode); err != nil {
-		return fmt.Sprintf("커넥터 활성화 실패: %s", err), nil
+		return fail(fmt.Sprintf("커넥터 활성화 실패: %s", err))
 	}
 
 	states := t.Manager.States()
 	for _, s := range states {
 		if s.ServerName == info.ServerName && s.Type == info.ServiceType && s.ServiceName == info.Name && s.SubInstance == info.SubInstance {
-			return fmt.Sprintf("✓ %s %s 커넥터 활성화 완료 (%d개 도구 등록)\n저장 방식: %s\n활성 도구: %v",
-				info.ServiceType, info.Name, len(s.Tools), saveMode, s.Tools), nil
+			return ok(fmt.Sprintf("✓ %s %s 커넥터 활성화 완료 (%d개 도구 등록)\n저장 방식: %s\n활성 도구: %v",
+				info.ServiceType, info.Name, len(s.Tools), saveMode, s.Tools))
 		}
 	}
 
-	return fmt.Sprintf("✓ %s %s 커넥터 활성화 완료 (save_mode: %s)", info.ServiceType, info.Name, saveMode), nil
+	return ok(fmt.Sprintf("✓ %s %s 커넥터 활성화 완료 (save_mode: %s)", info.ServiceType, info.Name, saveMode))
 }
 
 func parseOptionalInt(v interface{}) int {

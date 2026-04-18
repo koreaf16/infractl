@@ -29,6 +29,7 @@ func (m *parallelMockExecutor) Execute(_ context.Context, _ string) (ExecResult,
 	return ExecResult{Stdout: m.out}, m.err
 }
 func (m *parallelMockExecutor) Target() string { return m.target }
+func (m *parallelMockExecutor) Host() string   { return m.target }
 
 func newTestManager(servers map[string]string) *Manager {
 	mgr := NewManager(&parallelMockExecutor{target: "localhost", out: "local"})
@@ -197,4 +198,4 @@ func TestFormatParallelResults_Empty(t *testing.T) {
 		t.Error("empty results should return non-empty placeholder")
 	}
 }
-
+

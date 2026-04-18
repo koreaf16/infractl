@@ -1,7 +1,7 @@
 // Package tools
 // File: file_transfer.go
-// Description: SFTP 파일 업로드/다운로드 에이전트 도구 — scp 대체
-// Responsibility: 인증된 SSH 연결을 재사용한 SFTP로 파일을 전송한다 (패스워드 프롬프트 없음)
+// Description: SFTP ?뚯씪 ?낅줈???ㅼ슫濡쒕뱶 ?먯씠?꾪듃 ?꾧뎄 ??scp ?泥?
+// Responsibility: ?몄쬆??SSH ?곌껐???ъ궗?⑺븳 SFTP濡??뚯씪???꾩넚?쒕떎 (?⑥뒪?뚮뱶 ?꾨＼?꾪듃 ?놁쓬)
 
 package tools
 
@@ -10,24 +10,27 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/yourorg/infractl/internal/executor"
 )
 
-// FileTransferTool transfers files between the local controller and a remote server via SFTP.
-// Uses the existing authenticated SSH connection — no password prompt.
+// FileTransferTool transfers files between the local workspace and a remote workspace via SFTP.
+// Uses the existing authenticated SSH connection ??no password prompt.
 type FileTransferTool struct {
-	OutputCb func(string)
 }
 
 func (t *FileTransferTool) Name() string { return "file_transfer" }
 
 func (t *FileTransferTool) Description() string {
-	return "Upload or download a file between this local controller and a remote server via SFTP.\n" +
+	return "Upload or download a file between this local workspace and a registered SSH workspace via SFTP.\n" +
 		"ALWAYS use this tool instead of shell_exec + scp for file transfers.\n" +
-		"Reuses the existing authenticated SSH connection — no password prompt, no PTY required.\n" +
-		"action=upload: copies local_path on this PC to remote_path on the target server.\n" +
-		"action=download: copies remote_path on the target server to local_path on this PC.\n" +
+		"Reuses the existing authenticated SSH connection ??no password prompt, no PTY required.\n" +
+		"`local_path` is always on the infractl controller OS; `target` is always the remote SSH workspace.\n" +
+		"action=upload: copies local_path on the controller to remote_path in the target workspace.\n" +
+		"action=download: copies remote_path in the target workspace to local_path on the controller.\n" +
 		"Always include 'description' field with a brief Korean explanation."
 }
 
@@ -49,11 +52,11 @@ func (t *FileTransferTool) Parameters() map[string]interface{} {
 			},
 			"remote_path": map[string]interface{}{
 				"type":        "string",
-				"description": "Absolute path on the remote server.",
+				"description": "Path in the remote workspace. Relative paths are resolved from that workspace.",
 			},
 			"target": map[string]interface{}{
 				"type":        "string",
-				"description": "Target server name (same as shell_exec target). Required.",
+				"description": "Target workspace alias (same as shell_exec target). Required.",
 			},
 			"description": map[string]interface{}{
 				"type":        "string",
@@ -64,75 +67,128 @@ func (t *FileTransferTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *FileTransferTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
+func (t *FileTransferTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (ToolOutcome, error) {
 	action, err := argString(args, "action", true)
 	if err != nil {
-		return fmt.Sprintf("Error: %s", err), nil
+		return ToolOutcome{Content: fmt.Sprintf("Error: %s", err), Success: true}, nil
 	}
 	localPath, err := argString(args, "local_path", true)
 	if err != nil {
-		return fmt.Sprintf("Error: %s", err), nil
+		return ToolOutcome{Content: fmt.Sprintf("Error: %s", err), Success: true}, nil
 	}
 	remotePath, err := argString(args, "remote_path", true)
 	if err != nil {
-		return fmt.Sprintf("Error: %s", err), nil
+		return ToolOutcome{Content: fmt.Sprintf("Error: %s", err), Success: true}, nil
 	}
 
 	ft, ok := exec.(executor.FileTransferExecutor)
 	if !ok {
 		target := exec.Target()
 		if target == "" || target == "localhost" {
-			return "Error: file_transfer is only for remote servers. You are currently on 'localhost'. Please specify a remote server name in the 'target' argument.", nil
+			return ToolOutcome{Content: "Error: file_transfer is only for remote workspaces. You are currently on the local workspace. Specify a remote workspace alias in the 'target' argument.", Success: true}, nil
 		}
-		return fmt.Sprintf("Error: target server %q does not support file transfer (SFTP).", target), nil
+		return ToolOutcome{Content: fmt.Sprintf(
+			"Error: target workspace %q does not support file transfer (SFTP).\n"+
+				"Use a registered SSH workspace target, not localhost or a connector-specific database tool.",
+			target), Success: true}, nil
 	}
-
 	var lastPct int64
 	onProgress := func(transferred, total int64) {
-		if t.OutputCb == nil || total == 0 {
+		if total == 0 {
 			return
 		}
 		pct := transferred * 100 / total
 		if pct-lastPct >= 10 {
 			lastPct = pct
-			t.OutputCb(fmt.Sprintf("%d%% (%s / %s)", pct, formatBytes(transferred), formatBytes(total)))
+			EmitOutput(ctx, fmt.Sprintf("%d%% (%s / %s)", pct, formatBytes(transferred), formatBytes(total)))
 		}
 	}
 
 	switch action {
 	case "upload":
+		if msg := localPathPlatformMismatch(localPath); msg != "" {
+			return ToolOutcome{Content: "Error: " + msg, Success: true}, nil
+		}
+
 		// Pre-flight: check local file exists and get its size.
-		fi, statErr := os.Stat(localPath)
+		localStat, statErr := os.Stat(localPath)
 		if statErr != nil {
-			return fmt.Sprintf("Error: cannot read local file %q: %s", localPath, statErr), nil
+			return ToolOutcome{Content: fmt.Sprintf("Error: cannot read local file %q: %s", localPath, statErr), Success: true}, nil
 		}
-		remoteDir := path.Dir(remotePath)
-		if checkErr := checkRemoteWritable(ctx, exec, remoteDir); checkErr != nil {
-			return fmt.Sprintf("Pre-flight check failed: %s", checkErr), nil
+
+		// Remote Pre-flight: check disk space and writable (nearest ancestor)
+		if err := RunPreflightChecks(ctx, exec, remotePath, localStat.Size()); err != nil {
+			return ToolOutcome{Content: fmt.Sprintf("Remote pre-flight check failed: %s", err), Success: true}, nil
 		}
-		if checkErr := checkRemoteDiskSpace(ctx, exec, remoteDir, fi.Size()); checkErr != nil {
-			return fmt.Sprintf("Pre-flight check failed: %s", checkErr), nil
+
+		var uploadMsg string
+		if warning, _ := CheckCriticalPath(remotePath); warning != "" {
+			uploadMsg = warning + "\n"
 		}
-		if t.OutputCb != nil {
-			t.OutputCb(fmt.Sprintf("Uploading %s → %s:%s", localPath, exec.Target(), remotePath))
-		}
+		EmitOutput(ctx, fmt.Sprintf("Uploading %s ??%s:%s", localPath, exec.Target(), remotePath))
 		if err := ft.Upload(ctx, localPath, remotePath, onProgress); err != nil {
-			return fmt.Sprintf("Upload failed: %s", err), nil
+			hint := ""
+			if strings.Contains(err.Error(), "permission denied") || strings.Contains(err.Error(), "Permission denied") {
+				remoteDir := path.Dir(remotePath)
+				hint = fmt.Sprintf(
+					"\n沅뚰븳 嫄곕?濡??낅줈???ㅽ뙣. ???\n"+
+						"  1?④퀎: file_transfer濡?/tmp???낅줈??(remote_path=/tmp/%s)\n"+
+						"  2?④퀎: shell_exec濡??대룞 (become_method=sudo, become_user=<??곸쑀?>, command=\"mv /tmp/%s %s/\")",
+					path.Base(remotePath), path.Base(remotePath), remoteDir,
+				)
+			}
+			return ToolOutcome{Content: fmt.Sprintf("Upload failed: %s%s", err, hint), Success: true}, nil
 		}
-		return fmt.Sprintf("Upload complete: %s → %s:%s", localPath, exec.Target(), remotePath), nil
+		return ToolOutcome{Content: uploadMsg + fmt.Sprintf("Upload complete: %s ??%s:%s", localPath, exec.Target(), remotePath), Success: true}, nil
 
 	case "download":
-		if t.OutputCb != nil {
-			t.OutputCb(fmt.Sprintf("Downloading %s:%s → %s", exec.Target(), remotePath, localPath))
+		if msg := localPathPlatformMismatch(localPath); msg != "" {
+			return ToolOutcome{Content: "Error: " + msg, Success: true}, nil
 		}
+
+		// Pre-flight: verify the local destination directory exists.
+		localDir := filepath.Dir(localPath)
+		if _, statErr := os.Stat(localDir); statErr != nil {
+			return ToolOutcome{Content: fmt.Sprintf("Pre-flight check failed: local destination directory %q does not exist: %s", localDir, statErr), Success: true}, nil
+		}
+
+		// Remote Pre-flight: check readability
+		if err := RunReadPreflightChecks(ctx, exec, remotePath); err != nil {
+			return ToolOutcome{Content: fmt.Sprintf("Remote pre-flight check failed: %s", err), Success: true}, nil
+		}
+
+		EmitOutput(ctx, fmt.Sprintf("Downloading %s:%s ??%s", exec.Target(), remotePath, localPath))
 		if err := ft.Download(ctx, remotePath, localPath, onProgress); err != nil {
-			return fmt.Sprintf("Download failed: %s", err), nil
+			return ToolOutcome{Content: fmt.Sprintf("Download failed: %s", err), Success: true}, nil
 		}
-		return fmt.Sprintf("Download complete: %s:%s → %s", exec.Target(), remotePath, localPath), nil
+		return ToolOutcome{Content: fmt.Sprintf("Download complete: %s:%s ??%s", exec.Target(), remotePath, localPath), Success: true}, nil
 
 	default:
-		return fmt.Sprintf("Error: unknown action %q, must be 'upload' or 'download'", action), nil
+		return ToolOutcome{Content: fmt.Sprintf("Error: unknown action %q, must be 'upload' or 'download'", action), Success: true}, nil
 	}
+}
+
+func localPathPlatformMismatch(localPath string) string {
+	return localPathPlatformMismatchForPlatform(localPath, executor.NormalizePlatform(runtime.GOOS))
+}
+
+func localPathPlatformMismatchForPlatform(localPath string, platform executor.Platform) string {
+	if pathSample, ok := executor.FirstWindowsPath(localPath); ok && platform != executor.PlatformWindows {
+		return fmt.Sprintf(
+			"local_path %q contains Windows-style path %q, but the infractl controller is %s. local_path must be readable from the controller OS; use a Windows controller/workspace or move the file to this controller first.",
+			localPath,
+			pathSample,
+			toolPlatformLabel(platform),
+		)
+	}
+	return ""
+}
+
+func toolPlatformLabel(platform executor.Platform) string {
+	if platform == "" || platform == executor.PlatformUnknown {
+		return "unknown"
+	}
+	return string(platform)
 }
 
 func formatBytes(n int64) string {

@@ -53,18 +53,18 @@ func (t *UserToolCreateTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *UserToolCreateTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
+func (t *UserToolCreateTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (ToolOutcome, error) {
 	name, err := argString(args, "name", true)
 	if err != nil {
-		return "", err
+		return ToolOutcome{}, err
 	}
 	desc, err := argString(args, "description", true)
 	if err != nil {
-		return "", err
+		return ToolOutcome{}, err
 	}
 	scriptContent, err := argString(args, "script_content", true)
 	if err != nil {
-		return "", err
+		return ToolOutcome{}, err
 	}
 	parameters, _ := argString(args, "parameters", false)
 	if parameters == "" {
@@ -79,9 +79,9 @@ func (t *UserToolCreateTool) Execute(ctx context.Context, args map[string]interf
 
 	id, err := t.Manager.CreateTool(ctx, entry, scriptContent)
 	if err != nil {
-		return "", fmt.Errorf("create tool: %w", err)
+		return ToolOutcome{}, fmt.Errorf("create tool: %w", err)
 	}
 
-	return fmt.Sprintf("✓ 도구 '%s' 생성 완료 (ID: %d)\n설명: %s\n\n이제 이 도구를 바로 사용할 수 있습니다.",
-		name, id, desc), nil
+	return ToolOutcome{Content: fmt.Sprintf("✓ 도구 '%s' 생성 완료 (ID: %d)\n설명: %s\n\n이제 이 도구를 바로 사용할 수 있습니다.",
+		name, id, desc), Success: true}, nil
 }

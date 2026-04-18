@@ -22,8 +22,15 @@ CREATE TABLE IF NOT EXISTS rag_sources (
     name             TEXT NOT NULL,
     server_name      TEXT NOT NULL,
     db_type          TEXT NOT NULL,
+    db_host          TEXT NOT NULL DEFAULT '',
+    db_port          INTEGER NOT NULL DEFAULT 0,
     db_name          TEXT NOT NULL,
+    schema_name      TEXT NOT NULL DEFAULT '',
     table_name       TEXT NOT NULL,
+    metadata_table   TEXT NOT NULL DEFAULT '',
+    table_join_key   TEXT NOT NULL DEFAULT '',
+    metadata_join_key TEXT NOT NULL DEFAULT '',
+    metadata_columns TEXT NOT NULL DEFAULT '',
     text_column      TEXT NOT NULL,
     vector_column    TEXT NOT NULL,
     result_columns   TEXT NOT NULL,
@@ -44,20 +51,27 @@ type RAGSourceCredentials struct {
 
 // RAGSource는 rag_sources 테이블의 단일 행이다.
 type RAGSource struct {
-	ID             int64
-	Name           string
-	ServerName     string
-	DBType         string    // "oracle" | "mysql" | "postgresql"
-	DBName         string    // Oracle SID, MySQL DB명 등
-	TableName      string    // 벡터 테이블명
-	TextColumn     string    // 검색 텍스트 컬럼
-	VectorColumn   string    // 벡터 컬럼
-	ResultColumns  string    // 결과에 포함할 컬럼 (콤마 구분)
-	EmbeddingModel string    // 벡터 생성에 사용된 임베딩 모델
-	Description    string    // 용도 설명
-	Priority       int       // 검색 우선순위 (낮을수록 먼저)
-	Credentials    RAGSourceCredentials
-	CreatedAt      time.Time
+	ID              int64
+	Name            string
+	ServerName      string
+	DBType          string // "oracle" | "mysql" | "postgresql"
+	DBHost          string
+	DBPort          int
+	DBName          string // Oracle SID, MySQL DB명 등
+	SchemaName      string
+	TableName       string // 벡터 테이블명
+	MetadataTable   string
+	TableJoinKey    string
+	MetadataJoinKey string
+	MetadataColumns string
+	TextColumn      string // 검색 텍스트 컬럼
+	VectorColumn    string // 벡터 컬럼
+	ResultColumns   string // 결과에 포함할 컬럼 (콤마 구분)
+	EmbeddingModel  string // 벡터 생성에 사용된 임베딩 모델
+	Description     string // 용도 설명
+	Priority        int    // 검색 우선순위 (낮을수록 먼저)
+	Credentials     RAGSourceCredentials
+	CreatedAt       time.Time
 }
 
 // RAGSourceStore는 RAG 소스 영속화를 담당하는 인터페이스이다.
@@ -83,6 +97,20 @@ func (s *SQLiteStore) initRAGSourceSchema(ctx context.Context) {
 	if _, err := s.db.ExecContext(ctx, createRAGSourcesSQL); err != nil {
 		slog.Warn("create rag_sources table", "err", err)
 	}
+	migrations := []string{
+		`ALTER TABLE rag_sources ADD COLUMN db_host TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE rag_sources ADD COLUMN db_port INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE rag_sources ADD COLUMN schema_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE rag_sources ADD COLUMN metadata_table TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE rag_sources ADD COLUMN table_join_key TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE rag_sources ADD COLUMN metadata_join_key TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE rag_sources ADD COLUMN metadata_columns TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range migrations {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			// duplicate-column errors are expected on existing DB files.
+		}
+	}
 }
 
 // SaveRAGSource는 RAG 소스를 저장하고 ID를 반환한다. credentials는 암호화하여 저장한다.
@@ -94,16 +122,21 @@ func (s *SQLiteStore) SaveRAGSource(ctx context.Context, source RAGSource) (int6
 
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO rag_sources
-		 (name, server_name, db_type, db_name, table_name, text_column, vector_column,
-		  result_columns, embedding_model, description, priority, credentials, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 (name, server_name, db_type, db_host, db_port, db_name, schema_name, table_name,
+		  metadata_table, table_join_key, metadata_join_key, metadata_columns,
+		  text_column, vector_column, result_columns, embedding_model, description, priority, credentials, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(server_name, db_type, db_name, table_name) DO UPDATE SET
-		   name=excluded.name, text_column=excluded.text_column,
+		   name=excluded.name, db_host=excluded.db_host, db_port=excluded.db_port,
+		   schema_name=excluded.schema_name, metadata_table=excluded.metadata_table,
+		   table_join_key=excluded.table_join_key, metadata_join_key=excluded.metadata_join_key,
+		   metadata_columns=excluded.metadata_columns, text_column=excluded.text_column,
 		   vector_column=excluded.vector_column, result_columns=excluded.result_columns,
 		   embedding_model=excluded.embedding_model, description=excluded.description,
 		   priority=excluded.priority, credentials=excluded.credentials`,
-		source.Name, source.ServerName, source.DBType, source.DBName,
-		source.TableName, source.TextColumn, source.VectorColumn,
+		source.Name, source.ServerName, source.DBType, source.DBHost, source.DBPort, source.DBName, source.SchemaName,
+		source.TableName, source.MetadataTable, source.TableJoinKey, source.MetadataJoinKey, source.MetadataColumns,
+		source.TextColumn, source.VectorColumn,
 		source.ResultColumns, source.EmbeddingModel, source.Description,
 		source.Priority, encCreds, time.Now().UTC(),
 	)
@@ -118,8 +151,9 @@ func (s *SQLiteStore) SaveRAGSource(ctx context.Context, source RAGSource) (int6
 // ListRAGSources는 우선순위 오름차순으로 전체 RAG 소스를 반환한다.
 func (s *SQLiteStore) ListRAGSources(ctx context.Context) ([]RAGSource, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, server_name, db_type, db_name, table_name, text_column,
-		        vector_column, result_columns, embedding_model, description,
+		`SELECT id, name, server_name, db_type, db_host, db_port, db_name, schema_name,
+		        table_name, metadata_table, table_join_key, metadata_join_key, metadata_columns,
+		        text_column, vector_column, result_columns, embedding_model, description,
 		        priority, credentials, created_at
 		 FROM rag_sources ORDER BY priority ASC, id ASC`)
 	if err != nil {
@@ -144,8 +178,9 @@ func (s *SQLiteStore) ListRAGSources(ctx context.Context) ([]RAGSource, error) {
 // GetRAGSource는 ID로 RAG 소스를 조회한다.
 func (s *SQLiteStore) GetRAGSource(ctx context.Context, id int64) (RAGSource, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, server_name, db_type, db_name, table_name, text_column,
-		        vector_column, result_columns, embedding_model, description,
+		`SELECT id, name, server_name, db_type, db_host, db_port, db_name, schema_name,
+		        table_name, metadata_table, table_join_key, metadata_join_key, metadata_columns,
+		        text_column, vector_column, result_columns, embedding_model, description,
 		        priority, credentials, created_at
 		 FROM rag_sources WHERE id=?`, id)
 	src, err := s.scanRAGSource(row)
@@ -190,8 +225,10 @@ func (s *SQLiteStore) scanRAGSource(row ragSourceScanner) (RAGSource, error) {
 	var src RAGSource
 	var encCreds string
 	err := row.Scan(
-		&src.ID, &src.Name, &src.ServerName, &src.DBType, &src.DBName,
-		&src.TableName, &src.TextColumn, &src.VectorColumn,
+		&src.ID, &src.Name, &src.ServerName, &src.DBType,
+		&src.DBHost, &src.DBPort, &src.DBName, &src.SchemaName,
+		&src.TableName, &src.MetadataTable, &src.TableJoinKey, &src.MetadataJoinKey, &src.MetadataColumns,
+		&src.TextColumn, &src.VectorColumn,
 		&src.ResultColumns, &src.EmbeddingModel, &src.Description,
 		&src.Priority, &encCreds, &src.CreatedAt,
 	)

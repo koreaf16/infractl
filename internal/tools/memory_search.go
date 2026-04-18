@@ -46,27 +46,27 @@ func (t *MemorySearchTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *MemorySearchTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
+func (t *MemorySearchTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (ToolOutcome, error) {
 	if t.Memory == nil {
-		return "internal memory service is not configured", nil
+		return ToolOutcome{Content: "internal memory service is not configured", Success: true}, nil
 	}
 
 	query, _ := argString(args, "query", false)
 	if strings.TrimSpace(query) == "" {
 		stats, err := t.Memory.Stats(ctx)
 		if err != nil {
-			return "", fmt.Errorf("memory stats: %w", err)
+			return ToolOutcome{}, fmt.Errorf("memory stats: %w", err)
 		}
-		return formatMemoryStats(stats, t.Memory.EmbedderStatus()), nil
+		return ToolOutcome{Content: formatMemoryStats(stats, t.Memory.EmbedderStatus()), Success: true}, nil
 	}
 
 	topK := argInt(args, "max_results", 5)
 	results, err := t.Memory.Search(ctx, query, topK, 0.05)
 	if err != nil {
-		return "", fmt.Errorf("memory search: %w", err)
+		return ToolOutcome{}, fmt.Errorf("memory search: %w", err)
 	}
 	if len(results) == 0 {
-		return fmt.Sprintf("No internal memory found for: %q", query), nil
+		return ToolOutcome{Content: fmt.Sprintf("No internal memory found for: %q", query), Success: true}, nil
 	}
 
 	var sb strings.Builder
@@ -80,7 +80,7 @@ func (t *MemorySearchTool) Execute(ctx context.Context, args map[string]interfac
 		sb.WriteString(truncateForTool(r.Document.Content, 320))
 		sb.WriteString("\n\n")
 	}
-	return strings.TrimSpace(sb.String()), nil
+	return ToolOutcome{Content: strings.TrimSpace(sb.String()), Success: true}, nil
 }
 
 func formatMemoryStats(stats store.MemoryStats, embedderStatus string) string {

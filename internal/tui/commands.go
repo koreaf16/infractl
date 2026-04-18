@@ -1,8 +1,3 @@
-// Package tui
-// File: commands.go
-// Description: slash command handling for TUI mode
-// Responsibility: implement /servers, /server, /sessions, /history, /mcp and helpers
-
 package tui
 
 import (
@@ -19,13 +14,12 @@ import (
 // handleSlashCommand handles slash commands entered in the input bar.
 func (m AppModel) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(input)
+	if len(parts) == 0 {
+		return m, nil
+	}
 
-	println := func(s string) {
-		m.box.Println(s)
-	}
-	printErr := func(s string) {
-		m.box.Println(renderErrorLine(fmt.Errorf("%s", s)))
-	}
+	println := func(s string) { m.box.Println(s) }
+	printErr := func(s string) { m.box.Println(renderErrorLine(fmt.Errorf("%s", s))) }
 
 	switch parts[0] {
 	case "/quit", "/exit", "/q":
@@ -46,23 +40,29 @@ func (m AppModel) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 			sb.WriteString(fmt.Sprintf("  %-20s - %s\n", t.Name(), t.Description()))
 		}
 		println(renderSystemLine(sb.String()))
-	case "/servers":
+	case "/workspaces", "/servers":
 		if len(parts) >= 2 && parts[1] == "remove" {
 			if len(parts) < 3 {
-				printErr("사용법: /servers remove <서버명>")
+				printErr("Usage: /workspaces remove <name>")
 				return m, nil
 			}
 			return m, m.removeServerCmd(parts[2])
 		}
 		servers, _ := m.store.List(context.Background())
 		println(buildServerTable(servers, m.activeServer))
-	case "/server":
+	case "/workspace", "/server":
 		if len(parts) >= 2 {
 			name := strings.TrimSpace(parts[1])
 			switch strings.ToLower(name) {
 			case "clear", "none", "localhost", "local":
+				if m.activeServer != nil && m.manager != nil && m.manager.Has(m.activeServer.Name) {
+					if err := m.manager.Remove(m.activeServer.Name); err != nil {
+						printErr(fmt.Sprintf("Failed to disconnect active workspace %q: %v", m.activeServer.Name, err))
+						return m, nil
+					}
+				}
 				m.ag.ClearActiveServer()
-				println(renderSystemLine("● Active server cleared (default target: localhost)"))
+				println(renderSystemLine("Active workspace cleared and SSH session disconnected (default target: local workspace)."))
 				return m, nil
 			}
 			servers, _ := m.store.List(context.Background())
@@ -70,14 +70,14 @@ func (m AppModel) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 				if strings.EqualFold(s.Name, name) {
 					srv := s
 					m.ag.SetActiveServer(srv)
-					println(renderSystemLine("● Active server: " + srv.Name + " (" + srv.Host + ")"))
+					println(renderSystemLine("Active workspace: " + srv.Name + " (" + srv.Host + ", dir: " + srv.WorkspaceDir + ")"))
 					return m, nil
 				}
 			}
-			printErr("Server not found: " + name)
+			printErr("Workspace not found: " + name)
 		} else {
 			if m.selectHandler == nil {
-				printErr("/server selection UI is unavailable")
+				printErr("/workspace selection UI is unavailable")
 				return m, nil
 			}
 			return m, m.serverFocusCmd()
@@ -136,9 +136,9 @@ func (m AppModel) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 	case "/yoro":
 		active := m.ag.ToggleYOROMode()
 		if active {
-			println(renderSystemLine("YORO 모드 활성화 — 확인 없이 바로 실행합니다."))
+			println(renderSystemLine("YORO mode enabled. Confirmation prompts are skipped."))
 		} else {
-			println(renderSystemLine("YORO 모드 비활성화 — 위험 작업 시 확인합니다."))
+			println(renderSystemLine("YORO mode disabled. Risky actions require confirmation."))
 		}
 	default:
 		printErr(fmt.Sprintf("Unknown command: %s", parts[0]))
@@ -146,71 +146,75 @@ func (m AppModel) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// serverFocusCmd returns a Cmd that asks user to select an active server.
+// serverFocusCmd returns a Cmd that asks user to select an active workspace.
 func (m AppModel) serverFocusCmd() tea.Cmd {
 	return func() tea.Msg {
 		servers, err := m.store.List(context.Background())
 		if err != nil || len(servers) == 0 {
-			return SystemMsg("No registered servers.")
+			return SystemMsg("No registered workspaces.")
 		}
 		if len(servers) == 1 {
 			srv := servers[0]
 			m.ag.SetActiveServer(srv)
-			return nil
+			return SystemMsg(fmt.Sprintf("Active workspace: %s (%s, dir: %s)", srv.Name, srv.Host, srv.WorkspaceDir))
 		}
 
 		opts := make([]SelectOption, len(servers))
 		for i, s := range servers {
-			desc := s.Host
+			desc := fmt.Sprintf("%s@%s:%d", s.User, s.Host, s.Port)
+			if s.WorkspaceDir != "" {
+				desc += " | " + s.WorkspaceDir
+			}
 			if s.OS != "" {
-				desc += " · " + s.OS
+				desc += " | " + s.OS
 			}
 			opts[i] = SelectOption{Label: s.Name, Description: desc, HideOther: true}
 		}
 
-		result, err := m.selectHandler.RequestSelect("Select active server", opts)
+		result, err := m.selectHandler.RequestSelect("Select active workspace", opts)
 		if err != nil || result.Index < 0 || result.Index >= len(servers) {
 			return nil
 		}
 		srv := servers[result.Index]
 		m.ag.SetActiveServer(srv)
-		return nil
+		return SystemMsg(fmt.Sprintf("Active workspace: %s (%s, dir: %s)", srv.Name, srv.Host, srv.WorkspaceDir))
 	}
 }
 
 func helpText() string {
 	return "Available commands:\n" +
-		"  /help                        - 이 도움말\n" +
-		"  /tools                       - 도구 목록\n" +
-		"  /servers                     - 서버 목록\n" +
-		"  /servers remove <이름>        - 서버 삭제\n" +
-		"  /server [name|clear]         - 활성 서버 설정\n" +
-		"  /services [서버명]            - 서버→서비스→서브인스턴스 3계층 목록\n" +
-		"  /connectors                  - 현재 활성 커넥터 상태\n" +
-		"  /mcp                         - MCP 서버 상태\n" +
-		"  /mcp reconnect <name>        - MCP 재연결\n" +
-		"  /sessions                    - 최근 세션 목록\n" +
-		"  /sessions restore <N>        - 세션 복원\n" +
-		"  /history                     - 도구 실행 이력\n" +
-		"  /knowledge                   - 지식 목록\n" +
-		"  /knowledge search <쿼리>      - 지식 검색\n" +
-		"  /knowledge delete <ID>       - 지식 삭제\n" +
-		"  /rag                         - RAG 소스 목록\n" +
-		"  /rag delete <ID>             - RAG 소스 삭제\n" +
-		"  /rag priority <ID> <N>       - RAG 우선순위 변경\n" +
-		"  /cost                        - 이번 달 비용 요약\n" +
-		"  /cost week                   - 최근 7일 비용\n" +
-		"  /cost detail                 - 일별 상세 비용\n" +
-		"  /checkpoints [서버]           - 체크포인트 목록\n" +
-		"  /hooks                       - 훅 목록\n" +
+		"  /help                         - show this help\n" +
+		"  /tools                        - list registered tools\n" +
+		"  /workspaces                   - list registered workspaces\n" +
+		"  /workspaces remove <name>     - remove a workspace\n" +
+		"  /workspace [name|clear]       - set or clear the active workspace\n" +
+		"  /servers, /server             - aliases for /workspaces and /workspace\n" +
+		"  /services [workspace]         - show discovered services\n" +
+		"  /connectors                   - show active connectors\n" +
+		"  /mcp                          - show MCP status\n" +
+		"  /mcp reconnect <name>         - reconnect MCP\n" +
+		"  /sessions                     - list recent sessions\n" +
+		"  /sessions restore <N>         - restore a session\n" +
+		"  /history                      - show tool execution history\n" +
+		"  /knowledge                    - list knowledge\n" +
+		"  /knowledge search <query>     - search knowledge\n" +
+		"  /knowledge delete <ID>        - delete knowledge\n" +
+		"  /rag                          - list RAG sources\n" +
+		"  /rag delete <ID>              - delete a RAG source\n" +
+		"  /rag priority <ID> <N>        - change RAG source priority\n" +
+		"  /cost                         - show cost summary\n" +
+		"  /cost week                    - show recent 7-day cost\n" +
+		"  /cost detail                  - show detailed cost\n" +
+		"  /checkpoints [workspace]      - list checkpoints\n" +
+		"  /hooks                        - list hooks\n" +
 		"  /hooks enable/disable/delete <id>\n" +
-		"  /schedules                   - 스케줄 목록\n" +
+		"  /schedules                    - list schedules\n" +
 		"  /schedules enable/disable/delete <id>\n" +
-		"  /osessions                   - 취득된 OS 세션 및 권한 캐시 조회\n" +
-		"  /yoro                        - YORO 모드 토글\n" +
-		"  /clear                       - 대화 히스토리 초기화\n" +
-		"  /model                       - 현재 모델 확인\n" +
-		"  /quit                        - 종료"
+		"  /osessions                    - show OS permission/session cache\n" +
+		"  /yoro                         - toggle YORO mode\n" +
+		"  /clear                        - clear conversation history\n" +
+		"  /model                        - show current model\n" +
+		"  /quit                         - quit"
 }
 
 func connectorStatusIcon(status string) string {
@@ -218,7 +222,7 @@ func connectorStatusIcon(status string) string {
 	case "connected":
 		return "+"
 	case "connecting":
-		return "…"
+		return "~"
 	case "error":
 		return "!"
 	default:
@@ -262,9 +266,9 @@ func (m AppModel) reconnectMCPCmd(name string) tea.Cmd {
 		for _, c := range m.mcpClients {
 			if c.Name == name {
 				if err := c.Reconnect(m.ctx); err != nil {
-					return ErrorMsg{Err: fmt.Errorf("MCP '%s' reconnect failed: %w", name, err)}
+					return ErrorMsg{Err: fmt.Errorf("MCP %q reconnect failed: %w", name, err)}
 				}
-				return SystemMsg(fmt.Sprintf("MCP '%s' reconnected", name))
+				return SystemMsg(fmt.Sprintf("MCP %q reconnected", name))
 			}
 		}
 		return ErrorMsg{Err: fmt.Errorf("MCP server not found: %s", name)}
@@ -309,7 +313,7 @@ func (m AppModel) restoreSessionCmd(n int) tea.Cmd {
 			return ErrorMsg{Err: fmt.Errorf("restore session failed: %w", err)}
 		}
 		m.ag.SetSessionID(conv.ID)
-		return SystemMsg(fmt.Sprintf("Restored session '%s'", conv.Title))
+		return SystemMsg(fmt.Sprintf("Restored session %q", conv.Title))
 	}
 }
 
@@ -330,32 +334,32 @@ func (m AppModel) formatHistory() string {
 	for i, l := range logs {
 		result := "+"
 		if !l.Success {
-			result = "✗"
+			result = "!"
 		}
 		sb.WriteString(fmt.Sprintf("  %d. %s %-20s %s  %s\n",
-			i+1, result, l.ToolName, l.TargetServer,
-			l.Timestamp.Format(time.Kitchen)))
+			i+1, result, l.ToolName, l.TargetServer, l.Timestamp.Format(time.Kitchen)))
 	}
 	return sb.String()
 }
 
-// removeServerCmd는 서버를 삭제하는 Cmd를 반환한다.
+// removeServerCmd returns a Cmd that removes a registered workspace.
 func (m AppModel) removeServerCmd(name string) tea.Cmd {
 	return func() tea.Msg {
-		if err := m.manager.Remove(name); err != nil {
-			return SystemMsg(fmt.Sprintf("매니저에서 제거 실패 (무시): %s", err))
+		if m.manager != nil && m.manager.Has(name) {
+			if err := m.manager.Remove(name); err != nil {
+				return SystemMsg(fmt.Sprintf("Manager removal failed (ignored): %s", err))
+			}
 		}
 		if err := m.store.Remove(context.Background(), name); err != nil {
-			return ErrorMsg{Err: fmt.Errorf("서버 삭제 실패: %w", err)}
+			return ErrorMsg{Err: fmt.Errorf("workspace removal failed: %w", err)}
 		}
-		return SystemMsg(fmt.Sprintf("서버 '%s' 삭제 완료", name))
+		return SystemMsg(fmt.Sprintf("Workspace %q removed.", name))
 	}
 }
 
-// handleKnowledge는 /knowledge 명령을 처리하고 출력 문자열을 반환한다.
 func (m AppModel) handleKnowledge(parts []string) string {
 	if m.knowledgeStore == nil {
-		return "지식 저장소가 초기화되지 않았습니다."
+		return "Knowledge store is not initialized."
 	}
 	sub := ""
 	if len(parts) > 1 {
@@ -364,66 +368,65 @@ func (m AppModel) handleKnowledge(parts []string) string {
 	switch sub {
 	case "search":
 		if len(parts) < 3 {
-			return "사용법: /knowledge search <검색어>"
+			return "Usage: /knowledge search <query>"
 		}
 		query := strings.Join(parts[2:], " ")
 		entries, err := m.knowledgeStore.SearchKnowledge(m.ctx, query, 10)
 		if err != nil {
-			return fmt.Sprintf("검색 실패: %s", err)
+			return fmt.Sprintf("Search failed: %s", err)
 		}
 		if len(entries) == 0 {
-			return fmt.Sprintf("'%s' 검색 결과 없음", query)
+			return fmt.Sprintf("No results for %q", query)
 		}
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("'%s' 검색 결과 (%d개):\n\n", query, len(entries)))
+		sb.WriteString(fmt.Sprintf("Knowledge results for %q (%d):\n\n", query, len(entries)))
 		for _, e := range entries {
 			sb.WriteString(fmt.Sprintf("  [#%d] %s (%s)\n", e.ID, e.Title, e.Category))
 			if e.Situation != "" {
-				sb.WriteString(fmt.Sprintf("  상황: %s\n", e.Situation))
+				sb.WriteString(fmt.Sprintf("  Situation: %s\n", e.Situation))
 			}
-			sb.WriteString(fmt.Sprintf("  해결: %s\n\n", e.Resolution))
+			sb.WriteString(fmt.Sprintf("  Resolution: %s\n\n", e.Resolution))
 		}
 		return sb.String()
 	case "delete":
 		if len(parts) < 3 {
-			return "사용법: /knowledge delete <ID>"
+			return "Usage: /knowledge delete <ID>"
 		}
 		id, err := strconv.ParseInt(parts[2], 10, 64)
 		if err != nil {
-			return fmt.Sprintf("유효하지 않은 ID: %s", parts[2])
+			return fmt.Sprintf("Invalid ID: %s", parts[2])
 		}
 		if err := m.knowledgeStore.DeleteKnowledge(m.ctx, id); err != nil {
-			return fmt.Sprintf("삭제 실패: %s", err)
+			return fmt.Sprintf("Delete failed: %s", err)
 		}
-		return fmt.Sprintf("지식 항목 #%d 삭제 완료", id)
+		return fmt.Sprintf("Knowledge entry #%d deleted.", id)
 	default:
 		entries, err := m.knowledgeStore.ListKnowledge(m.ctx, "", 20)
 		if err != nil {
-			return fmt.Sprintf("지식 목록 조회 실패: %s", err)
+			return fmt.Sprintf("Failed to list knowledge: %s", err)
 		}
 		if len(entries) == 0 {
-			return "저장된 지식 없음."
+			return "No saved knowledge."
 		}
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("저장된 지식 (%d개):\n", len(entries)))
-		sb.WriteString(fmt.Sprintf("  %-6s %-16s %-35s %-8s\n", "ID", "카테고리", "제목", "사용횟수"))
+		sb.WriteString(fmt.Sprintf("Saved knowledge (%d):\n", len(entries)))
+		sb.WriteString(fmt.Sprintf("  %-6s %-16s %-35s %-8s\n", "ID", "Category", "Title", "Uses"))
 		sb.WriteString("  " + strings.Repeat("-", 70) + "\n")
 		for _, e := range entries {
 			title := e.Title
 			if len(title) > 33 {
 				title = title[:33] + ".."
 			}
-			sb.WriteString(fmt.Sprintf("  %-6d %-16s %-35s %d회\n", e.ID, e.Category, title, e.UseCount))
+			sb.WriteString(fmt.Sprintf("  %-6d %-16s %-35s %d\n", e.ID, e.Category, title, e.UseCount))
 		}
-		sb.WriteString("\n삭제: /knowledge delete <ID> | 검색: /knowledge search <키워드>")
+		sb.WriteString("\nDelete: /knowledge delete <ID> | Search: /knowledge search <query>")
 		return sb.String()
 	}
 }
 
-// handleRAG는 /rag 명령을 처리하고 출력 문자열과 선택적 Cmd를 반환한다.
 func (m AppModel) handleRAG(parts []string) (string, tea.Cmd) {
 	if m.ragSourceStore == nil {
-		return "RAG 소스 저장소가 초기화되지 않았습니다.", nil
+		return "RAG source store is not initialized.", nil
 	}
 	sub := ""
 	if len(parts) > 1 {
@@ -432,61 +435,60 @@ func (m AppModel) handleRAG(parts []string) (string, tea.Cmd) {
 	switch sub {
 	case "delete":
 		if len(parts) < 3 {
-			return "사용법: /rag delete <ID>", nil
+			return "Usage: /rag delete <ID>", nil
 		}
 		id, err := strconv.ParseInt(parts[2], 10, 64)
 		if err != nil {
-			return fmt.Sprintf("잘못된 ID: %s", parts[2]), nil
+			return fmt.Sprintf("Invalid ID: %s", parts[2]), nil
 		}
 		return "", func() tea.Msg {
 			if err := m.ragSourceStore.DeleteRAGSource(m.ctx, id); err != nil {
-				return ErrorMsg{Err: fmt.Errorf("RAG 소스 삭제 실패: %w", err)}
+				return ErrorMsg{Err: fmt.Errorf("RAG source delete failed: %w", err)}
 			}
-			return SystemMsg(fmt.Sprintf("RAG 소스 %d 삭제 완료", id))
+			return SystemMsg(fmt.Sprintf("RAG source %d deleted.", id))
 		}
 	case "priority":
 		if len(parts) < 4 {
-			return "사용법: /rag priority <ID> <우선순위>", nil
+			return "Usage: /rag priority <ID> <priority>", nil
 		}
 		id, err := strconv.ParseInt(parts[2], 10, 64)
 		if err != nil {
-			return fmt.Sprintf("잘못된 ID: %s", parts[2]), nil
+			return fmt.Sprintf("Invalid ID: %s", parts[2]), nil
 		}
 		priority, err := strconv.Atoi(parts[3])
 		if err != nil || priority < 1 {
-			return fmt.Sprintf("잘못된 우선순위: %s (1 이상)", parts[3]), nil
+			return fmt.Sprintf("Invalid priority: %s (must be >= 1)", parts[3]), nil
 		}
 		return "", func() tea.Msg {
 			if err := m.ragSourceStore.UpdateRAGSourcePriority(m.ctx, id, priority); err != nil {
-				return ErrorMsg{Err: fmt.Errorf("우선순위 변경 실패: %w", err)}
+				return ErrorMsg{Err: fmt.Errorf("priority update failed: %w", err)}
 			}
-			return SystemMsg(fmt.Sprintf("RAG 소스 %d 우선순위 → %d", id, priority))
+			return SystemMsg(fmt.Sprintf("RAG source %d priority set to %d.", id, priority))
 		}
 	default:
 		sources, err := m.ragSourceStore.ListRAGSources(m.ctx)
 		if err != nil {
-			return fmt.Sprintf("RAG 소스 조회 실패: %s", err), nil
+			return fmt.Sprintf("Failed to list RAG sources: %s", err), nil
 		}
 		if len(sources) == 0 {
-			return "등록된 RAG 소스 없음.", nil
+			return "No registered RAG sources.", nil
 		}
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("RAG 소스 목록 (%d건):\n", len(sources)))
-		sb.WriteString(fmt.Sprintf("  %-4s %-20s %-10s %-15s %-4s\n", "ID", "이름", "DB타입", "서버", "우선순위"))
+		sb.WriteString(fmt.Sprintf("RAG sources (%d):\n", len(sources)))
+		sb.WriteString(fmt.Sprintf("  %-4s %-20s %-10s %-15s %-4s\n", "ID", "Name", "DB", "Workspace", "Prio"))
 		sb.WriteString("  " + strings.Repeat("-", 58) + "\n")
 		for _, src := range sources {
 			sb.WriteString(fmt.Sprintf("  %-4d %-20s %-10s %-15s %d\n",
 				src.ID, src.Name, src.DBType, src.ServerName, src.Priority))
 		}
-		sb.WriteString("\n명령어: /rag delete <ID> | /rag priority <ID> <숫자>")
+		sb.WriteString("\nCommands: /rag delete <ID> | /rag priority <ID> <number>")
 		return sb.String(), nil
 	}
 }
 
-// handleCost는 /cost 명령을 처리하고 출력 문자열을 반환한다.
 func (m AppModel) handleCost(parts []string) string {
 	if m.costTracker == nil {
-		return "비용 추적이 설정되지 않았습니다."
+		return "Cost tracker is not configured."
 	}
 	sub := ""
 	if len(parts) >= 2 {
@@ -494,34 +496,34 @@ func (m AppModel) handleCost(parts []string) string {
 	}
 	switch sub {
 	case "week":
-		return m.formatCostSummary(7, "최근 7일")
+		return m.formatCostSummary(7, "recent 7 days")
 	case "detail":
 		return m.formatCostDetail(30)
 	default:
-		return m.formatCostSummary(30, "이번 달 (30일)")
+		return m.formatCostSummary(30, "this month (30 days)")
 	}
 }
 
 func (m AppModel) formatCostSummary(days int, label string) string {
 	s, err := m.costTracker.Summary(m.ctx, days)
 	if err != nil {
-		return fmt.Sprintf("비용 조회 실패: %s", err)
+		return fmt.Sprintf("Failed to load cost summary: %s", err)
 	}
-	return fmt.Sprintf("비용 요약 — %s\n  총 입력 토큰: %s\n  총 출력 토큰: %s\n  총 호출 횟수: %d회\n  예상 비용:    $%.4f",
+	return fmt.Sprintf("Cost summary for %s\n  Total input tokens:  %s\n  Total output tokens: %s\n  Total calls:         %d\n  Estimated cost:      $%.4f",
 		label, formatTokens(s.TotalInputTokens), formatTokens(s.TotalOutputTokens), s.CallCount, s.TotalCost)
 }
 
 func (m AppModel) formatCostDetail(days int) string {
 	daily, err := m.costTracker.DailyCosts(m.ctx, days)
 	if err != nil {
-		return fmt.Sprintf("일별 비용 조회 실패: %s", err)
+		return fmt.Sprintf("Failed to load daily costs: %s", err)
 	}
 	if len(daily) == 0 {
-		return "기록된 사용량이 없습니다."
+		return "No usage records."
 	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("일별 비용 상세 — 최근 %d일\n", days))
-	sb.WriteString(fmt.Sprintf("  %-12s  %12s  %12s  %8s  %8s\n", "날짜", "입력 토큰", "출력 토큰", "호출수", "비용($)"))
+	sb.WriteString(fmt.Sprintf("Daily cost detail for recent %d days:\n", days))
+	sb.WriteString(fmt.Sprintf("  %-12s  %12s  %12s  %8s  %8s\n", "Date", "Input", "Output", "Calls", "Cost($)"))
 	sb.WriteString("  " + strings.Repeat("-", 60) + "\n")
 	for _, d := range daily {
 		sb.WriteString(fmt.Sprintf("  %-12s  %12s  %12s  %8d  %8.4f\n",
@@ -530,29 +532,27 @@ func (m AppModel) formatCostDetail(days int) string {
 	return sb.String()
 }
 
-
-// handleCheckpoints는 /checkpoints 명령을 처리하고 출력 문자열을 반환한다.
 func (m AppModel) handleCheckpoints(parts []string) string {
 	if m.checkpointMgr == nil {
-		return "체크포인트 매니저가 초기화되지 않았습니다."
+		return "Checkpoint manager is not initialized."
 	}
-	server := ""
+	workspaceName := ""
 	if len(parts) >= 2 {
-		server = parts[1]
+		workspaceName = parts[1]
 	}
-	cps, err := m.checkpointMgr.List(m.ctx, server, 20)
+	cps, err := m.checkpointMgr.List(m.ctx, workspaceName, 20)
 	if err != nil {
-		return fmt.Sprintf("체크포인트 목록 조회 실패: %s", err)
+		return fmt.Sprintf("Failed to list checkpoints: %s", err)
 	}
 	if len(cps) == 0 {
-		if server != "" {
-			return fmt.Sprintf("서버 '%s'의 체크포인트 없음.", server)
+		if workspaceName != "" {
+			return fmt.Sprintf("No checkpoints for workspace %q.", workspaceName)
 		}
-		return "저장된 체크포인트 없음."
+		return "No saved checkpoints."
 	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("체크포인트 목록 (최근 %d개):\n", len(cps)))
-	sb.WriteString(fmt.Sprintf("  %-4s %-12s %-20s %s\n", "ID", "서버", "시각", "설명"))
+	sb.WriteString(fmt.Sprintf("Checkpoints (recent %d):\n", len(cps)))
+	sb.WriteString(fmt.Sprintf("  %-4s %-12s %-20s %s\n", "ID", "Workspace", "Created", "Description"))
 	sb.WriteString("  " + strings.Repeat("-", 60) + "\n")
 	for _, cp := range cps {
 		ts := cp.CreatedAt.Format("01/02 15:04:05")
@@ -562,66 +562,64 @@ func (m AppModel) handleCheckpoints(parts []string) string {
 		}
 		rollback := ""
 		if cp.Snapshot.RollbackCommand != "" {
-			rollback = " [롤백 가능]"
+			rollback = " [rollback available]"
 		}
-		sb.WriteString(fmt.Sprintf("  %-4d %-12s %-20s %s%s\n",
-			cp.ID, cp.Server, ts, desc, rollback))
+		sb.WriteString(fmt.Sprintf("  %-4d %-12s %-20s %s%s\n", cp.ID, cp.Server, ts, desc, rollback))
 	}
-	sb.WriteString("\n롤백: LLM에게 '체크포인트 #N으로 롤백해줘' 처럼 요청하세요.")
+	sb.WriteString("\nRollback: ask to roll back checkpoint #N.")
 	return sb.String()
 }
 
-// handleHooks는 /hooks 명령을 처리하고 출력 문자열과 선택적 Cmd를 반환한다.
 func (m AppModel) handleHooks(parts []string) (string, tea.Cmd) {
 	if m.hooksMgr == nil {
-		return "훅 매니저가 초기화되지 않았습니다.", nil
+		return "Hook manager is not initialized.", nil
 	}
 	if len(parts) >= 3 {
 		id, err := strconv.ParseInt(parts[2], 10, 64)
 		if err != nil {
-			return fmt.Sprintf("유효하지 않은 훅 ID: %s", parts[2]), nil
+			return fmt.Sprintf("Invalid hook ID: %s", parts[2]), nil
 		}
 		switch parts[1] {
 		case "enable":
 			return "", func() tea.Msg {
 				if err := m.hooksMgr.SetEnabled(m.ctx, id, true); err != nil {
-					return ErrorMsg{Err: fmt.Errorf("훅 활성화 실패: %w", err)}
+					return ErrorMsg{Err: fmt.Errorf("enable hook failed: %w", err)}
 				}
-				return SystemMsg(fmt.Sprintf("훅 #%d 활성화 완료", id))
+				return SystemMsg(fmt.Sprintf("Hook #%d enabled.", id))
 			}
 		case "disable":
 			return "", func() tea.Msg {
 				if err := m.hooksMgr.SetEnabled(m.ctx, id, false); err != nil {
-					return ErrorMsg{Err: fmt.Errorf("훅 비활성화 실패: %w", err)}
+					return ErrorMsg{Err: fmt.Errorf("disable hook failed: %w", err)}
 				}
-				return SystemMsg(fmt.Sprintf("훅 #%d 비활성화 완료", id))
+				return SystemMsg(fmt.Sprintf("Hook #%d disabled.", id))
 			}
 		case "delete":
 			return "", func() tea.Msg {
 				if err := m.hooksMgr.Delete(m.ctx, id); err != nil {
-					return ErrorMsg{Err: fmt.Errorf("훅 삭제 실패: %w", err)}
+					return ErrorMsg{Err: fmt.Errorf("delete hook failed: %w", err)}
 				}
-				return SystemMsg(fmt.Sprintf("훅 #%d 삭제 완료", id))
+				return SystemMsg(fmt.Sprintf("Hook #%d deleted.", id))
 			}
 		default:
-			return fmt.Sprintf("알 수 없는 /hooks 서브커맨드: %s", parts[1]), nil
+			return fmt.Sprintf("Unknown /hooks subcommand: %s", parts[1]), nil
 		}
 	}
 	hooks, err := m.hooksMgr.List(m.ctx)
 	if err != nil {
-		return fmt.Sprintf("훅 목록 조회 실패: %s", err), nil
+		return fmt.Sprintf("Failed to list hooks: %s", err), nil
 	}
 	if len(hooks) == 0 {
-		return "등록된 훅 없음.", nil
+		return "No registered hooks.", nil
 	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("등록된 훅 (%d개):\n", len(hooks)))
-	sb.WriteString(fmt.Sprintf("  %-4s %-18s %-6s %s\n", "ID", "이벤트", "활성", "스크립트"))
+	sb.WriteString(fmt.Sprintf("Registered hooks (%d):\n", len(hooks)))
+	sb.WriteString(fmt.Sprintf("  %-4s %-18s %-6s %s\n", "ID", "Event", "On", "Script"))
 	sb.WriteString("  " + strings.Repeat("-", 60) + "\n")
 	for _, h := range hooks {
 		enabled := "+"
 		if !h.Enabled {
-			enabled = "✗"
+			enabled = "-"
 		}
 		script := h.ScriptPath
 		if len(script) > 35 {
@@ -629,63 +627,62 @@ func (m AppModel) handleHooks(parts []string) (string, tea.Cmd) {
 		}
 		sb.WriteString(fmt.Sprintf("  %-4d %-18s %-6s %s\n", h.ID, h.Event, enabled, script))
 	}
-	sb.WriteString("\n비활성화: /hooks disable <id> | 활성화: /hooks enable <id> | 삭제: /hooks delete <id>")
+	sb.WriteString("\nDisable: /hooks disable <id> | Enable: /hooks enable <id> | Delete: /hooks delete <id>")
 	return sb.String(), nil
 }
 
-// handleSchedules는 /schedules 명령을 처리하고 출력 문자열과 선택적 Cmd를 반환한다.
 func (m AppModel) handleSchedules(parts []string) (string, tea.Cmd) {
 	if m.scheduleMgr == nil {
-		return "스케줄 매니저가 초기화되지 않았습니다.", nil
+		return "Schedule manager is not initialized.", nil
 	}
 	if len(parts) >= 3 {
 		id, err := strconv.ParseInt(parts[2], 10, 64)
 		if err != nil {
-			return fmt.Sprintf("유효하지 않은 스케줄 ID: %s", parts[2]), nil
+			return fmt.Sprintf("Invalid schedule ID: %s", parts[2]), nil
 		}
 		switch parts[1] {
 		case "enable":
 			return "", func() tea.Msg {
 				if err := m.scheduleMgr.SetEnabled(m.ctx, id, true); err != nil {
-					return ErrorMsg{Err: fmt.Errorf("스케줄 활성화 실패: %w", err)}
+					return ErrorMsg{Err: fmt.Errorf("enable schedule failed: %w", err)}
 				}
-				return SystemMsg(fmt.Sprintf("스케줄 #%d 활성화 완료", id))
+				return SystemMsg(fmt.Sprintf("Schedule #%d enabled.", id))
 			}
 		case "disable":
 			return "", func() tea.Msg {
 				if err := m.scheduleMgr.SetEnabled(m.ctx, id, false); err != nil {
-					return ErrorMsg{Err: fmt.Errorf("스케줄 비활성화 실패: %w", err)}
+					return ErrorMsg{Err: fmt.Errorf("disable schedule failed: %w", err)}
 				}
-				return SystemMsg(fmt.Sprintf("스케줄 #%d 비활성화 완료", id))
+				return SystemMsg(fmt.Sprintf("Schedule #%d disabled.", id))
 			}
 		case "delete":
 			return "", func() tea.Msg {
 				if err := m.scheduleMgr.Delete(m.ctx, id); err != nil {
-					return ErrorMsg{Err: fmt.Errorf("스케줄 삭제 실패: %w", err)}
+					return ErrorMsg{Err: fmt.Errorf("delete schedule failed: %w", err)}
 				}
-				return SystemMsg(fmt.Sprintf("스케줄 #%d 삭제 완료", id))
+				return SystemMsg(fmt.Sprintf("Schedule #%d deleted.", id))
 			}
 		default:
-			return fmt.Sprintf("알 수 없는 /schedules 서브커맨드: %s", parts[1]), nil
+			return fmt.Sprintf("Unknown /schedules subcommand: %s", parts[1]), nil
 		}
 	}
 	schedules, err := m.scheduleMgr.List(m.ctx)
 	if err != nil {
-		return fmt.Sprintf("스케줄 목록 조회 실패: %s", err), nil
+		return fmt.Sprintf("Failed to list schedules: %s", err), nil
 	}
 	if len(schedules) == 0 {
-		return "등록된 스케줄 없음.", nil
+		return "No registered schedules.", nil
 	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("등록된 스케줄 (%d개):\n", len(schedules)))
-	sb.WriteString(fmt.Sprintf("  %-4s %-6s %-20s %-15s %s\n", "ID", "활성", "이름", "cron", "마지막 실행"))
+	sb.WriteString(fmt.Sprintf("Registered schedules (%d):\n", len(schedules)))
+	sb.WriteString(fmt.Sprintf("  %-4s %-6s %-20s %-15s %s\n", "ID", "On", "Name", "Cron", "Last Run"))
 	sb.WriteString("  " + strings.Repeat("-", 65) + "\n")
 	for _, s := range schedules {
 		enabled := "+"
 		if !s.Enabled {
-			enabled = "✗"
+			enabled = "-"
 		}
-		lastRun := "없음"
+		lastRun := "never"
 		if s.LastRun != nil {
 			lastRun = s.LastRun.Format("01/02 15:04")
 		}
@@ -698,12 +695,10 @@ func (m AppModel) handleSchedules(parts []string) (string, tea.Cmd) {
 	return sb.String(), nil
 }
 
-// formatOSPermissions는 취득된 OS 권한(세션/캐시) 목록을 반환한다.
 func (m AppModel) formatOSPermissions() string {
 	var sb strings.Builder
-	sb.WriteString("취득된 OS 권한 목록:\n\n")
+	sb.WriteString("Acquired OS permissions:\n\n")
 
-	// 활성 persistent shell 세션
 	var hasSessions bool
 	if m.manager != nil {
 		sessions := m.manager.ListPersistentSessions()
@@ -719,17 +714,16 @@ func (m AppModel) formatOSPermissions() string {
 				if !si.Alive {
 					alive = "dead"
 				}
-				sb.WriteString(fmt.Sprintf("  [세션] %-15s  session=%-10s  user=%-10s  dir=%s  (%s)\n",
+				sb.WriteString(fmt.Sprintf("  [session] %-15s  session=%-10s  user=%-10s  dir=%s  (%s)\n",
 					serverName, si.SessionID, si.CurrentUser, si.CurrentDir, alive))
 			}
 		}
 	}
 	if !hasSessions {
-		sb.WriteString("  (활성 persistent 세션 없음)\n")
+		sb.WriteString("  (no active persistent sessions)\n")
 	}
 	sb.WriteString("\n")
 
-	// privilege 캐시
 	var hasCache bool
 	if m.privCache != nil {
 		keys := m.privCache.List()
@@ -741,12 +735,11 @@ func (m AppModel) formatOSPermissions() string {
 		})
 		for _, k := range keys {
 			hasCache = true
-			sb.WriteString(fmt.Sprintf("  [캐시] target=%-15s  method=%-6s  user=%s\n",
-				k.Target, k.Method, k.User))
+			sb.WriteString(fmt.Sprintf("  [cache] target=%-15s  method=%-6s  user=%s\n", k.Target, k.Method, k.User))
 		}
 	}
 	if !hasCache {
-		sb.WriteString("  (캐시된 크리덴셜 없음)\n")
+		sb.WriteString("  (no privilege cache entries)\n")
 	}
 	return sb.String()
 }

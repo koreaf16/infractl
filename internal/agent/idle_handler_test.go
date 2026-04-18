@@ -37,12 +37,12 @@ type fakeIdleLLMClient struct {
 	resp       llm.Response
 }
 
-func (f *fakeIdleLLMClient) Chat(_ context.Context, _ []llm.Message, _ []llm.ToolDef, _ interface{}) (llm.Response, error) {
+func (f *fakeIdleLLMClient) Chat(_ context.Context, _ []llm.Message, _ []llm.ToolDef, _ interface{}, opts ...llm.CallOption) (llm.Response, error) {
 	f.chatCalled = true
 	return f.resp, nil
 }
 
-func (f *fakeIdleLLMClient) ChatStream(_ context.Context, _ []llm.Message, _ []llm.ToolDef, _ interface{}, _ func(string), _ func(string)) (llm.Response, error) {
+func (f *fakeIdleLLMClient) ChatStream(_ context.Context, _ []llm.Message, _ []llm.ToolDef, _ interface{}, _ func(string), _ func(string), opts ...llm.CallOption) (llm.Response, error) {
 	f.chatCalled = true
 	return f.resp, nil
 }
@@ -168,6 +168,82 @@ func TestSmartIdleInputHandler_AbortsOnUnknownREPLPrompt(t *testing.T) {
 	}
 }
 
+func TestSmartIdleInputHandler_SkipsLLMWhenNoPromptCue(t *testing.T) {
+	client := &fakeIdleLLMClient{
+		resp: llm.Response{Content: `{"input":"A","close_stdin":false,"abort":false}`},
+	}
+	handler := NewSmartIdleInputHandler(client)
+
+	resp, err := handler.RequestIdleInput(context.Background(), IdleInputRequest{
+		ToolName:  "shell_exec",
+		Target:    "sandbox",
+		Command:   "unzip -q db.zip",
+		LastLines: []string{},
+	})
+	if err != nil {
+		t.Fatalf("RequestIdleInput() error = %v", err)
+	}
+	if resp.Abort || resp.CloseStdin || resp.Input != "" {
+		t.Fatalf("expected no-op response, got %#v", resp)
+	}
+	if client.chatCalled {
+		t.Fatal("expected no LLM call when prompt cue is absent")
+	}
+}
+
+func TestHasInteractivePromptCue(t *testing.T) {
+	tests := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{
+			name:  "unzip replace prompt",
+			lines: []string{"replace OPatch/emdpatch.pl? [y]es, [n]o, [A]ll, [N]one, [r]ename:"},
+			want:  true,
+		},
+		{
+			name:  "ssh host key prompt",
+			lines: []string{"Are you sure you want to continue connecting (yes/no/[fingerprint])?"},
+			want:  true,
+		},
+		{
+			name:  "normal output",
+			lines: []string{"total 64", "-rw-r--r-- 1 oracle oinstall 1234 file.txt"},
+			want:  false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hasInteractivePromptCue(tc.lines)
+			if got != tc.want {
+				t.Fatalf("hasInteractivePromptCue() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShouldInjectEmptyResponse(t *testing.T) {
+	tests := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{name: "press enter", lines: []string{"Press Enter to continue"}, want: true},
+		{name: "more prompt", lines: []string{"-- More --"}, want: true},
+		{name: "regular line", lines: []string{"extracting: file.txt"}, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shouldInjectEmptyResponse(tc.lines)
+			if got != tc.want {
+				t.Fatalf("shouldInjectEmptyResponse() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 type fakePersistentStreamExecutor struct {
 	sessions   []executor.SessionInfo
 	listCalled bool
@@ -183,6 +259,7 @@ func (f *fakePersistentStreamExecutor) ExecuteStream(context.Context, string, fu
 
 func (f *fakePersistentStreamExecutor) InjectStdin(string) error { return nil }
 func (f *fakePersistentStreamExecutor) Target() string           { return "db" }
+func (f *fakePersistentStreamExecutor) Host() string             { return "db" }
 
 func (f *fakePersistentStreamExecutor) SessionExecute(context.Context, string, string, time.Duration, func([]string) (string, bool)) (executor.ShellRunResult, error) {
 	return executor.ShellRunResult{}, nil

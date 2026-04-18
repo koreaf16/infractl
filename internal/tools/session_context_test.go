@@ -41,15 +41,17 @@ func TestSessionContextToolReportsLocalControllerDefaults(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"Mode: local-controller",
+		"Mode: local-workspace",
+		"Current Workspace:",
+		"Workspace State Dir:",
 		"Local Target: localhost",
 		"Local Shell:",
-		"Active Server: (none)",
-		"Registered Servers:",
-		"Default Execution Rule: omit target => localhost",
+		"Active Workspace: (local workspace)",
+		"Registered Workspaces:",
+		"Default Execution Rule: omit target => current local workspace",
 	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("expected %q in output:\n%s", want, got)
+		if !strings.Contains(got.Content, want) {
+			t.Fatalf("expected %q in output:\n%s", want, got.Content)
 		}
 	}
 }
@@ -80,14 +82,14 @@ func TestSessionContextToolReportsActiveServerContext(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"Mode: active-server",
-		"Active Server: db-server (oracle@10.0.0.10:22), OS=Ubuntu 22.04, Env=prod",
+		"Mode: active-workspace",
+		"Active Workspace: db-server (oracle@10.0.0.10:22), OS=Ubuntu 22.04, Env=prod",
 		"- db-server (oracle@10.0.0.10:22), OS=Ubuntu 22.04",
 		"- app-server (tomcat@10.0.0.20:22)",
-		`Default Execution Rule: omit target => active server "db-server"`,
+		`Default Execution Rule: omit target => active workspace "db-server"`,
 	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("expected %q in output:\n%s", want, got)
+		if !strings.Contains(got.Content, want) {
+			t.Fatalf("expected %q in output:\n%s", want, got.Content)
 		}
 	}
 }

@@ -34,7 +34,14 @@ func (m AppModel) View() string {
 	}
 	// 실행 중 도구 박스 표시 (→ ToolName <arg> + streaming output)
 	if m.busy {
-		if st := m.activeTools.MostRecentForeground(); st != nil {
+		fgTools := m.activeTools.ForegroundTools()
+		if len(fgTools) > 1 {
+			elapsed := time.Duration(0)
+			if len(fgTools) > 0 {
+				elapsed = time.Since(fgTools[0].startTime)
+			}
+			parts = append(parts, renderParallelActivePanel(fgTools, elapsed, m.width))
+		} else if st := m.activeTools.MostRecentForeground(); st != nil {
 			elapsed := time.Since(st.startTime)
 			parts = append(parts, renderShellBoxRunning(st.toolName, st.args, st.shellLines, st.shellTotal, elapsed, m.width))
 		}
@@ -44,10 +51,7 @@ func (m AppModel) View() string {
 	}
 	// 폼 입력 모드 활성 시: 폼 상태 박스 표시 (fake cursor 포함)
 	if m.form.active {
-		cursorOff := 0
-		if m.form.phase == formPhaseEdit {
-			cursorOff = m.input.ti.LineInfo().CharOffset
-		}
+		cursorOff := m.input.ti.LineInfo().CharOffset
 		parts = append(parts, m.form.View(m.width, m.input.ti.Value(), cursorOff))
 	}
 
@@ -67,12 +71,8 @@ func (m AppModel) View() string {
 	switch {
 	case m.privilege.active:
 		parts = append(parts, renderInputBox(m.width, m.privilege.render(m.width), ColorWarning, ""))
-	case m.form.active && m.form.phase == formPhaseEdit:
-		// 입력이 폼 박스 안에 fake cursor로 표시되므로 하단 입력박스 없음
-	case m.form.active && m.form.phase == formPhaseReview:
-		reviewPrompt := StyleGeminiHint.Render("Enter confirm, Esc go back > ")
-		reviewBody := prefixInputLines(reviewPrompt, strings.Repeat(" ", 30), m.input.ti.View())
-		parts = append(parts, renderInputBox(m.width, reviewBody, ColorGeminiBox, ""))
+	case m.form.active:
+		// 폼 활성 시: 입력이 폼 박스 안 fake cursor로 표시되므로 하단 입력박스 없음
 	default:
 		parts = append(parts, renderInputBox(m.width, m.input.View(), borderColor, ""))
 	}
@@ -86,6 +86,9 @@ func (m AppModel) View() string {
 	}
 	if m.form.active {
 		footerSt = footerForm
+	}
+	if footerSt == footerIdle && m.input.hasSlashSuggestions() {
+		footerSt = footerSlashMenu
 	}
 	parts = append(parts, renderFooter(footerSt, m.width))
 

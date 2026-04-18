@@ -42,21 +42,22 @@ func (t *DiscoverWebServersTool) Parameters() map[string]interface{} {
 func (t *DiscoverWebServersTool) IsReadOnly() bool { return true }
 func (t *DiscoverWebServersTool) IsEnabled() bool  { return true }
 
-func (t *DiscoverWebServersTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
+func (t *DiscoverWebServersTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (tools.ToolOutcome, error) {
 	serverName := exec.Target()
 	slog.Info("web_discovery_start", "server", serverName)
 
 	result, err := t.Scanner.ScanWeb(ctx, exec)
 	if err != nil {
 		slog.Error("web_discovery_failed", "server", serverName, "err", err)
-		return fmt.Sprintf("웹 서버 탐지 실패: %s", err), nil
+		msg := fmt.Sprintf("웹 서버 탐지 실패: %s", err)
+		return tools.ToolOutcome{Content: msg, Success: false, ErrorMessage: msg}, nil
 	}
 
 	slog.Info("web_discovery_complete", "server", serverName, "found", len(result.Services))
 
 	if len(result.Services) == 0 {
-		return fmt.Sprintf("[%s] 탐지된 웹 서버 없음", result.ServerName), nil
+		return tools.ToolOutcome{Content: fmt.Sprintf("[%s] 탐지된 웹 서버 없음", result.ServerName), Success: true}, nil
 	}
 
-	return formatScanResult(result), nil
+	return tools.ToolOutcome{Content: formatScanResult(result), Success: true}, nil
 }

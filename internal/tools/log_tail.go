@@ -54,10 +54,10 @@ func (t *LogTailTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *LogTailTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
+func (t *LogTailTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (ToolOutcome, error) {
 	source, err := argString(args, "source", true)
 	if err != nil {
-		return fmt.Sprintf("error: %s", err), nil
+		return ToolOutcome{Content: fmt.Sprintf("error: %s", err), Success: true}, nil
 	}
 	lines := argInt(args, "lines", 50)
 	since, _ := argString(args, "since", false)
@@ -67,12 +67,12 @@ func (t *LogTailTool) Execute(ctx context.Context, args map[string]interface{}, 
 
 	result, execErr := exec.Execute(ctx, cmd)
 	if execErr != nil {
-		return fmt.Sprintf("execution failed: %s", execErr), nil
+		return ToolOutcome{Content: fmt.Sprintf("execution failed: %s", execErr), Success: true}, nil
 	}
 	if result.ExitCode != 0 && result.Stdout == "" {
-		return fmt.Sprintf("error (exit %d):\n%s", result.ExitCode, result.Stderr), nil
+		return ToolOutcome{Content: fmt.Sprintf("error (exit %d):\n%s", result.ExitCode, result.Stderr), Success: true}, nil
 	}
-	return strings.TrimSpace(result.Stdout), nil
+	return ToolOutcome{Content: strings.TrimSpace(result.Stdout), Success: true}, nil
 }
 
 func buildLogCommand(source string, lines int, since string, platform executor.Platform) string {

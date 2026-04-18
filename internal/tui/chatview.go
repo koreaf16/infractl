@@ -35,10 +35,10 @@ type chatItem struct {
 	assistant string // assistant 누적 토큰 (raw)
 
 	// 마크다운 렌더 캐시 ([]string 기반)
-	renderedLines  []string     // 최종 렌더 결과 줄 슬라이스
-	mdCache        stableCache  // 스트리밍 stablePrefix 캐시
-	lastMDRender   time.Time    // 마지막 렌더 시각
-	finalized      bool         // FinalizeAssistant 완료 여부
+	renderedLines []string    // 최종 렌더 결과 줄 슬라이스
+	mdCache       stableCache // 스트리밍 stablePrefix 캐시
+	lastMDRender  time.Time   // 마지막 렌더 시각
+	finalized     bool        // FinalizeAssistant 완료 여부
 
 	thinkText  string        // thinking 토큰 누적
 	box        *cmdBox       // tool execution box
@@ -49,8 +49,8 @@ type chatItem struct {
 
 // chatView는 offset 배열 기반 스크롤을 사용하는 대화 영역이다.
 type chatView struct {
-	items []chatItem
-	width int
+	items  []chatItem
+	width  int
 	height int
 
 	// offset 배열 스크롤 엔진 (chatview_scroll.go)
@@ -63,12 +63,12 @@ type chatView struct {
 	sticky bool // true면 항상 최하단 유지
 	vpTop  int  // 뷰포트 상단의 전체 줄 오프셋
 
-	mdRender       *mdRenderer
-	selectedIdx    int  // -1은 선택 없음
-	viewCache      string
+	mdRender          *mdRenderer
+	selectedIdx       int // -1은 선택 없음
+	viewCache         string
 	needsNewAssistant bool
-	lastRefresh    time.Time
-	pendingRefresh bool
+	lastRefresh       time.Time
+	pendingRefresh    bool
 }
 
 func newChatView(width, height int) chatView {
@@ -249,11 +249,11 @@ func (cv *chatView) AppendBoxOutput(line string) {
 	}
 }
 
-func (cv *chatView) CompleteLastBox(result string, dur time.Duration, success bool) {
+func (cv *chatView) CompleteLastBox(result string, dur time.Duration, success bool, metadataJSON string) {
 	for i := len(cv.items) - 1; i >= 0; i-- {
 		if cv.items[i].kind == kindBox && cv.items[i].box != nil &&
 			cv.items[i].box.status == boxRunning {
-			cv.items[i].box.SetCompleted(result, dur, success)
+			cv.items[i].box.SetCompleted(result, dur, success, metadataJSON)
 			cv.sticky = true
 			cv.needsNewAssistant = true
 			cv.markDirty(i)
@@ -268,5 +268,3 @@ func (cv *chatView) AddError(msg string) {
 	cv.sticky = true
 	cv.refresh()
 }
-
-

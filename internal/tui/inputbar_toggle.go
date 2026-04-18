@@ -42,6 +42,7 @@ func (ib *inputBar) togglePasteAtCursor() bool {
 			ib.ti.SetValue(newVal)
 			ib.ti.CursorEnd()
 			delete(ib.expandedPasteIDs, id)
+			ib.refreshSlashSuggestions()
 			return true
 		}
 	}
@@ -61,6 +62,7 @@ func (ib *inputBar) togglePasteAtCursor() bool {
 				ib.expandedPasteIDs = make(map[int]bool)
 			}
 			ib.expandedPasteIDs[ref.ID] = true
+			ib.refreshSlashSuggestions()
 			return true
 		}
 	}

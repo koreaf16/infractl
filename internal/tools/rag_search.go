@@ -47,10 +47,11 @@ func (t *RAGSearchTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *RAGSearchTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
+func (t *RAGSearchTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (ToolOutcome, error) {
 	query, _ := args["query"].(string)
 	if query == "" {
-		return "query 파라미터가 필요합니다", nil
+		msg := "query 파라미터가 필요합니다"
+		return ToolOutcome{Content: msg, Success: false, ErrorMessage: msg}, nil
 	}
 
 	topK := 5
@@ -60,11 +61,13 @@ func (t *RAGSearchTool) Execute(ctx context.Context, args map[string]interface{}
 
 	results, err := t.Manager.Search(ctx, query, topK)
 	if err != nil {
-		return fmt.Sprintf("RAG 검색 오류: %s", err), nil
+		msg := fmt.Sprintf("RAG 검색 오류: %s", err)
+		return ToolOutcome{Content: msg, Success: false, ErrorMessage: msg}, nil
 	}
 
 	if len(results) == 0 {
-		return "RAG 검색 결과 없음. web_search를 사용하여 인터넷에서 검색하세요.", nil
+		msg := "RAG 검색 결과 없음. web_search를 사용하여 인터넷에서 검색하세요."
+		return ToolOutcome{Content: msg, Success: true}, nil
 	}
 
 	var sb strings.Builder
@@ -80,7 +83,7 @@ func (t *RAGSearchTool) Execute(ctx context.Context, args map[string]interface{}
 		sb.WriteString("\n\n")
 	}
 
-	return sb.String(), nil
+	return ToolOutcome{Content: sb.String(), Success: true}, nil
 }
 
 func formatSourceLabel(r rag.SearchResult) string {

@@ -57,18 +57,19 @@ func (h *TUIHandler) OnToolOutput(toolID string, line string) {
 }
 
 // OnToolStart는 도구 실행이 시작될 때 호출된다.
-func (h *TUIHandler) OnToolStart(toolID string, toolName string, target string, args map[string]interface{}) {
+func (h *TUIHandler) OnToolStart(toolID string, toolName string, target string, args map[string]any) {
 	h.send(ToolStartMsg{ToolID: toolID, Name: toolName, Target: target, Args: cloneToolArgs(args)})
 }
 
 // OnToolEnd는 도구 실행이 완료되었을 때 호출된다.
-func (h *TUIHandler) OnToolEnd(toolID string, toolName string, result string, duration time.Duration, success bool) {
+func (h *TUIHandler) OnToolEnd(toolID string, toolName string, result string, duration time.Duration, success bool, metadataJSON string) {
 	h.send(ToolEndMsg{
-		ToolID:   toolID,
-		Name:     toolName,
-		Result:   result,
-		Duration: duration,
-		Success:  success,
+		ToolID:       toolID,
+		Name:         toolName,
+		Result:       result,
+		Duration:     duration,
+		Success:      success,
+		MetadataJSON: metadataJSON,
 	})
 }
 

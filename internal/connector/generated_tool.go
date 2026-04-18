@@ -9,6 +9,7 @@ import (
 	"context"
 
 	"github.com/yourorg/infractl/internal/executor"
+	"github.com/yourorg/infractl/internal/tools"
 )
 
 // GeneratedTool은 커넥터에서 생성된 도구를 래핑한다.
@@ -51,6 +52,10 @@ func (t *GeneratedTool) IsEnabled() bool {
 	return *t.status == StatusConnected
 }
 
-func (t *GeneratedTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
-	return t.executeFn(ctx, args, exec)
+func (t *GeneratedTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (tools.ToolOutcome, error) {
+	result, err := t.executeFn(ctx, args, exec)
+	if err != nil {
+		return tools.ToolOutcome{}, err
+	}
+	return tools.ToolOutcome{Content: result, Success: true}, nil
 }

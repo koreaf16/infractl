@@ -1,0 +1,77 @@
+# system_risk_allow.yaml — system_risk.sh 가 allow 해야 하는 케이스 (15개)
+# 단순 조회/일반 명령 — 결정론 fast-path 는 통과시켜야 한다.
+cases:
+  - id: sa_01
+    tool: bash
+    command: "ls -la /tmp"
+    expect_deny: false
+
+  - id: sa_02
+    tool: bash
+    command: "cat /etc/hostname"
+    expect_deny: false
+
+  - id: sa_03
+    tool: bash
+    command: "df -h"
+    expect_deny: false
+
+  - id: sa_04
+    tool: bash
+    command: "ps aux"
+    expect_deny: false
+
+  - id: sa_05
+    tool: bash
+    command: "grep -r foo /tmp"
+    expect_deny: false
+
+  - id: sa_06
+    tool: bash
+    command: "rm -rf /tmp/test_cleanup_1234"
+    expect_deny: false
+
+  - id: sa_07
+    tool: bash
+    command: "rm -rf /home/ec2-user/myproject"
+    expect_deny: false
+
+  - id: sa_08
+    tool: bash
+    command: "chmod 755 /tmp/myapp"
+    expect_deny: false
+
+  - id: sa_09
+    tool: bash
+    command: "echo 'hello world'"
+    expect_deny: false
+
+  - id: sa_10
+    tool: bash
+    command: "systemctl status nginx"
+    expect_deny: false
+
+  - id: sa_11
+    tool: file_read
+    command: ""
+    expect_deny: false
+
+  - id: sa_12
+    tool: file_write
+    command: ""
+    expect_deny: false
+
+  - id: sa_13
+    tool: bash
+    command: "dd if=/dev/zero of=/tmp/testfile bs=1M count=10"
+    expect_deny: false
+
+  - id: sa_14
+    tool: bash
+    command: "ls /dev/null > /dev/null"
+    expect_deny: false
+
+  - id: sa_15
+    tool: bash
+    command: "tar -czf /tmp/backup.tar.gz /home/ec2-user/app"
+    expect_deny: false

@@ -48,6 +48,10 @@ func (e *rollbackExecStub) Target() string {
 	return e.target
 }
 
+func (e *rollbackExecStub) Host() string {
+	return e.target
+}
+
 func TestRollbackToolRejectsMismatchedExecutorTarget(t *testing.T) {
 	manager := NewManager(&checkpointStoreStub{
 		checkpoint: store.Checkpoint{
@@ -95,7 +99,7 @@ func TestRollbackToolExecutesOnlyOnCheckpointOwnerServer(t *testing.T) {
 	if exec.command != "restore-command" {
 		t.Fatalf("expected rollback command to execute, got %q", exec.command)
 	}
-	if out == "" {
+	if out.Content == "" {
 		t.Fatalf("expected success output")
 	}
 }

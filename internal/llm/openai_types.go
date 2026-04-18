@@ -7,11 +7,13 @@ package llm
 
 // chatRequest는 OpenAI 호환 API에 전송하는 요청 본문이다.
 type chatRequest struct {
-	Model      string      `json:"model"`
-	Messages   []Message   `json:"messages"`
-	Tools      []ToolDef   `json:"tools,omitempty"` // 비어있으면 필드 자체를 제외
-	ToolChoice interface{} `json:"tool_choice,omitempty"`
-	Stream     bool        `json:"stream"`
+	Model       string      `json:"model"`
+	Messages    []Message   `json:"messages"`
+	Tools       []ToolDef   `json:"tools,omitempty"`       // 비어있으면 필드 자체를 제외
+	ToolChoice  interface{} `json:"tool_choice,omitempty"`
+	Stream      bool        `json:"stream"`
+	Temperature *float64    `json:"temperature,omitempty"` // nil이면 서버 기본값(1.0) 사용
+	MaxTokens   *int        `json:"max_tokens,omitempty"`  // nil이면 모델 기본값 사용
 }
 
 // streamChunk는 SSE 스트리밍 응답의 단일 청크를 나타낸다.

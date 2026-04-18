@@ -227,23 +227,18 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case SubmitMsg:
 		// 폼 모드 활성 시: 입력값을 폼 필드에 반영하고 agent로 보내지 않는다.
-		if m.form.active && m.form.phase == formPhaseEdit {
+		if m.form.active {
 			m.form.AcceptValue(msg.DisplayInput)
 			m.input.Reset()
 			if m.form.AdvanceToNext() {
-				// 모든 필드 완료 → Review 전환 (placeholder 초기화)
-				m.input.ti.Placeholder = "Enter to confirm, Esc to go back"
-			} else {
-				m.input.ti.Placeholder = m.form.CurrentPlaceholder()
+				// 모든 필드 완료 → 즉시 제출 (Review 없음)
+				return m.Update(FormResponseMsg{
+					Result:  m.form.BuildResult(),
+					ReplyCh: m.form.replyCh,
+				})
 			}
+			m.input.ti.Placeholder = m.form.CurrentPlaceholder()
 			return m, nil
-		}
-		if m.form.active && m.form.phase == formPhaseReview {
-			// Review에서 Enter → 확정
-			return m.Update(FormResponseMsg{
-				Result:  m.form.BuildResult(),
-				ReplyCh: m.form.replyCh,
-			})
 		}
 
 		displayInput := msg.DisplayInput
@@ -253,6 +248,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.busy {
 			m.queue.Enqueue(displayInput, expandedInput)
+			m.statusBar.setQueueLen(m.queue.Len())
 			if m.box != nil {
 				m.box.Println(renderSystemLine(
 					fmt.Sprintf("queued [%d]: %s", m.queue.Len(), truncateForQueue(displayInput, 60))))
@@ -265,6 +261,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ag.UpdateSessionTitle(m.ctx, displayInput)
 		}
 		m.busy = true
+		m.input.SetBusy(true)
 		m.reqID++ // 새 요청 세대 — stale AgentDoneMsg 무시에 사용
 		m.activeTools.Clear()
 		m.progress.Reset()

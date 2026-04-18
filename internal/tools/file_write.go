@@ -47,7 +47,7 @@ func (t *FileWriteTool) Parameters() map[string]interface{} {
 			},
 			"target": map[string]interface{}{
 				"type":        "string",
-				"description": "Target server name. Omit or use 'localhost' for local execution.",
+				"description": "Workspace alias. Omit or use 'localhost' for the local workspace.",
 			},
 			"skip_backup": map[string]interface{}{
 				"type":        "boolean",
@@ -58,21 +58,26 @@ func (t *FileWriteTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *FileWriteTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
+func (t *FileWriteTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (ToolOutcome, error) {
 	path, err := argString(args, "path", true)
 	if err != nil {
-		return fmt.Sprintf("Error: %s", err), nil
+		return ToolOutcome{Content: fmt.Sprintf("Error: %s", err), Success: true}, nil
 	}
 
 	content, err := argString(args, "content", true)
 	if err != nil {
-		return fmt.Sprintf("Error: %s", err), nil
+		return ToolOutcome{Content: fmt.Sprintf("Error: %s", err), Success: true}, nil
 	}
 
 	appendMode := argBool(args, "append", false)
 	skipBackup := argBool(args, "skip_backup", false)
 
 	oldContent := readExistingFile(ctx, exec, path)
+
+	var criticalWarning string
+	if warning, _ := CheckCriticalPath(path); warning != "" {
+		criticalWarning = warning
+	}
 
 	var backupMsg string
 	if !appendMode && oldContent != "" && !skipBackup {
@@ -81,10 +86,10 @@ func (t *FileWriteTool) Execute(ctx context.Context, args map[string]interface{}
 		if spaceErr == nil && strings.HasPrefix(strings.TrimSpace(spaceRes.Stdout), "INSUFFICIENT:") {
 			parts := strings.SplitN(strings.TrimSpace(spaceRes.Stdout), ":", 3)
 			if len(parts) == 3 {
-				return fmt.Sprintf(
+				return ToolOutcome{Content: fmt.Sprintf(
 					"Backup requires more space than is available (needed: %sKB, available: %sKB).\nSet skip_backup=true only when you intentionally accept the rollback risk.",
 					parts[1], parts[2],
-				), nil
+				), Success: true}, nil
 			}
 		}
 
@@ -101,7 +106,7 @@ func (t *FileWriteTool) Execute(ctx context.Context, args map[string]interface{}
 	cmd := buildWriteCommand(exec, path, content, appendMode)
 	result, err := exec.Execute(ctx, cmd)
 	if err != nil {
-		return fmt.Sprintf("Execution failed: %s", err), nil
+		return ToolOutcome{Content: fmt.Sprintf("Execution failed: %s", err), Success: true}, nil
 	}
 
 	if result.ExitCode != 0 {
@@ -112,13 +117,16 @@ func (t *FileWriteTool) Execute(ctx context.Context, args map[string]interface{}
 					action = "appended"
 				}
 				msg := fmt.Sprintf("File %s %s successfully via acquired root session", path, action)
+				if criticalWarning != "" {
+					msg = criticalWarning + "\n" + msg
+				}
 				if backupMsg != "" {
 					msg = backupMsg + "\n" + msg
 				}
-				return msg, nil
+				return ToolOutcome{Content: msg, Success: true}, nil
 			}
 		}
-		return fmt.Sprintf("Error writing file (exit %d):\n%s", result.ExitCode, result.Stderr), nil
+		return ToolOutcome{Content: fmt.Sprintf("Error writing file (exit %d):\n%s", result.ExitCode, result.Stderr), Success: true}, nil
 	}
 
 	action := "written"
@@ -129,6 +137,9 @@ func (t *FileWriteTool) Execute(ctx context.Context, args map[string]interface{}
 	}
 
 	msg := fmt.Sprintf("File %s %s successfully", path, action)
+	if criticalWarning != "" {
+		msg = criticalWarning + "\n" + msg
+	}
 	if backupMsg != "" {
 		msg = backupMsg + "\n" + msg
 	}
@@ -136,9 +147,9 @@ func (t *FileWriteTool) Execute(ctx context.Context, args map[string]interface{}
 	filename := filepath.Base(path)
 	unifiedDiff := diff.GenerateUnifiedDiff(oldContent, newContent, filename)
 	if unifiedDiff != "" {
-		return msg + "\n\n" + unifiedDiff, nil
+		return ToolOutcome{Content: msg + "\n\n" + unifiedDiff, Success: true}, nil
 	}
-	return msg, nil
+	return ToolOutcome{Content: msg, Success: true}, nil
 }
 
 func readExistingFile(ctx context.Context, exec executor.Executor, path string) string {

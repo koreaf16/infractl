@@ -18,6 +18,12 @@
 .build/
 infractl.exe
 bin/
+.gotmp/
+.gomodcache/
+.infractl/
+llm.log
+internal/agent/llm.log
+internal/llm/llm.log
 
 # Go cache
 .gocache/

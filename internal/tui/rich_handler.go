@@ -67,9 +67,9 @@ func (h *RichHandler) OnToolStart(toolID, toolName, target string, args map[stri
 	}
 }
 
-func (h *RichHandler) OnToolEnd(toolID, toolName, result string, duration time.Duration, success bool) {
+func (h *RichHandler) OnToolEnd(toolID, toolName, result string, duration time.Duration, success bool, metadataJSON string) {
 	if h.renderer != nil {
-		h.renderer.OnToolEnd(toolID, toolName, result, duration, success)
+		h.renderer.OnToolEnd(toolID, toolName, result, duration, success, metadataJSON)
 	}
 }
 
@@ -114,9 +114,9 @@ func (h *RichHandler) OnActiveServerChange(srv *store.Server) {
 	bracket := StyleResponseBracket.Render("  > ")
 	var text string
 	if srv == nil {
-		text = bracket + StyleCmdBoxDim.Render("[active server] cleared")
+		text = bracket + StyleCmdBoxDim.Render("[active workspace] cleared")
 	} else {
-		text = bracket + StyleCmdBoxDim.Render(fmt.Sprintf("active server: %s (%s:%d)", srv.Name, srv.Host, srv.Port))
+		text = bracket + StyleCmdBoxDim.Render(fmt.Sprintf("active workspace: %s (%s:%d, dir: %s)", srv.Name, srv.Host, srv.Port, srv.WorkspaceDir))
 	}
 	h.renderer.PrintNotification(text)
 }
@@ -142,6 +142,86 @@ func (p *RichPrivilegeHandler) RequestPassword(ctx context.Context, req privileg
 		}()
 	}
 	return p.inner.RequestPassword(ctx, req)
+}
+
+// OnTaskProposed prints a notification that a task proposal is waiting.
+func (h *RichHandler) OnTaskProposed(title, kind, server, account string) {
+	if h.renderer == nil {
+		return
+	}
+	bracket := StyleResponseBracket.Render("  > ")
+	text := bracket + StyleTaskDim.Render(fmt.Sprintf(
+		"[작업 제안] %s (%s) — %s/%s — 'yes'로 확인, '취소'로 거부",
+		title, kind, server, account,
+	))
+	h.renderer.PrintNotification(text)
+}
+
+// OnTaskDeclared prints a notification that a task has been confirmed.
+func (h *RichHandler) OnTaskDeclared(taskID, title, kind string) {
+	if h.renderer == nil {
+		return
+	}
+	bracket := StyleResponseBracket.Render("  > ")
+	h.renderer.PrintNotification(bracket + StyleSuccess.Render(
+		fmt.Sprintf("[작업 확정] %s (%s) ID:%s", title, kind, taskID),
+	))
+}
+
+// OnTaskStepAdvanced prints a notification that a task step has advanced.
+func (h *RichHandler) OnTaskStepAdvanced(taskID string, stepIndex, total int, description string) {
+	if h.renderer == nil {
+		return
+	}
+	bracket := StyleResponseBracket.Render("  > ")
+	h.renderer.PrintNotification(bracket + StyleTaskDim.Render(
+		fmt.Sprintf("[단계 %d/%d] %s", stepIndex+1, total, description),
+	))
+}
+
+// OnTaskEnded prints a notification that a task has ended.
+func (h *RichHandler) OnTaskEnded(taskID, status, summary string) {
+	if h.renderer == nil {
+		return
+	}
+	bracket := StyleResponseBracket.Render("  > ")
+	style := StyleSuccess
+	if status == "failed" || status == "aborted" {
+		style = StyleError
+	}
+	text := fmt.Sprintf("[작업 종료] %s — %s", status, taskID)
+	if summary != "" {
+		text += ": " + summary
+	}
+	h.renderer.PrintNotification(bracket + style.Render(text))
+}
+
+// OnElevationChanged prints a notification that privilege elevation has changed.
+func (h *RichHandler) OnElevationChanged(host, sessionID, currentUser string) {
+	if h.renderer == nil {
+		return
+	}
+	bracket := StyleResponseBracket.Render("  > ")
+	h.renderer.PrintNotification(bracket + StyleWarning.Render(
+		fmt.Sprintf("[권한 변경] %s@%s (세션: %s)", currentUser, host, sessionID),
+	))
+}
+
+// OnGuardViolation prints a notification that a task guard rule was triggered.
+func (h *RichHandler) OnGuardViolation(toolName, reason string, blocked bool) {
+	if h.renderer == nil {
+		return
+	}
+	bracket := StyleResponseBracket.Render("  > ")
+	if blocked {
+		h.renderer.PrintNotification(bracket + StyleError.Render(
+			fmt.Sprintf("[TaskGuard 차단] %s — %s", toolName, reason),
+		))
+	} else {
+		h.renderer.PrintNotification(bracket + StyleWarning.Render(
+			fmt.Sprintf("[TaskGuard 경고] %s — %s", toolName, reason),
+		))
+	}
 }
 
 func (h *RichHandler) RequestQuestion(ctx context.Context, req tools.QuestionRequest) (tools.QuestionResponse, error) {

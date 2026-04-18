@@ -16,13 +16,19 @@ import (
 
 // ServerListTool은 등록된 서버 목록을 반환하는 도구이다.
 type ServerListTool struct {
-	Store store.ServerStore
+	Store    store.ServerStore
+	ToolName string
 }
 
-func (t *ServerListTool) Name() string { return "server_list" }
+func (t *ServerListTool) Name() string {
+	if strings.TrimSpace(t.ToolName) != "" {
+		return t.ToolName
+	}
+	return "server_list"
+}
 
 func (t *ServerListTool) Description() string {
-	return "List all registered SSH servers with their connection details"
+	return "List all registered SSH workspaces with their connection details"
 }
 
 func (t *ServerListTool) IsReadOnly() bool { return true }
@@ -35,25 +41,25 @@ func (t *ServerListTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *ServerListTool) Execute(ctx context.Context, _ map[string]interface{}, _ executor.Executor) (string, error) {
+func (t *ServerListTool) Execute(ctx context.Context, _ map[string]interface{}, _ executor.Executor) (ToolOutcome, error) {
 	servers, err := t.Store.List(ctx)
 	if err != nil {
-		return fmt.Sprintf("Failed to list servers: %s", err), nil
+		return ToolOutcome{Content: fmt.Sprintf("Failed to list workspaces: %s", err), Success: true}, nil
 	}
 
 	if len(servers) == 0 {
-		return "No servers registered. Use server_add to register a server.", nil
+		return ToolOutcome{Content: "No workspaces registered. Use workspace_add to register an SSH workspace.", Success: true}, nil
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%-15s %-20s %-6s %-12s %-10s\n",
-		"NAME", "HOST", "PORT", "USER", "AUTH"))
-	sb.WriteString(strings.Repeat("-", 65) + "\n")
+	sb.WriteString(fmt.Sprintf("%-15s %-20s %-6s %-12s %-10s %-24s\n",
+		"WORKSPACE", "HOST", "PORT", "USER", "AUTH", "DIR"))
+	sb.WriteString(strings.Repeat("-", 92) + "\n")
 
 	for _, srv := range servers {
-		sb.WriteString(fmt.Sprintf("%-15s %-20s %-6d %-12s %-10s\n",
-			srv.Name, srv.Host, srv.Port, srv.User, srv.AuthType))
+		sb.WriteString(fmt.Sprintf("%-15s %-20s %-6d %-12s %-10s %-24s\n",
+			srv.Name, srv.Host, srv.Port, srv.User, srv.AuthType, srv.WorkspaceDir))
 	}
 
-	return sb.String(), nil
+	return ToolOutcome{Content: sb.String(), Success: true}, nil
 }

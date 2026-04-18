@@ -6,6 +6,7 @@
 package subagent
 
 import (
+	"github.com/yourorg/infractl/internal/tools"
 	"context"
 	"fmt"
 	"strings"
@@ -48,18 +49,18 @@ func (t *AnalyzeTool) Parameters() map[string]interface{} {
 func (t *AnalyzeTool) IsReadOnly() bool            { return true }
 func (t *AnalyzeTool) IsEnabled() bool             { return true }
 
-func (t *AnalyzeTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (string, error) {
+func (t *AnalyzeTool) Execute(ctx context.Context, args map[string]interface{}, _ executor.Executor) (tools.ToolOutcome, error) {
 	server, _ := args["server"].(string)
 	question, _ := args["question"].(string)
 
 	if question == "" {
-		return "", fmt.Errorf("question은 필수입니다")
+		return tools.ToolOutcome{}, fmt.Errorf("question은 필수입니다")
 	}
 
 	agentTypes := parseAgentTypes(args["agents"])
 
 	results := t.Orchestrator.AnalyzeParallelWithEvents(ctx, server, question, agentTypes, t.EventCb)
-	return FormatResults(results), nil
+	return tools.ToolOutcome{Content: FormatResults(results), Success: true}, nil
 }
 
 // parseAgentTypes는 args의 agents 필드를 AgentType 슬라이스로 변환한다.

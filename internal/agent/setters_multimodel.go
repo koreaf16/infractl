@@ -8,6 +8,7 @@ package agent
 import (
 	"log/slog"
 
+	"github.com/yourorg/infractl/internal/agent/planmode"
 	"github.com/yourorg/infractl/internal/llm"
 )
 
@@ -53,13 +54,34 @@ func (a *Agent) resolveClientForTier(tier string) (llm.Client, llm.Tier, string)
 }
 
 // SetPlanMode는 Plan 모드를 활성화/비활성화한다.
-func (a *Agent) SetPlanMode(enabled bool) { a.planMode = enabled }
+func (a *Agent) SetPlanMode(enabled bool) {
+	if a.planState == nil {
+		return
+	}
+	if enabled {
+		a.planState.Enter()
+	} else {
+		a.planState.Exit()
+	}
+}
 
 // IsPlanMode는 Plan 모드 활성화 여부를 반환한다.
-func (a *Agent) IsPlanMode() bool { return a.planMode }
+func (a *Agent) IsPlanMode() bool {
+	if a.planState == nil {
+		return false
+	}
+	return a.planState.IsActive()
+}
 
 // TogglePlanMode는 Plan 모드를 토글하고 변경 후 상태를 반환한다.
 func (a *Agent) TogglePlanMode() bool {
-	a.planMode = !a.planMode
-	return a.planMode
+	if a.planState == nil {
+		return false
+	}
+	return a.planState.Toggle()
+}
+
+// PlanState 는 Plan Mode 상태 객체를 반환한다 (TUI approval gate 에서 참조).
+func (a *Agent) PlanState() *planmode.State {
+	return a.planState
 }

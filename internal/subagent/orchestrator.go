@@ -1,7 +1,7 @@
 // Package subagent
 // File: orchestrator.go
 // Description: 복수 서브에이전트 병렬 실행 오케스트레이터
-// Responsibility: 여러 AgentType을 동시에 실행하고 결과를 종합하여 포맷팅
+// Responsibility: AnalyzeParallel / AnalyzeParallelWithEvents API를 RunParallel로 위임, 결과 포맷팅
 
 package subagent
 
@@ -9,17 +9,22 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 )
 
 // Orchestrator는 복수 서브에이전트를 병렬로 실행한다.
 type Orchestrator struct {
-	runner *Runner
+	runner      *Runner
+	maxParallel int // Phase F: errgroup 동시성 제한 (0 = 무제한)
 }
 
 // NewOrchestrator는 Orchestrator를 생성한다.
 func NewOrchestrator(runner *Runner) *Orchestrator {
 	return &Orchestrator{runner: runner}
+}
+
+// SetMaxParallel은 동시 실행 상한을 설정한다 (Phase F: config.Subagent.MaxParallel 주입).
+func (o *Orchestrator) SetMaxParallel(n int) {
+	o.maxParallel = n
 }
 
 // Runner는 내부 Runner를 반환한다 (DelegateAgentTool 등에서 사용).
@@ -35,37 +40,27 @@ func (o *Orchestrator) AnalyzeParallel(ctx context.Context, server, question str
 
 // AnalyzeParallelWithEvents는 EventCallback을 받아 실시간 진행 이벤트를 발사하면서 병렬 실행한다.
 // cb가 nil이면 AnalyzeParallel과 동일하게 동작한다.
+//
+// Phase F: sync.WaitGroup → RunParallel(errgroup) 으로 교체.
+// - 첫 에러 발생 시 공유 ctx 취소 → sibling이 다음 Chat 호출에서 ctx.Done() 감지 후 종료.
+// - maxParallel > 0이면 errgroup.SetLimit으로 동시성을 제한한다.
 func (o *Orchestrator) AnalyzeParallelWithEvents(ctx context.Context, server, question string, agentTypes []AgentType, cb EventCallback) []SubagentResult {
 	if len(agentTypes) == 0 {
 		agentTypes = AllAgentTypes
 	}
 
-	results := make([]SubagentResult, len(agentTypes))
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-
-	for i, agentType := range agentTypes {
-		i, agentType := i, agentType
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			// per-goroutine runner shallow copy로 eventCb race 방지
-			localRunner := *o.runner
-			localRunner.eventCb = cb
-			cfg := SubagentConfig{
-				Type:     agentType,
-				Server:   server,
-				Question: question,
-			}
-			r := localRunner.Execute(ctx, cfg)
-			mu.Lock()
-			results[i] = r
-			mu.Unlock()
-		}()
+	configs := make([]SubagentConfig, len(agentTypes))
+	for i, t := range agentTypes {
+		configs[i] = SubagentConfig{Type: t, Server: server, Question: question}
 	}
-	wg.Wait()
 
-	return results
+	opts := RunOpts{
+		MaxParallel:     o.maxParallel,
+		ContinueOnError: false, // 기본: sibling cancel 활성
+		EventCb:         cb,
+	}
+
+	return RunParallel(ctx, configs, opts, o.runner)
 }
 
 // FormatResults는 서브에이전트 결과를 사람이 읽기 쉬운 문자열로 변환한다.

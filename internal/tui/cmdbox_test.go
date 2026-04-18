@@ -26,8 +26,7 @@ func TestToolTargetLabelShowsLocalShellContext(t *testing.T) {
 }
 
 func TestToolTargetLabelShowsRemoteShellContext(t *testing.T) {
-	if got := toolTargetLabel("shell_exec", "db-server"); got != "ssh -> db-server" {
+	if got := toolTargetLabel("shell_exec", "db-server"); got != "workspace -> db-server" {
 		t.Fatalf("toolTargetLabel(remote) = %q", got)
 	}
 }
-

@@ -42,8 +42,8 @@ func renderToolHeaderLine(name, target string, args map[string]any) string {
 
 // renderToolSummaryLine은 도구 완료를 스크롤백 출력용으로 렌더링한다.
 // 형식: ⎿ Wrote N lines to path.go
-func renderToolSummaryLine(name string, args map[string]any, result string, duration time.Duration, success bool) string {
-	return toolSummary(name, args, result, duration, success)
+func renderToolSummaryLine(name string, args map[string]any, result string, metadataJSON string, duration time.Duration, success bool) string {
+	return toolSummary(name, args, result, metadataJSON, duration, success)
 }
 
 // renderResponseText는 최종 응답을 스크롤백 출력용으로 렌더링한다.

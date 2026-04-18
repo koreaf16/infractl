@@ -56,7 +56,7 @@ func NewOpenAIClient(endpoint, model, apiKey string, timeout time.Duration) *Ope
 	}
 }
 
-func (c *OpenAIClient) Chat(ctx context.Context, messages []Message, tools []ToolDef, toolChoice interface{}) (Response, error) {
+func (c *OpenAIClient) Chat(ctx context.Context, messages []Message, tools []ToolDef, toolChoice interface{}, opts ...CallOption) (Response, error) {
 	reqMessages := messages
 	reqTools := tools
 
@@ -67,6 +67,11 @@ func (c *OpenAIClient) Chat(ctx context.Context, messages []Message, tools []Too
 		reqToolChoice = nil   // tools 없으면 tool_choice도 제외해야 함 (Qwen API 400 방지)
 	}
 
+	callOpts := &CallOptions{}
+	for _, opt := range opts {
+		opt(callOpts)
+	}
+
 	reqBody := chatRequest{
 		Model:       c.model,
 		Messages:    reqMessages,
@@ -74,6 +79,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, messages []Message, tools []Too
 		ToolChoice:  reqToolChoice,
 		Stream:      false,
 		Temperature: c.temperature,
+		MaxTokens:   callOpts.MaxTokens,
 	}
 
 	data, err := json.Marshal(reqBody)
@@ -81,7 +87,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, messages []Message, tools []Too
 		return Response{}, fmt.Errorf("marshal request: %w", err)
 	}
 
-	logRequestJSON(c.model, data)
+	LogRequestJSON(c.model, data)
 
 	resp, err := c.doRequest(ctx, data)
 	if err != nil {
@@ -143,7 +149,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, messages []Message, tools []Too
 	return result, nil
 }
 
-func (c *OpenAIClient) ChatStream(ctx context.Context, messages []Message, tools []ToolDef, toolChoice interface{}, onThinkingToken func(string), onToken func(string)) (Response, error) {
+func (c *OpenAIClient) ChatStream(ctx context.Context, messages []Message, tools []ToolDef, toolChoice interface{}, onThinkingToken func(string), onToken func(string), opts ...CallOption) (Response, error) {
 	reqMessages := messages
 	reqTools := tools
 
@@ -154,6 +160,11 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, messages []Message, tools
 		reqToolChoice = nil   // tools 없으면 tool_choice도 제외해야 함 (Qwen API 400 방지)
 	}
 
+	callOpts := &CallOptions{}
+	for _, opt := range opts {
+		opt(callOpts)
+	}
+
 	reqBody := chatRequest{
 		Model:       c.model,
 		Messages:    reqMessages,
@@ -161,6 +172,7 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, messages []Message, tools
 		ToolChoice:  reqToolChoice,
 		Stream:      true,
 		Temperature: c.temperature,
+		MaxTokens:   callOpts.MaxTokens,
 	}
 
 	data, err := json.Marshal(reqBody)
@@ -168,7 +180,7 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, messages []Message, tools
 		return Response{}, fmt.Errorf("marshal request: %w", err)
 	}
 
-	logRequestJSON(c.model, data)
+	LogRequestJSON(c.model, data)
 
 	// idle timeout: 서버가 스트림 중간에 멈춰도 무한 블록되지 않도록 ctx 래핑
 	// 요청 크기에 따라 동적 조절: 큰 프롬프트는 LLM 응답 생성이 느릴 수 있다

@@ -39,7 +39,7 @@ func (t *NetworkInfoTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *NetworkInfoTool) Execute(ctx context.Context, _ map[string]interface{}, exec executor.Executor) (string, error) {
+func (t *NetworkInfoTool) Execute(ctx context.Context, _ map[string]interface{}, exec executor.Executor) (ToolOutcome, error) {
 	platform := executor.CommandPlatform(exec)
 	tasks := []string{"interfaces", "routing", "arp"}
 
@@ -56,10 +56,16 @@ func (t *NetworkInfoTool) Execute(ctx context.Context, _ map[string]interface{},
 		wg.Add(1)
 		go func(tk string) {
 			defer wg.Done()
+			EmitOutput(ctx, fmt.Sprintf("task_start task=%s", tk))
 			slog.Info("task_start", "task", tk)
 			start := time.Now()
 
 			cmd := buildNetworkCommand(tk, platform)
+			if cmd == "" {
+				slog.Warn("network_info unknown task, skipping", "task", tk)
+				EmitOutput(ctx, fmt.Sprintf("task_skip task=%s reason=unknown", tk))
+				return
+			}
 			result, err := exec.Execute(ctx, cmd)
 			dur := time.Since(start)
 
@@ -67,10 +73,12 @@ func (t *NetworkInfoTool) Execute(ctx context.Context, _ map[string]interface{},
 			defer mu.Unlock()
 			if err != nil {
 				errs = append(errs, fmt.Sprintf("[%s] Error: %s", tk, err))
+				EmitOutput(ctx, fmt.Sprintf("task_fail task=%s dur=%s", tk, dur))
 				slog.Info("task_fail", "task", tk, "dur", dur)
 				return
 			}
 			parts[tk] = strings.TrimSpace(result.Stdout)
+			EmitOutput(ctx, fmt.Sprintf("task_done task=%s dur=%s", tk, dur))
 			slog.Info("task_done", "task", tk, "dur", dur)
 		}(task)
 	}
@@ -85,7 +93,7 @@ func (t *NetworkInfoTool) Execute(ctx context.Context, _ map[string]interface{},
 	}
 	output = append(output, errs...)
 
-	return strings.Join(output, "\n\n"), nil
+	return ToolOutcome{Content: strings.Join(output, "\n\n"), Success: true}, nil
 }
 
 func buildNetworkCommand(task string, platform executor.Platform) string {

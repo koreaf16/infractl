@@ -1,7 +1,7 @@
 // Package config
 // File: config.go
 // Description: infractl 설정 구조체, YAML 로드/저장
-// Responsibility: 설정 파일 (~/.infractl/config.yaml) 관리
+// Responsibility: workspace state config file (.infractl/config.yaml) management
 
 package config
 
@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/yourorg/infractl/internal/workspace"
 	"gopkg.in/yaml.v3"
 )
 
@@ -39,14 +40,20 @@ type RerankerConfig struct {
 
 // Config는 infractl 전역 설정을 나타낸다.
 type Config struct {
-	LLM             LLMConfig                  `yaml:"llm,omitempty"`             // 레거시 단일 LLM (하위호환)
-	Models          ModelsConfig               `yaml:"models,omitempty"`          // 멀티 LLM 티어
+	LLM             LLMConfig                  `yaml:"llm,omitempty"`    // 레거시 단일 LLM (하위호환)
+	Models          ModelsConfig               `yaml:"models,omitempty"` // 멀티 LLM 티어
 	Embedding       EmbeddingConfig            `yaml:"embedding,omitempty"`
-	Reranker        RerankerConfig             `yaml:"reranker,omitempty"`        // 선택적 리랭커
+	Reranker        RerankerConfig             `yaml:"reranker,omitempty"` // 선택적 리랭커
 	MCPServers      map[string]MCPServerConfig `yaml:"mcp_servers,omitempty"`
 	SubAgentModel   string                     `yaml:"sub_agent_model,omitempty"`
 	SubAgentTimeout int                        `yaml:"sub_agent_timeout,omitempty"`
 	CostPerMTokens  map[string]CostPricing     `yaml:"cost_per_1m_tokens,omitempty"`
+
+	// Phase F: 멀티태스크 설정
+	Background BackgroundConfig      `yaml:"background,omitempty"`
+	Subagent   SubagentRuntimeConfig `yaml:"subagent,omitempty"`
+	Monitor    MonitorConfig         `yaml:"monitor,omitempty"`
+	Schedule   ScheduleRuntimeConfig `yaml:"schedule,omitempty"`
 }
 
 // GeneralLLM은 general 티어 LLM 설정을 반환한다.
@@ -77,20 +84,17 @@ type MCPServerConfig struct {
 
 // LLMConfig는 LLM 연결 설정을 나타낸다.
 type LLMConfig struct {
-	Endpoint string `yaml:"endpoint"`
-	Model    string `yaml:"model"`
-	APIKey   string `yaml:"api_key"`
-	Mode     string `yaml:"mode"`    // "full", "assisted", "basic"
-	Timeout  int    `yaml:"timeout"` // 초 단위
+	Endpoint    string   `yaml:"endpoint"`
+	Model       string   `yaml:"model"`
+	APIKey      string   `yaml:"api_key"`
+	Mode        string   `yaml:"mode"`                  // "full", "assisted", "basic"
+	Timeout     int      `yaml:"timeout"`               // 초 단위
+	Temperature *float64 `yaml:"temperature,omitempty"` // nil이면 서버 기본값(1.0) 사용
 }
 
-// DefaultConfigDir는 ~/.infractl 경로를 반환한다.
+// DefaultConfigDir returns the state directory for the current workspace.
 func DefaultConfigDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("get home dir: %w", err)
-	}
-	return filepath.Join(home, ".infractl"), nil
+	return workspace.StateDir()
 }
 
 func configFilePath() (string, error) {
@@ -158,4 +162,3 @@ func Save(cfg *Config) error {
 	}
 	return nil
 }
-

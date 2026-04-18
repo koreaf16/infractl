@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	overlayVisibleLines = 20 // 한 번에 표시할 이력 항목 수
+	overlayVisibleLines = 20  // 한 번에 표시할 이력 항목 수
 	overlayMaxResultLen = 300 // 결과 미리보기 최대 글자 수
 )
 
@@ -113,7 +113,7 @@ func renderHistoryEntry(e toolHistoryEntry, width int) string {
 	ts := StyleCmdBoxDim.Render(formatRelativeTime(e.finishedAt))
 
 	// 결과 미리보기 (첫 줄, 잘라내기)
-	preview := firstNonEmptyLine(e.result)
+	preview := toolSummaryPreview(e.toolName, nil, e.result, e.metadataJSON, e.success)
 	if len(preview) > overlayMaxResultLen {
 		preview = preview[:overlayMaxResultLen-3] + "..."
 	}

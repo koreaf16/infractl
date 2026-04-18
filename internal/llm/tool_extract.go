@@ -11,7 +11,13 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"sync/atomic"
 )
+
+// inlineIDSeq는 인라인 tool call ID의 전역 단조 증가 시퀀스이다.
+// 응답마다 idx가 0부터 재시작하면 동일 세션 내 중복 ID가 발생하므로,
+// 전역 카운터로 세션 전체에 걸쳐 고유한 ID를 보장한다.
+var inlineIDSeq int64
 
 var (
 	// reLLMTrailingBS: 문자열 종료 직전의 미이스케이프 백슬래시-따옴표.
@@ -25,6 +31,10 @@ var (
 	// reShorthandNoArgs: {"tool_name"} 단축 형식 (인자 없음).
 	// 케이스: 모델이 인자 없는 툴 호출 시 {"tool_name"} 형태로 출력하는 경우.
 	reShorthandNoArgs = regexp.MustCompile(`^\{\s*"([a-zA-Z_][a-zA-Z0-9_]*)"\s*\}$`)
+
+	// reGemmaCall: call:name{args} 형식 (Gemma 4/3)
+	// 케이스: call:process_list{target:sandbox}
+	reGemmaCall = regexp.MustCompile(`call:([a-zA-Z_][a-zA-Z0-9_]*)\{([^}]*)\}`)
 )
 
 // extractInlineToolCalls????용뮞?紐꾨퓠??<tool_call>...</tool_call> ?됰뗀以?????뼓??뺣뼄.
@@ -293,7 +303,7 @@ func extractInlineToolCalls(content string) (calls []ToolCall, cleanedContent st
 					argStr = "{}"
 				}
 				calls = append(calls, ToolCall{
-					ID:   fmt.Sprintf("inline_%d", idx),
+					ID:   fmt.Sprintf("inline_%d", atomic.AddInt64(&inlineIDSeq, 1)),
 					Type: "function",
 					Function: FunctionCall{
 						Name:      rawCall.Name,
@@ -310,21 +320,94 @@ func extractInlineToolCalls(content string) (calls []ToolCall, cleanedContent st
 
 		// 2??뽰맄: Qwen3.5 XML-like ?類ㅻ뻼 <function=NAME><parameter=K>V</parameter>...
 		if tc := parseQwenXMLToolCall(jsonStr); tc != nil {
-			tc.ID = fmt.Sprintf("inline_%d", idx)
+			tc.ID = fmt.Sprintf("inline_%d", atomic.AddInt64(&inlineIDSeq, 1))
 			calls = append(calls, *tc)
 			continue
 		}
 
 		// 3단계: 단축 형식 파싱 — {"tool_name"} 또는 {"tool_name": {...args}}
 		if tc := parseShorthandToolCall(jsonStr); tc != nil {
-			tc.ID = fmt.Sprintf("inline_%d", idx)
+			tc.ID = fmt.Sprintf("inline_%d", atomic.AddInt64(&inlineIDSeq, 1))
 			calls = append(calls, *tc)
 			continue
 		}
 
 		slog.Debug("inline tool_call parse failed (json+xml+shorthand)", "content", jsonStr)
 	}
-	return calls, strings.TrimSpace(sb.String())
+
+	// 4단계: Gemma 형식 파싱 (call:name{args})
+	// <tool_call> 태그 외부나 태그가 아예 없는 경우를 위해 cleanedContent에서 직접 추출한다.
+	finalContent := sb.String()
+	matches := reGemmaCall.FindAllStringSubmatchIndex(finalContent, -1)
+	if len(matches) > 0 {
+		var newCleaned strings.Builder
+		lastIdx := 0
+		for _, m := range matches {
+			newCleaned.WriteString(finalContent[lastIdx:m[0]])
+			
+			name := finalContent[m[2]:m[3]]
+			argsRaw := finalContent[m[4]:m[5]]
+			
+			if tc := parseGemmaToolCall(name, argsRaw); tc != nil {
+				tc.ID = fmt.Sprintf("inline_%d", atomic.AddInt64(&inlineIDSeq, 1))
+				calls = append(calls, *tc)
+			} else {
+				// 파싱 실패 시 원문 유지
+				newCleaned.WriteString(finalContent[m[0]:m[1]])
+			}
+			lastIdx = m[1]
+		}
+		newCleaned.WriteString(finalContent[lastIdx:])
+		finalContent = newCleaned.String()
+	}
+
+	return calls, strings.TrimSpace(finalContent)
+}
+
+// parseGemmaToolCall은 Gemma의 call:name{key:val, ...} 형식을 파싱한다.
+func parseGemmaToolCall(name, argsRaw string) *ToolCall {
+	if name == "" {
+		return nil
+	}
+
+	// 인자 파싱 (key:val 또는 key=val 형태)
+	args := make(map[string]string)
+	
+	// <escape> 태그 제거
+	argsRaw = strings.ReplaceAll(argsRaw, "<escape>", "")
+	
+	// 간단한 쉼표 분리 (쉼표가 값 내부에 있는 경우는 고려하지 않음 - Gemma 표준에 따라)
+	parts := strings.Split(argsRaw, ",")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		
+		// : 또는 = 을 기준으로 분리
+		kv := strings.FieldsFunc(part, func(r rune) bool {
+			return r == ':' || r == '='
+		})
+		
+		if len(kv) >= 2 {
+			key := strings.TrimSpace(kv[0])
+			val := strings.TrimSpace(strings.Join(kv[1:], ":")) // 이후의 콜론은 값의 일부로 취급
+			args[key] = val
+		}
+	}
+
+	argBytes, err := json.Marshal(args)
+	if err != nil {
+		return nil
+	}
+
+	return &ToolCall{
+		Type: "function",
+		Function: FunctionCall{
+			Name:      name,
+			Arguments: string(argBytes),
+		},
+	}
 }
 
 // parseQwenXMLToolCall?? Qwen3.5 27B揶쎛 ?곗뮆???롫뮉 XML-like tool call ????????뼓??뺣뼄.

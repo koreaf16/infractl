@@ -10,6 +10,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,17 +20,52 @@ import (
 	"github.com/yourorg/infractl/internal/executor"
 	"github.com/yourorg/infractl/internal/hooks"
 	"github.com/yourorg/infractl/internal/llm"
-	"github.com/yourorg/infractl/internal/pipeline"
 	"github.com/yourorg/infractl/internal/tools"
 )
+
+var exitCodePattern = regexp.MustCompile(`(?i)\[exit code:\s*([0-9]+)\]`)
+
+var recoveryHelperToolNames = map[string]struct{}{
+	"rag_search":        {},
+	"web_search":        {},
+	"web_fetch":         {},
+	"ask_user_question": {},
+	"verify_complete":   {},
+	"knowledge_add":     {},
+}
+
+func isRecoveryHelperTool(name string) bool {
+	_, ok := recoveryHelperToolNames[strings.ToLower(strings.TrimSpace(name))]
+	return ok
+}
 
 type indexedToolCall struct {
 	call          llm.ToolCall
 	originalIndex int
 }
 
+type toolExecutionRecord struct {
+	ToolCallID   string
+	ToolName     string
+	Target       string
+	Args         map[string]any
+	Success      bool
+	ExitCode     int
+	ErrorMessage string
+	Content      string
+	MetadataJSON string
+	Skipped      bool
+	HelperTool   bool
+}
+
 func (a *Agent) executeToolCalls(ctx context.Context, toolCalls []llm.ToolCall) []llm.Message {
+	results, _ := a.executeToolCallsDetailed(ctx, toolCalls)
+	return results
+}
+
+func (a *Agent) executeToolCallsDetailed(ctx context.Context, toolCalls []llm.ToolCall) ([]llm.Message, []toolExecutionRecord) {
 	results := make([]llm.Message, len(toolCalls))
+	records := make([]toolExecutionRecord, len(toolCalls))
 
 	readOnly, mutation := a.partitionToolCalls(toolCalls)
 	if len(readOnly) > 0 {
@@ -38,20 +76,40 @@ func (a *Agent) executeToolCalls(ctx context.Context, toolCalls []llm.ToolCall) 
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				result := a.executeSingleTool(ctx, item.call)
+				result, _, record := a.executeSingleToolDetailed(ctx, item.call)
 				mu.Lock()
 				results[item.originalIndex] = result
+				records[item.originalIndex] = record
 				mu.Unlock()
 			}()
 		}
 		wg.Wait()
 	}
+	mutationFailed := false
+	mutationFailReason := "a previous mutation tool call failed in this turn"
 	for _, item := range mutation {
-		results[item.originalIndex] = a.executeSingleTool(ctx, item.call)
+		if mutationFailed {
+			results[item.originalIndex] = skippedMutationToolMessage(item.call, mutationFailReason)
+			records[item.originalIndex] = toolExecutionRecord{
+				ToolCallID: item.call.ID,
+				ToolName:   item.call.Function.Name,
+				Success:    false,
+				Skipped:    true,
+				HelperTool: isRecoveryHelperTool(item.call.Function.Name),
+			}
+			continue
+		}
+		result, ok, record := a.executeSingleToolDetailed(ctx, item.call)
+		results[item.originalIndex] = result
+		records[item.originalIndex] = record
+		if !ok {
+			mutationFailed = true
+		}
 	}
 
-	return results
+	return results, records
 }
+
 func (a *Agent) partitionToolCalls(toolCalls []llm.ToolCall) (readOnly []indexedToolCall, mutation []indexedToolCall) {
 	for i, tc := range toolCalls {
 		item := indexedToolCall{call: tc, originalIndex: i}
@@ -70,7 +128,17 @@ func (a *Agent) partitionToolCalls(toolCalls []llm.ToolCall) (readOnly []indexed
 	}
 	return
 }
-func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Message {
+
+func skippedMutationToolMessage(tc llm.ToolCall, reason string) llm.Message {
+	content := fmt.Sprintf("Skipped: %s", reason)
+	return llm.Message{
+		Role:       llm.RoleTool,
+		ToolCallID: tc.ID,
+		Content:    content,
+	}
+}
+
+func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) (llm.Message, bool) {
 	tool, ok := a.registry.Get(tc.Function.Name)
 	if !ok {
 		slog.Warn("unknown tool called", "name", tc.Function.Name)
@@ -78,17 +146,17 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 			Role:       llm.RoleTool,
 			ToolCallID: tc.ID,
 			Content:    fmt.Sprintf("Error: unknown tool '%s'", tc.Function.Name),
-		}
+		}, false
 	}
 
-	var args map[string]interface{}
+	var args map[string]any
 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 		slog.Warn("tool argument parse error", "tool", tc.Function.Name, "err", err)
 		return llm.Message{
 			Role:       llm.RoleTool,
 			ToolCallID: tc.ID,
 			Content:    fmt.Sprintf("Error: failed to parse arguments: %s", err),
-		}
+		}, false
 	}
 	target := tools.ExtractTarget(args)
 	if tc.Function.Name == "checkpoint_rollback" {
@@ -99,30 +167,39 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 	if target == "" && a.connectorMgr != nil {
 		target = a.connectorMgr.DefaultTargetForTool(tc.Function.Name)
 	}
+	if target == "" {
+		inferredTarget, diagnostic := inferTargetFromPathSyntaxForRuntime(tc.Function.Name, args, a.activeServer, a.manager)
+		if diagnostic != "" {
+			return llm.Message{
+				Role:       llm.RoleTool,
+				ToolCallID: tc.ID,
+				Content:    diagnostic,
+			}, false
+		}
+		if inferredTarget != "" {
+			target = inferredTarget
+		}
+	}
 	if target == "" && a.activeServer != nil {
 		target = a.activeServer.Name
+	}
+	if tc.Function.Name == "web_search" {
+		normalizeWebSearchQueryByOS(ctx, args, target, a.activeServer, a.store)
 	}
 
 	exec, err := a.manager.Get(target)
 	if err != nil {
 		slog.Warn("executor not found", "target", target, "err", err)
 
-		// Claude CLI의 validateInput() 패턴:
-		// 타깃이 서버인지 서비스인지 LLM이 구분할 수 있도록
-		// 등록된 서버 목록 + 활성 서비스 목록 + 학습된 서비스 목록을 함께 반환.
-		// LLM이 이 정보를 바탕으로 ask_user_question을 호출하게 된다.
-
-		// 1) 등록된 SSH 서버 목록
-		var knownServers []string
+		var knownWorkspaces []string
 		if a.store != nil {
 			if servers, listErr := a.store.List(ctx); listErr == nil {
 				for _, srv := range servers {
-					knownServers = append(knownServers, srv.Name)
+					knownWorkspaces = append(knownWorkspaces, srv.Name)
 				}
 			}
 		}
 
-		// 2) 활성 커넥터(서비스) 목록 — Oracle SID, MySQL DB명 등
 		type svcEntry struct{ desc, server string }
 		var knownServices []svcEntry
 		if a.connectorMgr != nil {
@@ -134,7 +211,6 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 			}
 		}
 
-		// 3) 학습된 서비스 목록 (adaptiveLearner)
 		if a.adaptiveLearner != nil {
 			for _, sys := range a.adaptiveLearner.ListSystems(ctx) {
 				knownServices = append(knownServices, svcEntry{
@@ -146,42 +222,27 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 
 		var sb strings.Builder
 		if target == "" {
-			sb.WriteString("Error: no target server is set. Use server_focus or specify a target.")
+			sb.WriteString("Error: no target workspace is set. Use workspace_focus or specify a target.")
 		} else {
-			sb.WriteString(fmt.Sprintf("Error: '%s' is not a registered server name.\n", target))
-			if len(knownServers) > 0 {
-				sb.WriteString(fmt.Sprintf("  Registered servers (SSH targets): %s\n", strings.Join(knownServers, ", ")))
-			} else {
-				sb.WriteString("  No servers are registered.\n")
+			sb.WriteString(fmt.Sprintf("Error: %q is not a registered workspace name.\n", target))
+			if len(knownWorkspaces) > 0 {
+				sb.WriteString(fmt.Sprintf("  Registered workspaces (SSH targets): %s\n", strings.Join(knownWorkspaces, ", ")))
 			}
 			if len(knownServices) > 0 {
-				sb.WriteString("  Active/known services on those servers:\n")
+				sb.WriteString("  Active/known services on those workspaces:\n")
 				for _, svc := range knownServices {
-					sb.WriteString(fmt.Sprintf("    - %s  (on server: %s)\n", svc.desc, svc.server))
+					sb.WriteString(fmt.Sprintf("    - %s  (on workspace: %s)\n", svc.desc, svc.server))
 				}
-				sb.WriteString("  NOTE: If the user mentioned a service/DB instance name (e.g. Oracle SID, MySQL database),\n")
-				sb.WriteString("        it is NOT a server — it runs ON a registered server above.\n")
 			}
-			sb.WriteString("Call ask_user_question to clarify:\n")
-			sb.WriteString("  (a) which registered SERVER the user wants to connect to, OR\n")
-			sb.WriteString("  (b) which SERVICE/INSTANCE on an existing server they meant.\n")
 		}
 		return llm.Message{
 			Role:       llm.RoleTool,
 			ToolCallID: tc.ID,
 			Content:    sb.String(),
-		}
+		}, false
 	}
 	if normalizedTarget := exec.Target(); normalizedTarget != "" {
 		target = normalizedTarget
-	}
-	if a.hooksMgr != nil {
-		a.hooksMgr.Fire(ctx, hooks.HookContext{
-			Event:    hooks.EventBeforeExecute,
-			ToolName: tc.Function.Name,
-			Server:   target,
-			Args:     argsToStrings(args),
-		})
 	}
 	if a.checkpointMgr != nil && !tool.IsReadOnly() {
 		a.checkpointMgr.CreateFromArgs(ctx, target, tc.Function.Name, args)
@@ -189,74 +250,127 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 	if a.idleHandler != nil {
 		exec = wrapWithIdleDetect(exec, a.idleHandler, tc.Function.Name, target)
 	}
-	if st, ok := tool.(*tools.ShellExecTool); ok {
-		toolID := tc.ID
-		st.OutputCb = func(line string) {
-			a.handler.OnToolOutput(toolID, line)
-		}
 
-		// check for background execution
-		if isBackground, ok := args["is_background"].(bool); ok && isBackground && a.bgManager != nil {
-			jobID := a.bgManager.Submit(ctx, fmt.Sprintf("shell_exec: %s", tc.Function.Arguments), func(ctx context.Context) (string, error) {
-				return tool.Execute(ctx, args, exec)
-			})
-			return llm.Message{
-				Role:       llm.RoleTool,
-				ToolCallID: tc.ID,
-				Content:    fmt.Sprintf("Command started in background as task #%d", jobID),
+	a.handler.OnToolStart(tc.ID, tc.Function.Name, target, args)
+
+	// TaskGuard: Forbidden 패턴 및 서버 불일치 검사
+	if a.taskMgr != nil {
+		gr := a.taskMgr.Guardrails()
+		cur := a.taskMgr.Current()
+		if gr != nil && cur != nil {
+			guardResult := evaluateTaskGuard(gr, cur, tc.Function.Name, args, target)
+			if guardResult.Blocked {
+				notifyGuardResult(a.handler, tc.Function.Name, guardResult)
+				a.handler.OnToolEnd(tc.ID, tc.Function.Name, "[TaskGuard 차단] "+guardResult.Reason, 0, false, "")
+				return llm.Message{
+					Role:       llm.RoleTool,
+					ToolCallID: tc.ID,
+					Content:    "[TaskGuard 차단] " + guardResult.Reason,
+				}, false
+			}
+			if guardResult.Warned {
+				notifyGuardResult(a.handler, tc.Function.Name, guardResult)
+				args = injectGuardWarnToArgs(args, guardResult.Reason)
 			}
 		}
 	}
-	if ct, ok := tool.(interface{ SetOutputCb(func(string)) }); ok {
-		ct.SetOutputCb(func(line string) {
-			a.handler.OnToolOutput(tc.ID, line)
+
+	// check for explicit background execution (is_background=true)
+	if isBackground, ok := args["is_background"].(bool); ok && isBackground && a.bgManager != nil {
+		jobID := a.bgManager.Submit(ctx, fmt.Sprintf("shell_exec: %s", tc.Function.Arguments), func(ctx context.Context) (string, error) {
+			outcome, err := tool.Execute(ctx, args, exec)
+			if err != nil {
+				return "", err
+			}
+			return outcome.Content, nil
 		})
+		return llm.Message{
+			Role:       llm.RoleTool,
+			ToolCallID: tc.ID,
+			Content:    fmt.Sprintf("Command started in background as task #%d", jobID),
+		}, true
 	}
-	if ft, ok := tool.(*tools.FileTransferTool); ok {
-		toolID := tc.ID
-		ft.OutputCb = func(line string) {
-			a.handler.OnToolOutput(toolID, line)
-		}
-	}
-	if wf, ok := tool.(*tools.WebFetchTool); ok {
-		toolID := tc.ID
-		wf.OutputCb = func(line string) {
-			a.handler.OnToolOutput(toolID, line)
-		}
-	}
-	if aq, ok := tool.(*tools.AskUserQuestionTool); ok && a.questionHandler != nil {
-		aq.QuestionCb = func(ctx context.Context, req tools.QuestionRequest) (tools.QuestionResponse, error) {
-			return a.questionHandler.RequestQuestion(ctx, req)
-		}
-		aq.FormCb = func(ctx context.Context, req tools.FormRequest) (tools.FormResponse, error) {
-			return a.questionHandler.RequestForm(ctx, req)
+
+	// UI 및 출력 콜백을 Context에 주입 (Thread-safe)
+	toolCtx := tools.WithOutputCallback(ctx, func(line string) {
+		a.handler.OnToolOutput(tc.ID, line)
+	})
+	if a.questionHandler != nil {
+		if a.yoroMode {
+			toolCtx = tools.WithUICallbacks(toolCtx,
+				func(ctx context.Context, req tools.QuestionRequest) (tools.QuestionResponse, error) {
+					return tools.AutoQuestionResponse(req), nil
+				},
+				func(ctx context.Context, req tools.FormRequest) (tools.FormResponse, error) {
+					return tools.AutoFormResponse(req), nil
+				},
+			)
+		} else {
+			toolCtx = tools.WithUICallbacks(toolCtx,
+				func(ctx context.Context, req tools.QuestionRequest) (tools.QuestionResponse, error) {
+					return a.questionHandler.RequestQuestion(ctx, req)
+				},
+				func(ctx context.Context, req tools.FormRequest) (tools.FormResponse, error) {
+					return a.questionHandler.RequestForm(ctx, req)
+				},
+			)
 		}
 	}
 
-	a.handler.OnToolStart(tc.ID, tc.Function.Name, target, args)
 	start := time.Now()
+	verificationTargetID := ""
+	if tc.Function.Name == "verify_complete" {
+		var resolveErr error
+		verificationTargetID, _, resolveErr = a.resolveVerificationTarget(args)
+		if resolveErr != nil {
+			content := fmt.Sprintf("Error: %s", resolveErr)
+			a.handler.OnToolEnd(tc.ID, tc.Function.Name, content, 0, false, "")
+			logID := a.recordExecLog(ctx, execContext{
+				toolName: tc.Function.Name,
+				target:   target,
+				args:     args,
+				errMsg:   resolveErr.Error(),
+				exitCode: 1,
+				success:  false,
+			})
+			if a.taskMemoryLearner != nil && logID > 0 {
+				a.taskMemoryLearner.TriggerRecord(ctx, logID)
+			}
+			return llm.Message{
+				Role:       llm.RoleTool,
+				ToolCallID: tc.ID,
+				Content:    content,
+			}, false
+		}
+		args["tool_id"] = verificationTargetID
+	}
 
-	outcome, err := executeToolWithOutcome(ctx, tool, args, exec)
+	// Phase F: auto-promotion — promotionThreshold 이내 완료 안 되면 background 전환
+	var outcome tools.ToolOutcome
+	if a.promotionThreshold > 0 && promotableTools[tc.Function.Name] {
+		pr := tryPromotion(toolCtx, a.bgManager, tool, args, exec,
+			fmt.Sprintf("shell_exec: %s", tc.Function.Arguments), a.promotionThreshold)
+		if pr.promoted {
+			return promotionMessage(tc, pr.jobID), true
+		}
+		outcome = pr.outcome
+		err = pr.err
+	} else {
+		outcome, err = executeToolWithOutcome(toolCtx, tool, args, exec)
+	}
 	duration := time.Since(start)
 
 	if err != nil {
-		if a.hooksMgr != nil {
-			a.hooksMgr.Fire(ctx, hooks.HookContext{
-				Event:    hooks.EventOnError,
-				ToolName: tc.Function.Name,
-				Server:   target,
-				Error:    err.Error(),
-			})
-		}
-		a.handler.OnToolEnd(tc.ID, tc.Function.Name, err.Error(), duration, false)
+		a.handler.OnToolEnd(tc.ID, tc.Function.Name, err.Error(), duration, false, "")
 		logID := a.recordExecLog(ctx, execContext{
-			toolName: tc.Function.Name,
-			target:   target,
-			args:     args,
-			errMsg:   err.Error(),
-			exitCode: 1,
-			duration: duration,
-			success:  false,
+			toolName:     tc.Function.Name,
+			target:       target,
+			args:         args,
+			errMsg:       err.Error(),
+			exitCode:     1,
+			duration:     duration,
+			success:      false,
+			metadataJSON: "",
 		})
 		if a.taskMemoryLearner != nil && logID > 0 {
 			a.taskMemoryLearner.TriggerRecord(ctx, logID)
@@ -266,6 +380,33 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 			Role:       llm.RoleTool,
 			ToolCallID: tc.ID,
 			Content:    content,
+		}, false
+	}
+
+	if tc.Function.Name == "shell_exec" {
+		if meta, ok := tools.ParseTaskProgressMetadata(outcome.MetadataJSON); ok {
+			a.rememberTaskProgress(tc.ID, meta)
+		}
+	}
+
+	if tc.Function.Name == "verify_complete" && outcome.Success {
+		summary, _ := args["summary"].(string)
+		evidence, _ := args["verification_evidence"].(string)
+		updatedMeta, verifyErr := a.applyVerification(verificationTargetID, tc.ID, summary, evidence)
+		if verifyErr != nil {
+			outcome = tools.ToolOutcome{
+				Content:      fmt.Sprintf("Error: %s", verifyErr),
+				Success:      false,
+				ExitCode:     1,
+				ErrorMessage: verifyErr.Error(),
+			}
+		} else {
+			label := strings.TrimSpace(updatedMeta.TaskSummary)
+			if label == "" {
+				label = "shell task"
+			}
+			outcome.MetadataJSON = updatedMeta.JSON()
+			outcome.Content = fmt.Sprintf("Verification complete: %s\nSummary: %s\nEvidence: %s", label, summary, evidence)
 		}
 	}
 
@@ -275,85 +416,154 @@ func (a *Agent) executeSingleTool(ctx context.Context, tc llm.ToolCall) llm.Mess
 		if strings.TrimSpace(failMsg) == "" {
 			failMsg = fmt.Sprintf("tool %s reported failure", tc.Function.Name)
 		}
-		a.handler.OnToolEnd(tc.ID, tc.Function.Name, resultStr, duration, false)
+		a.handler.OnToolEnd(tc.ID, tc.Function.Name, resultStr, duration, false, outcome.MetadataJSON)
 		logID := a.recordExecLog(ctx, execContext{
-			toolName: tc.Function.Name,
-			target:   target,
-			args:     args,
-			output:   resultStr,
-			errMsg:   failMsg,
-			exitCode: outcome.ExitCode,
-			duration: duration,
-			success:  false,
+			toolName:     tc.Function.Name,
+			target:       target,
+			args:         args,
+			output:       resultStr,
+			errMsg:       failMsg,
+			exitCode:     outcome.ExitCode,
+			duration:     duration,
+			success:      false,
+			metadataJSON: outcome.MetadataJSON,
 		})
 		if a.taskMemoryLearner != nil && logID > 0 {
 			a.taskMemoryLearner.TriggerRecord(ctx, logID)
 		}
 	} else {
-		a.handler.OnToolEnd(tc.ID, tc.Function.Name, resultStr, duration, true)
+		a.handler.OnToolEnd(tc.ID, tc.Function.Name, resultStr, duration, true, outcome.MetadataJSON)
 		logID := a.recordExecLog(ctx, execContext{
-			toolName: tc.Function.Name,
-			target:   target,
-			args:     args,
-			output:   resultStr,
-			exitCode: outcome.ExitCode,
-			duration: duration,
-			success:  true,
+			toolName:     tc.Function.Name,
+			target:       target,
+			args:         args,
+			output:       resultStr,
+			exitCode:     0,
+			duration:     duration,
+			success:      true,
+			metadataJSON: outcome.MetadataJSON,
 		})
-		if a.knowledgeLearner != nil && logID > 0 {
-			a.knowledgeLearner.TriggerLearn(ctx, logID)
-		}
 		if a.taskMemoryLearner != nil && logID > 0 {
 			a.taskMemoryLearner.TriggerRecord(ctx, logID)
 		}
 	}
-	if a.hooksMgr != nil {
-		a.hooksMgr.Fire(ctx, hooks.HookContext{
-			Event:    hooks.EventAfterExecute,
-			ToolName: tc.Function.Name,
-			Server:   target,
-			Output:   resultStr,
+
+	// PostToolUse hook 발화 (Phase A — 관측용, 차단 없음)
+	if a.hookRunner != nil {
+		a.hookRunner.RunPostToolUse(ctx, hooks.HookInput{
+			Tool:   tc.Function.Name,
+			Input:  args,
+			Output: map[string]interface{}{"result": resultStr, "success": outcome.Success},
+			Session: hooks.HookSession{
+				ID: fmt.Sprintf("%d", a.currentSessionID),
+			},
 		})
-	}
-	// ?�트 ?�캔 결과??well-known ?�트 주석 추�? (LLM 추측 기반 ?�별 방�?)
-	resultStr = annotatePortOutput(tc.Function.Name, resultStr)
-	// ?�구�??�기 ?�한 ?�용: head + tail 보존, CLI ?�이�??�거
-	limit := toolResultLimit(tc.Function.Name)
-	contentStr := pipeline.NewPreprocessor(pipeline.WithMaxLLMBytes(limit)).Process(resultStr)
-	if len(contentStr) > limit {
-		contentStr = SaveLargeOutput(contentStr)
 	}
 
 	return llm.Message{
 		Role:       llm.RoleTool,
 		ToolCallID: tc.ID,
-		Content:    contentStr,
-	}
+		Content:    resultStr,
+	}, outcome.Success
 }
-func argsToStrings(args map[string]interface{}) map[string]string {
-	result := make(map[string]string, len(args))
-	for k, v := range args {
-		result[k] = fmt.Sprintf("%v", v)
+
+func (a *Agent) executeSingleToolDetailed(ctx context.Context, tc llm.ToolCall) (llm.Message, bool, toolExecutionRecord) {
+	msg, ok := a.executeSingleTool(ctx, tc)
+
+	record := toolExecutionRecord{
+		ToolCallID: tc.ID,
+		ToolName:   tc.Function.Name,
+		Success:    ok,
+		Content:    msg.Content,
+		HelperTool: isRecoveryHelperTool(tc.Function.Name),
 	}
-	return result
+
+	if args := parseArgsBestEffort(tc.Function.Arguments); args != nil {
+		record.Args = args
+		record.Target = a.resolveTargetForRecord(tc.Function.Name, args)
+	}
+
+	if ok {
+		record.ExitCode = 0
+		return msg, ok, record
+	}
+
+	if code, found := extractExitCode(msg.Content); found {
+		record.ExitCode = code
+	} else {
+		record.ExitCode = 1
+	}
+	record.ErrorMessage = inferErrorMessage(msg.Content)
+	return msg, ok, record
+}
+
+func parseArgsBestEffort(raw string) map[string]any {
+	var args map[string]any
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		return nil
+	}
+	return copyArgs(args)
+}
+
+func (a *Agent) resolveTargetForRecord(toolName string, args map[string]any) string {
+	target := tools.ExtractTarget(args)
+	if toolName == "checkpoint_rollback" {
+		if rollbackServer, ok := args["server"].(string); ok && strings.TrimSpace(rollbackServer) != "" {
+			target = rollbackServer
+		}
+	}
+	if target == "" && a.connectorMgr != nil {
+		target = a.connectorMgr.DefaultTargetForTool(toolName)
+	}
+	if target == "" {
+		if inferredTarget, _ := inferTargetFromPathSyntaxForRuntime(toolName, args, a.activeServer, a.manager); inferredTarget != "" {
+			target = inferredTarget
+		}
+	}
+	if target == "" && a.activeServer != nil {
+		target = a.activeServer.Name
+	}
+	return strings.TrimSpace(target)
+}
+
+func extractExitCode(content string) (int, bool) {
+	m := exitCodePattern.FindStringSubmatch(content)
+	if len(m) != 2 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(m[1]))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+func inferErrorMessage(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return "tool execution failed"
+	}
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "error:") {
+		return strings.TrimSpace(trimmed[len("error:"):])
+	}
+	return trimmed
+}
+
+func copyArgs(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]any, len(src))
+	maps.Copy(dst, src)
+	return dst
 }
 
 func executeToolWithOutcome(
 	ctx context.Context,
 	tool tools.Tool,
-	args map[string]interface{},
+	args map[string]any,
 	exec executor.Executor,
 ) (tools.ToolOutcome, error) {
-	if dt, ok := tool.(tools.DetailedTool); ok {
-		return dt.ExecuteDetailed(ctx, args, exec)
-	}
-	content, err := tool.Execute(ctx, args, exec)
-	if err != nil {
-		return tools.ToolOutcome{}, err
-	}
-	return tools.ToolOutcome{
-		Content:  content,
-		Success:  true,
-		ExitCode: 0,
-	}, nil
+	return tool.Execute(ctx, args, exec)
 }

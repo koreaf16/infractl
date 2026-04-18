@@ -1,3 +1,8 @@
+// Package tools
+// File: shell_exec.go
+// Description: shell_exec LLM 도구 정의 및 실행 오케스트레이션
+// Responsibility: 파라미터 파싱 → 권한 계획 수립 → 실행 경로 분기 → 결과 렌더링
+
 package tools
 
 import (
@@ -14,13 +19,24 @@ import (
 type ShellExecTool struct {
 	PrivilegeCache *privilege.Cache
 	PromptHandler  privilege.PromptHandler
-	OutputCb       func(string)
+	// IsYoloMode, when non-nil, reports whether YOLO mode is currently active.
+	// In YOLO mode pre-flight warnings are silently attached to output without
+	// asking the user for confirmation.
+	IsYoloMode func() bool
+}
+
+type privilegeExecutionPlan struct {
+	normalized        NormalizedPrivilegeCommand
+	rawInlineApproved bool
+	inline            *embeddedPrivilegeSpec
 }
 
 func (t *ShellExecTool) Name() string { return "shell_exec" }
 
 func (t *ShellExecTool) Description() string {
-	return "Execute shell commands on localhost or remote SSH targets. " +
+	return "Execute shell commands in the current local workspace or a registered SSH workspace. " +
+		"`localhost` is the controller machine running infractl and may be Windows, Linux, or macOS. " +
+		"Use command syntax that matches the selected target platform; use PowerShell for Windows paths such as C:\\.... " +
 		"Prefer non-interactive flows first (`sudo -n`, `runuser -l`, `bash -lc`) and only prompt for passwords when required. " +
 		"Avoid long-lived interactive shells or database REPLs unless the user explicitly asks to keep the session open. " +
 		"Use this when no dedicated tool exists for the task."
@@ -39,7 +55,7 @@ func (t *ShellExecTool) Parameters() map[string]interface{} {
 			},
 			"target": map[string]interface{}{
 				"type":        "string",
-				"description": "Target server. Omit for localhost or active server.",
+				"description": "Workspace alias. Omit to use the current active workspace, or local workspace when none is active.",
 			},
 			"description": map[string]interface{}{
 				"type":        "string",
@@ -58,17 +74,17 @@ func (t *ShellExecTool) Parameters() map[string]interface{} {
 				"type":        "string",
 				"description": "Optional privilege target user (default root)",
 			},
+			"is_background": map[string]interface{}{
+				"type":        "boolean",
+				"description": "Set to true to run the command in the background.",
+			},
 		},
 		"required": []string{"command"},
 	}
 }
 
-func (t *ShellExecTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (string, error) {
-	outcome, err := t.ExecuteDetailed(ctx, args, exec)
-	if err != nil {
-		return "", err
-	}
-	return outcome.Content, nil
+func (t *ShellExecTool) Execute(ctx context.Context, args map[string]interface{}, exec executor.Executor) (ToolOutcome, error) {
+	return t.ExecuteDetailed(ctx, args, exec)
 }
 
 func (t *ShellExecTool) ExecuteDetailed(ctx context.Context, args map[string]interface{}, exec executor.Executor) (ToolOutcome, error) {
@@ -77,16 +93,72 @@ func (t *ShellExecTool) ExecuteDetailed(ctx context.Context, args map[string]int
 		return ToolOutcome{}, err
 	}
 
-	result, execErr := t.runCommand(ctx, exec, cmd, args)
+	// SCP 명령을 localhost에서 실행하면 SSH 비밀번호 프롬프트가 /dev/tty로 출력돼
+	// idle handler가 감지하지 못하고 무한루프에 빠진다.
+	// file_transfer 도구는 이미 인증된 SSH 연결을 재사용하므로 비밀번호 프롬프트가 없다.
+	target := strings.TrimSpace(exec.Target())
+	if isLocalSCPCommand(cmd) && (target == "" || target == "localhost") {
+		return ToolOutcome{
+			Content: "Error: scp 명령을 shell_exec로 실행하면 SSH 비밀번호 프롬프트가 TTY로 출력되어 스트리밍 박스가 멈추고 타임아웃이 발생합니다.\n" +
+				"file_transfer 도구를 사용하세요 — 이미 인증된 SSH 연결을 SFTP로 재사용하여 비밀번호 프롬프트 없이 전송합니다.\n\n" +
+				"기본 전송:\n" +
+				"  {\"action\": \"upload\", \"local_path\": \"<로컬경로>\", \"remote_path\": \"<원격경로>\", \"target\": \"<서버명>\"}\n\n" +
+				"다른 유저 홈(예: oracle)에 업로드하는 경우 두 단계로 처리하세요:\n" +
+				"  1단계: file_transfer로 /tmp에 업로드 (target=<서버명>, remote_path=/tmp/<파일명>)\n" +
+				"  2단계: shell_exec로 이동 (become_method=sudo, become_user=oracle, command=\"mv /tmp/<파일명> /home/oracle/\")",
+			Success:      false,
+			ExitCode:     1,
+			ErrorMessage: "scp via shell_exec is not supported; use file_transfer tool instead",
+		}, nil
+	}
+
+	becomeMethodArg, _ := argString(args, "become_method", false)
+	becomeUserArg, _ := argString(args, "become_user", false)
+	privPlan, shortCircuit, err := t.preparePrivilegeExecution(ctx, cmd, becomeMethodArg, becomeUserArg)
+	if err != nil {
+		return ToolOutcome{}, err
+	}
+	if shortCircuit != nil {
+		return *shortCircuit, nil
+	}
+	normalized := privPlan.normalized
+	cmd = normalized.Command
+
+	result, execErr := t.runCommand(ctx, exec, cmd, normalized.BecomeMethod, normalized.BecomeUser, privPlan.inline)
 	if execErr != nil {
 		msg := fmt.Sprintf("execution error: %s", execErr)
 		return ToolOutcome{Content: msg, Success: false, ExitCode: 1, ErrorMessage: msg}, nil
 	}
 
 	out := renderExecResult(exec, result)
-	success := result.ExitCode == 0
+	if privPlan.rawInlineApproved {
+		out = "[Security Override]\n" + out
+	}
+
+	// Permission denied 힌트 추가
+	if result.ExitCode != 0 && (strings.Contains(result.Stderr, "Permission denied") || strings.Contains(result.Stdout, "Permission denied")) {
+		hint := "\n\n[InfraCtl 권한 힌트]\n" +
+			"현재 사용자 권한으로 해당 작업을 수행할 수 없습니다.\n" +
+			"대안:\n" +
+			"  - 'become_user' 파라미터에 대상 유저(예: oracle)를 지정하세요.\n" +
+			"  - 'become_method' 파라미터에 'sudo'를 지정하세요."
+		out += hint
+	}
+
+	if hint := localWindowsShellHint(exec, result); hint != "" {
+		out += hint
+	}
+
+	success, successNote := shellExecSucceeded(cmd, result)
+	if successNote != "" {
+		out += "\n\n" + successNote
+	}
+
+	meta := buildShellTaskProgressMetadataWithSuccess(args, cmd, result, success)
 	errMsg := strings.TrimSpace(result.Stderr)
-	if !success && errMsg == "" {
+	if success {
+		errMsg = ""
+	} else if errMsg == "" {
 		errMsg = fmt.Sprintf("command exited with code %d", result.ExitCode)
 	}
 
@@ -95,137 +167,23 @@ func (t *ShellExecTool) ExecuteDetailed(ctx context.Context, args map[string]int
 		Success:      success,
 		ExitCode:     result.ExitCode,
 		ErrorMessage: errMsg,
+		MetadataJSON: meta.JSON(),
 	}, nil
 }
 
-func (t *ShellExecTool) runCommand(ctx context.Context, exec executor.Executor, cmd string, args map[string]interface{}) (executor.ExecResult, error) {
-	becomeMethod, _ := argString(args, "become_method", false)
-	becomeUser, _ := argString(args, "become_user", false)
-
-	if becomeMethod != "" {
-		if result, ok := executeWithAcquiredPrivilege(ctx, exec, cmd, becomeUser); ok {
-			return result, nil
-		}
-		if result, ok, err := executeWithBecome(ctx, exec, cmd, becomeMethod, becomeUser, t.PrivilegeCache, t.PromptHandler, t.OutputCb); ok || err != nil {
-			return result, err
-		}
+func localWindowsShellHint(exec executor.Executor, result executor.ExecResult) string {
+	if executor.CommandPlatform(exec) != executor.PlatformWindows {
+		return ""
 	}
-
-	result, err := t.executeDirect(ctx, exec, cmd)
-	if err != nil {
-		return result, err
+	combined := strings.ToLower(result.Stdout + "\n" + result.Stderr)
+	if !strings.Contains(combined, "sh") && !strings.Contains(combined, "bash") {
+		return ""
 	}
-
-	if becomeMethod == "" && isPermissionFailure(result, nil) {
-		if retried, ok := executePlainViaAcquiredRoot(ctx, exec, cmd); ok {
-			return retried, nil
-		}
+	if strings.Contains(combined, "not recognized") ||
+		strings.Contains(combined, "not found") ||
+		strings.Contains(combined, "cannot find") ||
+		strings.Contains(combined, "is not the name of") {
+		return "\n\n[Hint] This target is Windows. Use PowerShell cmdlets and Windows paths instead of `sh`, `bash`, or POSIX-only commands."
 	}
-
-	return result, nil
-}
-
-func (t *ShellExecTool) executeDirect(ctx context.Context, exec executor.Executor, cmd string) (executor.ExecResult, error) {
-	if se, ok := exec.(executor.StreamExecutor); ok {
-		return se.ExecuteStream(ctx, cmd, t.OutputCb)
-	}
-	return exec.Execute(ctx, cmd)
-}
-
-func executeWithBecome(
-	ctx context.Context,
-	exec executor.Executor,
-	command string,
-	rawMethod string,
-	user string,
-	cache *privilege.Cache,
-	prompter privilege.PromptHandler,
-	onLine func(string),
-) (executor.ExecResult, bool, error) {
-	method, ok := privilege.ParseMethod(rawMethod)
-	if !ok || method == privilege.MethodNone {
-		return executor.ExecResult{}, false, nil
-	}
-	if executor.CommandPlatform(exec) == executor.PlatformWindows {
-		return executor.ExecResult{}, false, fmt.Errorf("privilege escalation is not supported on Windows targets")
-	}
-
-	plan, err := privilege.BuildPlan(method, user, command)
-	if err != nil {
-		return executor.ExecResult{}, true, err
-	}
-
-	// 1) non-interactive preflight for sudo
-	if method == privilege.MethodSudo && plan.ValidateCommand != "" {
-		validate, err := exec.Execute(ctx, plan.ValidateCommand)
-		if err == nil && privilege.ClassifyValidateResult(validate) == privilege.ValidateAllowed {
-			run, runErr := exec.Execute(ctx, plan.NonInteractiveRun)
-			return run, true, runErr
-		}
-	}
-
-	ie, ok := exec.(executor.InteractiveExecutor)
-	if !ok {
-		if method == privilege.MethodSudo && plan.NonInteractiveRun != "" {
-			run, runErr := exec.Execute(ctx, plan.NonInteractiveRun)
-			return run, true, runErr
-		}
-		return executor.ExecResult{}, true, fmt.Errorf("interactive execution is required for %s", method)
-	}
-
-	target := exec.Target()
-	if strings.TrimSpace(target) == "" {
-		target = "localhost"
-	}
-	pw, _ := cache.Get(target, method, plan.User)
-	if strings.TrimSpace(pw) == "" {
-		if prompter == nil {
-			return executor.ExecResult{}, true, fmt.Errorf("no privilege prompt handler available")
-		}
-		resp, err := prompter.RequestPassword(ctx, privilege.PromptRequest{Target: target, Method: method, User: plan.User})
-		if err != nil {
-			return executor.ExecResult{}, true, err
-		}
-		if resp.Abort {
-			return executor.ExecResult{}, true, fmt.Errorf("privilege prompt aborted")
-		}
-		pw = resp.Password
-	}
-
-	var chunks []string
-	run, err := ie.ExecuteInteractive(ctx, executor.InteractiveSpec{Command: plan.InteractiveRun, RequirePTY: plan.RequirePTY}, func(chunk string) {
-		chunks = append(chunks, chunk)
-		if onLine != nil && strings.TrimSpace(chunk) != "" {
-			onLine(strings.TrimSpace(chunk))
-		}
-		if plan.PromptToken != "" && strings.Contains(chunk, plan.PromptToken) {
-			_ = ie.InjectStdin(pw)
-		}
-	})
-	if err != nil {
-		return executor.ExecResult{}, true, err
-	}
-
-	combined := strings.Join(chunks, "")
-	run.Stdout = privilege.SanitizeOutput(method, combined, plan.PromptToken)
-	if run.ExitCode == 0 {
-		cache.Set(target, method, plan.User, pw)
-	}
-	return run, true, nil
-}
-
-func renderExecResult(exec executor.Executor, result executor.ExecResult) string {
-	lines := []string{
-		fmt.Sprintf("Execution Context: %s", executor.ExecutionContextLabel(exec)),
-		fmt.Sprintf("[Exit Code: %d]", result.ExitCode),
-	}
-	stdout := strings.TrimSpace(result.Stdout)
-	stderr := strings.TrimSpace(result.Stderr)
-	if stdout != "" {
-		lines = append(lines, stdout)
-	}
-	if stderr != "" {
-		lines = append(lines, "[stderr]", stderr)
-	}
-	return strings.TrimSpace(strings.Join(lines, "\n"))
+	return ""
 }
