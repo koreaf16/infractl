@@ -17,6 +17,10 @@
 # Build artifacts
 .build/
 infractl.exe
+bin/
+
+# Go cache
+.gocache/
 
 # IDE/Tooling
 .gemini/
@@ -30,5 +34,6 @@ Thumbs.db
 
 # Backup files
 *.backup
+*.go.[0-9]*
 ui1.md
 ui3.md

@@ -1,8 +1,0 @@
-./embedding.go
-./local_search.go
-./manager.go
-./memory_service.go
-./query_builders.go
-./reranker.go
-./search.go
-./vector.go

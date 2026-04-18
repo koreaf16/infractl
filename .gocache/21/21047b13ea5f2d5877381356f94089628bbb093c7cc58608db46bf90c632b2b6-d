@@ -1,5 +1,0 @@
-./dbclean.go
-./pipeline.go
-./preprocessor.go
-./processors.go
-./truncate.go
